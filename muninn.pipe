@@ -6,6 +6,7 @@ import "modules/telegram.pipe" as tel
 import "modules/memory.pipe" as mem
 import "modules/swarm.pipe" as grm
 import "modules/executor.pipe" as exe
+import "modules/web.pipe" as web
 
 --! Lädt KEY=VALUE-Zeilen aus einer .env-Datei in eine Map.
 fn load_env path
@@ -48,16 +49,16 @@ fn is_allowed cid allowed
 
 --! Begrüßungstext.
 fn greeting_text _
-    "Muninn ist online.\n\nDu kannst mir etwas sagen, das ich mir merken soll (z.B. \"Merke dir, dass ich Tee mag\"), mir eine Aufgabe geben (z.B. \"Erledige das Reporting\") oder mir eine Frage stellen.\n\n/help für alle Befehle."
+    "Muninn ist online.\n\nDu kannst mir etwas sagen, das ich mir merken soll (z.B. \"Merke dir, dass ich Tee mag\"), mir eine Aufgabe geben (z.B. \"Erledige das Reporting\"), eine Frage stellen oder im Web suchen (z.B. \"/search Odin nordische Mythologie\").\n\n/help für alle Befehle."
 
 --! Hilfetext.
 fn help_text _
-    "/start   — Begrüßung\n/help    — diese Hilfe\n/status  — Zustand von Muninn\n/list    — deine wichtigsten Erinnerungen"
+    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)"
 
 --! Status-Text (Statistiken aus der Seele).
 fn status_text dbh
     n: mem.memory_count dbh
-    "Muninn-Status:\n• Erinnerungen: " ++ (to_str n) ++ "\n• Provider: DeepSeek\n• Gremium: 4 Agenten\n• Executor: aktiv"
+    "Muninn-Status:\n• Erinnerungen: " ++ (to_str n) ++ "\n• Provider: DeepSeek\n• Gremium: 4 Agenten (mit Web-Recherche)\n• Executor: aktiv\n• Web: DDG + Wikipedia"
 
 --! Liste der wichtigsten Erinnerungen.
 fn list_text dbh
@@ -105,6 +106,13 @@ fn handle_message token cid text dbh
     if low == "/list"
         tel.tel_send_message token cid (list_text dbh)
         return nil
+    if low == "/search"
+        tel.tel_send_message token cid "Bitte gib einen Suchbegriff an: /search <begriff>"
+        return nil
+    sq: search_query low tnorm
+    if sq != ""
+        do_search token cid sq
+        return nil
     kind: mem.classify_input tnorm
     mem.log_event dbh (to_str cid) tnorm kind
     if kind == "permanent"
@@ -137,9 +145,90 @@ fn handle_message token cid text dbh
             else
                 tel.tel_send_message token cid "Dazu fällt mir noch nichts ein."
         else
-            tel.tel_send_message token cid answer
+            kb: []
+            row: []
+            push row (tel.tel_button "💾 Merken" "save")
+            push row (tel.tel_button "🔍 Vertiefen" "more")
+            push kb row
+            tel.tel_send_message_kb token cid (shorten answer) kb
         return nil
     tel.tel_send_message token cid ("Verstanden. (" ++ kind ++ ")")
+
+--! Kürzt Text auf Telegram-Grenze (4096 Zeichen).
+fn shorten s
+    if s == nil
+        return ""
+    if (len s) > 4000
+        (substring s 0 4000) ++ "…"
+    else
+        s
+
+--! Führt eine Web-Recherche aus und antwortet mit Quellen + Buttons.
+fn do_search token cid query
+    tel.tel_send_chat_action token cid "typing"
+    rr: web.research query
+    ctx: get rr "context"
+    srcs: get rr "sources"
+    if ctx == nil || ctx == ""
+        tel.tel_send_message token cid "Keine brauchbaren Ergebnisse gefunden."
+        return nil
+    answer: ""
+    try
+        answer: ai_chat "Du bist ein präziser Recherche-Assistent. Beantworte die Frage anhand des recherchierten Kontexts, kurz und faktentreu." ("Frage: " ++ query ++ "\n\nKontext:\n" ++ ctx)
+    catch
+        answer: ctx
+    src_text: ""
+    for u in srcs
+        src_text: src_text ++ "\n" ++ u
+    full: (shorten answer) ++ "\n— Quellen:" ++ (shorten src_text)
+    kb: []
+    row: []
+    push row (tel.tel_button "💾 Merken" "save")
+    push kb row
+    tel.tel_send_message_kb token cid (shorten full) kb
+    nil
+
+--! Erkennt eine Such-Intention und liefert den Suchbegriff (oder "").
+fn search_query low tnorm
+    if (len low) >= 8
+        if (substring low 0 8) == "/search "
+            return (trim (substring tnorm 8 (len tnorm)))
+    if (len low) >= 6
+        if (substring low 0 6) == "suche "
+            return (trim (substring tnorm 6 (len tnorm)))
+    if (len low) >= 12
+        if (substring low 0 12) == "recherchiere "
+            return (trim (substring tnorm 12 (len tnorm)))
+    if (len low) >= 6
+        if (substring low 0 6) == "finde "
+            return (trim (substring tnorm 6 (len tnorm)))
+    ""
+
+--! Verarbeitet einen Inline-Button-Druck (callback_query).
+fn handle_callback token dbh cbq
+    cbid: get cbq "id"
+    data: get cbq "data"
+    msg: get cbq "message"
+    chat: get msg "chat"
+    cid: get chat "id"
+    txt: get msg "text"
+    tel.tel_answer_callback token cbid ""
+    if data == "save"
+        if txt != nil
+            mem.add_memory dbh txt "fact" 3 "telegram" "nutzer"
+            tel.tel_send_message token cid "In der Seele gespeichert."
+        return nil
+    if data == "more"
+        if txt != nil
+            tel.tel_send_chat_action token cid "typing"
+            res: grm.run_gremium dbh ("Vertiefe bitte diesen Sachverhalt: " ++ txt)
+            a: get res "content"
+            if a != nil && a != ""
+                tel.tel_send_message token cid (shorten a)
+            else
+                tel.tel_send_message token cid "Ich konnte leider nichts vertiefen."
+        return nil
+    tel.tel_send_message token cid "Unbekannte Aktion."
 
 --! Ein Polling-Zyklus. Liefert die letzte verarbeitete update_id zurück.
 fn poll_once token offset allowed
@@ -165,6 +254,16 @@ fn poll_once token offset allowed
                 if is_allowed cid allowed
                     try
                         handle_update token cid msg dbh
+                    catch
+                        nil
+        cq: get upd "callback_query"
+        if cq != nil
+            chat2: get (get cq "message") "chat"
+            if chat2 != nil
+                cid2: get chat2 "id"
+                if is_allowed cid2 allowed
+                    try
+                        handle_callback token dbh cq
                     catch
                         nil
     if offset != nil

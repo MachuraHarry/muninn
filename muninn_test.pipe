@@ -4,6 +4,7 @@ import "pipe-test"
 import "modules/memory.pipe" as mem
 import "modules/swarm.pipe" as grm
 import "modules/executor.pipe" as exe
+import "modules/web.pipe" as web
 
 --! Regelklassifikation: Kategorien ohne KI.
 test "rule_classify erkennt 'merke/erinnere' als permanent"
@@ -172,3 +173,26 @@ test "run_plan Feedback-Loop streicht fehlgeschlagenen Schritt"
     expect_eq (get r "ok") true "trotz Fehler erfolgreich"
     expect_eq (mem.memory_count h) 1 "guter Schritt ausgeführt"
     mem.close h
+
+--! Web: HTML-Strippen und Entities.
+test "strip_html entfernt Tags und Entities"
+    t: web.strip_html "<p>Hallo <b>Welt</b> &amp; alle</p>"
+    expect_contains t "Hallo" "Text erhalten"
+    expect_contains t "Welt" "Text erhalten"
+    expect_contains t "&" "Entity &amp; decodiert"
+    expect_falsy (contains t "<") "keine Tags mehr"
+
+test "html_clean bereinigt Whitespace"
+    t: web.html_clean "  a    b\n\n\nc  "
+    expect_contains t "a b" "Whitespace verdichtet"
+    expect_contains t "c" "Inhalt erhalten"
+
+--! Web: DDG-Ergebnis-Parsing (deterministisches Fixture).
+test "parse_ddg extrahiert Titel und URLs"
+    fixture: "x result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com&amp;rut=1\">Erster Titel</a> y result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org&amp;rut=2\">Zweiter Titel</a> z"
+    r: web.parse_ddg fixture
+    expect_eq (len r) 2 "zwei Ergebnisse"
+    expect_eq (get (at r 0) "title") "Erster Titel" "erster Titel"
+    expect_eq (get (at r 0) "url") "https://example.com" "erste URL decodiert"
+    expect_eq (get (at r 1) "title") "Zweiter Titel" "zweiter Titel"
+    expect_eq (get (at r 1) "url") "https://example.org" "zweite URL decodiert"

@@ -1,0 +1,196 @@
+--! web.pipe — Web-Recherche: Suche (DDG + Wikipedia), Seiten-Fetch, Research-Orchestrierung.
+--! Frei (kein API-Key): DDG Instant Answer + DDG-HTML-Volltext + Wikipedia.
+
+--! Kombinierte Suche: DDG Instant Answer + Wikipedia.
+--! Heisst bewusst nicht "web_search", um das gleichnamige Builtin nicht zu überschatten.
+export fn web_lookup query
+    out: []
+    try
+        r1: web_search query
+        for r in r1
+            push out r
+    catch
+        nil
+    try
+        r2: wiki_search query
+        for r in r2
+            push out r
+    catch
+        nil
+    out
+
+--! HTML-Entities und Whitespace bereinigen.
+export fn html_clean s
+    s: replace_all s "&nbsp;" " "
+    s: replace_all s "&amp;" "&"
+    s: replace_all s "&lt;" "<"
+    s: replace_all s "&gt;" ">"
+    s: replace_all s "&quot;" "\""
+    s: replace_all s "&#x27;" "'"
+    s: replace_all s "&#39;" "'"
+    s: replace_all s "&#x2F;" "/"
+    s: replace_all s "&#x2D;" "-"
+    s: regex_replace "[ \t]+" " " s
+    s: regex_replace "\n[ \n]*\n+" "\n" s
+    trim s
+
+--! HTML zu Fließtext reduzieren (Tags, script/style entfernen).
+export fn strip_html html
+    t: html
+    t: regex_replace "(?s)<script[^>]*>.*?</script>" " " t
+    t: regex_replace "(?s)<style[^>]*>.*?</style>" " " t
+    t: regex_replace "<[^>]+>" " " t
+    html_clean t
+
+--! DDG-HTML-Volltext-Suchergebnisse parsen (Titel + URL + Snippet).
+export fn parse_ddg body
+    t: replace_all body "<b>" " "
+    t: replace_all t "</b>" " "
+    t: replace_all t "<i>" " "
+    t: replace_all t "</i>" " "
+    t: replace_all t "<em>" " "
+    t: replace_all t "</em>" " "
+    t: replace_all t "<strong>" " "
+    t: replace_all t "</strong>" " "
+    titles: []
+    urls: []
+    parts: split t "result__a"
+    i: 1
+    while i < (len parts)
+        p: at parts i
+        gt: split p ">"
+        if (len gt) >= 2
+            ta: split (at gt 1) "</a"
+            push titles (html_clean (at ta 0))
+            u0: at gt 0
+            u1: split u0 "uddg="
+            if (len u1) >= 2
+                u2: split (at u1 1) "&"
+                push urls (url_decode (at u2 0))
+            else
+                push urls ""
+        i: i + 1
+    snippets: []
+    sp: split t "result__snippet"
+    j: 1
+    while j < (len sp)
+        pg: split (at sp j) ">"
+        if (len pg) >= 2
+            sa: split (at pg 1) "</a"
+            push snippets (html_clean (at sa 0))
+        j: j + 1
+    out: []
+    k: 0
+    while k < (len titles)
+        item: {}
+        set item "title" (at titles k)
+        u: ""
+        if k < (len urls)
+            u: at urls k
+        set item "url" u
+        sn: ""
+        if k < (len snippets)
+            sn: at snippets k
+        set item "snippet" sn
+        push out item
+        k: k + 1
+    out
+
+--! Volltext-Suche über den DDG-HTML-Endpoint (best effort, kein Key).
+export fn web_search_full query
+    url: "https://html.duckduckgo.com/html/?q=" ++ (url_encode query)
+    hdrs: {}
+    set hdrs "User-Agent" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    body: ""
+    try
+        r: http_request "GET" url hdrs
+        body: get r "body"
+    catch
+        body: ""
+    if body == ""
+        return []
+    parse_ddg body
+
+--! Seite abrufen und zu Fließtext reduzieren (gekürzt).
+export fn web_fetch url
+    hdrs: {}
+    set hdrs "User-Agent" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    body: ""
+    try
+        r: http_request "GET" url hdrs
+        body: get r "body"
+    catch
+        body: ""
+    if body == ""
+        return ""
+    t: strip_html body
+    if (len t) > 4000
+        t: substring t 0 4000
+    t
+
+--! Dedupliziert Ergebnisse nach URL.
+fn dedup results
+    seen: {}
+    out: []
+    for r in results
+        u: get r "url"
+        if u != nil && u != ""
+            if (get seen u) == nil
+                set seen u true
+                push out r
+    out
+
+--! Filtert Junk-Ergebnisse (DDG "No results", Wikipedia-Suchseiten, leere URLs).
+fn filter_junk results
+    out: []
+    for r in results
+        t: get r "title"
+        u: get r "url"
+        if t == "No results"
+            continue
+        if u == nil || u == ""
+            continue
+        if contains u "duckduckgo.com/?q="
+            continue
+        if contains u "Special:Search"
+            continue
+        push out r
+    out
+
+--! Liefert die k saubersten Suchergebnisse (lookup + DDG-Volltext, Junk gefiltert).
+export fn web_results query k
+    results: filter_junk (dedup (web_lookup query))
+    if (len results) < k
+        extra: filter_junk (web_search_full query)
+        for e in extra
+            if (len results) < k
+                push results e
+    results
+
+--! Recherche-Orchestrierung: suchen -> Top-N fetchen -> verdichten -> Quellen.
+--! Liefert {context, sources}.
+export fn research query
+    results: web_results query 5
+    ctx: ""
+    sources: []
+    i: 0
+    while i < 3 && i < (len results)
+        r: at results i
+        u: get r "url"
+        if u != nil && u != ""
+            text: web_fetch u
+            if text != ""
+                s: ""
+                try
+                    s: summarize text
+                catch
+                    s: substring text 0 800
+                ctx: ctx ++ "[" ++ (to_str (i + 1)) ++ "] " ++ s ++ "\n\n"
+                push sources u
+            else
+                push sources u
+        i: i + 1
+    out: {}
+    set out "context" ctx
+    set out "sources" sources
+    out

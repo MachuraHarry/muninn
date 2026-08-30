@@ -105,3 +105,29 @@ export fn tel_send_chat_action token chat_id action
     set m "chat_id" chat_id
     set m "action" action
     tel_post token "sendChatAction" m
+
+--! Baut einen Inline-Keyboard-Button.
+export fn tel_button text data
+    b: {}
+    set b "text" text
+    set b "callback_data" data
+    b
+
+--! Sendet Text mit Inline-Tastatur (kb = Liste von Button-Reihen).
+export fn tel_send_message_kb token chat_id text kb
+    m: {}
+    set m "chat_id" chat_id
+    set m "text" text
+    if kb != nil
+        rm: {}
+        set rm "inline_keyboard" kb
+        set m "reply_markup" rm
+    tel_post token "sendMessage" m
+
+--! Beantwortet einen Callback-Query (schließt den Lade-Spinner).
+export fn tel_answer_callback token cbid text
+    m: {}
+    set m "callback_query_id" cbid
+    if text != nil && text != ""
+        set m "text" text
+    tel_post token "answerCallbackQuery" m

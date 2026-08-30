@@ -3,6 +3,7 @@
 --! registrierte, validierende Aktionen (store/graph/goal/retrieve).
 import "sqlite"
 import "modules/memory.pipe" as mem
+import "modules/web.pipe" as web
 
 --! Legt die plans-Tabelle an (idempotent).
 export fn init_executor h
@@ -94,6 +95,43 @@ export fn exec_step h s
         set r "ok" true
         set r "result" out
         return r
+    if action == "search"
+        q: get s "query"
+        if q == nil
+            set r "ok" false
+            set r "error" "search braucht query"
+            return r
+        results: web.web_results q 5
+        out: ""
+        for x in results
+            out: out ++ "- " ++ (get x "title") ++ " (" ++ (get x "url") ++ ")\n"
+        set r "ok" true
+        set r "result" out
+        return r
+    if action == "fetch"
+        u: get s "url"
+        if u == nil
+            set r "ok" false
+            set r "error" "fetch braucht url"
+            return r
+        text: web.web_fetch u
+        if text == ""
+            set r "ok" false
+            set r "error" ("Seite nicht abrufbar: " ++ u)
+            return r
+        set r "ok" true
+        set r "result" text
+        return r
+    if action == "research"
+        q: get s "query"
+        if q == nil
+            set r "ok" false
+            set r "error" "research braucht query"
+            return r
+        rr: web.research q
+        set r "ok" true
+        set r "result" (get rr "context")
+        return r
     set r "ok" false
     set r "error" ("Unbekannte Aktion: " ++ action)
     r
@@ -110,7 +148,7 @@ fn update_plan h pid state idx result
 --! Revidiert den Plan nach einem Fehler. Fallback: fehlgeschlagenen Schritt streichen.
 fn revise_steps h goal steps fail_idx error
     try
-        j: ai_chat_json "Du revidierst einen Aufgabenplan. Antworte ausschliesslich als JSON-Liste von Schritten mit 'action' (store, graph, goal oder retrieve) und den noetigen Parametern. Vermeide den fehlgeschlagenen Schritt." ("Aufgabe: " ++ goal ++ ". Fehler: " ++ error)
+        j: ai_chat_json "Du revidierst einen Aufgabenplan. Antworte ausschliesslich als JSON-Liste von Schritten mit 'action' (store, graph, goal, retrieve, search, fetch oder research) und den noetigen Parametern. Vermeide den fehlgeschlagenen Schritt." ("Aufgabe: " ++ goal ++ ". Fehler: " ++ error)
         normalize_steps j
     catch
         drop_step steps fail_idx
@@ -122,7 +160,7 @@ fn normalize_steps raw
         a: get e "action"
         if a != nil
             valid: false
-            if a == "store" || a == "graph" || a == "goal" || a == "retrieve"
+            if a == "store" || a == "graph" || a == "goal" || a == "retrieve" || a == "search" || a == "fetch" || a == "research"
                 valid: true
             if valid
                 push out e
