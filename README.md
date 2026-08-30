@@ -19,6 +19,9 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 - **Lernen aus dem Web** — neue Erkenntnisse werden dauerhaft **mit Quellen-URL** gespeichert und später zitiert.
 - **Autonomer Executor** — Aufgaben werden als Pläne mit Checkpoints und Feedback-Loop ausgeführt.
 - **Web-Recherche** — DuckDuckGo + Wikipedia, Seiten-Fetch und Zusammenfassung (kein API-Key nötig).
+- **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, GitHub, ...) per
+  Model Context Protocol anbinden; laufen unter einem Sandbox-Profil mit eng gefasster
+  exec-Whitelist, ein eigener „werkzeugmeister"-Agent im Gremium nutzt sie.
 - **Telegram-Bot** — Long-Polling, Inline-Buttons, Befehle.
 - **Deterministische Tests** — Kernlogik ohne KI/Netz testbar.
 
@@ -31,6 +34,7 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 | M3 — Inneres Gremium (ai_swarm) | ✅ |
 | M4 — Autonomer Executor | ✅ |
 | Web-Recherche + Lernen + Inline-Buttons | ✅ |
+| P1 — MCP-Tool-Ökosystem + Sandboxing | ✅ |
 | M5 — Discord | ⏳ geplant |
 
 Weitere Schritte: [Plan.md](Plan.md)
@@ -41,7 +45,10 @@ Weitere Schritte: [Plan.md](Plan.md)
 
 ### Voraussetzungen
 
-- Ein Pipe-Binary (≥ v1.1.x) — [pipe](https://github.com/MachuraHarry/pipe)
+- Ein Pipe-Binary mit dem `tool_call`-Builtin (Stand: noch nicht in einem offiziellen
+  Release — lokal in `~/pipe` ab Commit `f7ae197` ergänzt, siehe
+  [Plan.md](Plan.md#p1--tool-ökosystem-via-mcp--priorität-zuerst--erledigt)) —
+  [pipe](https://github.com/MachuraHarry/pipe)
 - Die Pipe-Module `sqlite` und `pipe-test`:
 
 ```bash
@@ -61,11 +68,17 @@ cp .env.example .env
 TELEGRAM_BOT_TOKEN=123456:ABC...        # Token von @BotFather (/newbot)
 TELEGRAM_ALLOWED_CHAT_ID=               # deine Chat-ID von @userinfobot (leer = jeder darf)
 DEEPSEEK_API_KEY=sk-...                 # für Klassifikation, Gremium, Zusammenfassung
+MCP_SERVERS=                            # optional: JSON-Liste externer MCP-Server (siehe .env.example)
 ```
 
 > Muninn nutzt **DeepSeek** als Provider (kostenlos anmeldbar unter platform.deepseek.com).
 > Für *echte* semantische Embeddings (statt des lexikalischen DeepSeek-Fallbacks)
 > kann alternativ OpenAI/Ollama konfiguriert werden.
+
+> **MCP-Server (optional):** `MCP_SERVERS` bindet externe Werkzeuge per Model Context
+> Protocol ein (siehe `.env.example` für das Format). Leer = deaktiviert, kein `exec`
+> nötig. Ist mindestens ein `stdio`-Server konfiguriert, aktiviert Muninn `exec`
+> ausschließlich für dessen Kommando (Sandbox-Profil `muninn`, `exec_whitelist`).
 
 ### Starten
 
@@ -120,6 +133,7 @@ modules/memory.pipe     Seele: memories, embeddings, entities, relations, goals,
 modules/swarm.pipe      Gremium: planer/faktenwaechter/kritiker/registrator (+ Web-Tools)
 modules/executor.pipe   Autonomer Executor: Plan-Bibliothek, Checkpoints, Feedback-Loop
 modules/web.pipe        Recherche: web_lookup, web_search_full, web_fetch, research
+modules/mcp.pipe        MCP-Tool-Ökosystem: Server-Konfig, exec-Whitelist, Verbindungsaufbau
 muninn_test.pipe        deterministische Tests
 ```
 
@@ -160,6 +174,10 @@ Aufgaben (`task`/`goal`) werden als **Pläne** ausgeführt:
 - **Checkpoints** in SQLite (`plans`-Tabelle), resumefähig.
 - **Feedback-Loop**: bei Fehler wird der Plan revidiert (KI) bzw. der fehlgeschlagene
   Schritt gestrichen (deterministischer Fallback) und erneut versucht.
+- **`mcp_call`-Aktion** (P1): ruft ein per MCP angebundenes (oder lokales) Werkzeug direkt
+  per Name auf — deterministisch, über den Pipe-Builtin `tool_call`, ohne dass dafür eine
+  KI-Tool-Call-Schleife nötig wäre. Damit können auch autonome Pläne (nicht nur das
+  Gremium) MCP-Werkzeuge nutzen.
 
 ### Web-Recherche (`web.pipe`)
 
@@ -167,6 +185,23 @@ Aufgaben (`task`/`goal`) werden als **Pläne** ausgeführt:
 - `web_search_full` — DDG-HTML-Volltextsuche (ohne API-Key).
 - `web_fetch` — Seite abrufen und zu Fließtext reduzieren.
 - `research` — suchen → Top-N fetchen → verdichten → `{context, sources}`.
+
+### MCP-Tool-Ökosystem (`mcp.pipe`)
+
+Externe Werkzeuge (Dateisystem, GitHub, Datenbanken, ...) werden per
+[Model Context Protocol](https://modelcontextprotocol.io) eingebunden, konfiguriert über
+`MCP_SERVERS` (JSON-Liste in `.env`):
+
+- **`parse_mcp_config`** parst die Konfiguration robust (ungültiges JSON → `[]`, kein Absturz).
+- **`exec_whitelist_for`** extrahiert die Kommando-Basenamen aller `stdio`-Server für die
+  Sandbox — nur genau diese Programme dürfen als Subprozess laufen.
+- **`connect_servers`** verbindet alle konfigurierten Server (`mcp_use_stdio`/`mcp_use_sse`)
+  best-effort: ein fehlschlagender Server blockiert die anderen nicht.
+- **`discovered_tool_names`** liefert alle entdeckten Remote-Tool-Namen (ohne die lokal
+  registrierten), die an einen eigenen **`werkzeugmeister`**-Agenten im Gremium gehen.
+
+Ist kein Server konfiguriert, bleibt `exec` im Sandbox-Profil deaktiviert — Muninn läuft
+unverändert wie zuvor.
 
 ### Telegram (`telegram.pipe`)
 
@@ -178,10 +213,17 @@ gitignorierten `.env` gelesen.
 
 ## Sicherheit
 
-- **Secrets** nur in `.env` (gitignored); bei Leak: `@BotFather → /revoke`.
+- **Secrets** nur in `.env` (gitignored); bei Leak: `@BotFather → /revoke`. MCP-Server-Env
+  (z.B. `GITHUB_TOKEN`) wird per `"env:NAME"` zur Laufzeit aus der echten Umgebung gelesen,
+  statt doppelt in `MCP_SERVERS` zu stehen.
 - **Chat-Whitelist** über `TELEGRAM_ALLOWED_CHAT_ID`.
 - **Keine rohen Shell-/Datei-Builtins für die KI** — nur registrierte, validierende
   Werkzeuge (Lehre aus der Sandbox-Audit-Reihe von Pipe, Runde 11).
+- **Sandbox-Profil `muninn`** (aktiviert in `muninn.pipe`): `exec` ist standardmäßig aus
+  und wird nur eingeschaltet, wenn `MCP_SERVERS` mindestens einen `stdio`-Server nennt —
+  dann ausschließlich für dessen Kommandos (`exec_whitelist`). `audit_log` protokolliert
+  alle sicherheitsrelevanten Ereignisse (HTTP, KI-Aufrufe, Tool-Calls); `max_tool_calls`
+  begrenzt Tool-Ausführungen pro Gremium-Lauf gegen Endlosschleifen.
 
 ---
 

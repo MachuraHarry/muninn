@@ -25,20 +25,41 @@ Muninn wächst vom Chat-Bot zum **persönlichen Langzeit-Assistenten**, der:
 
 ## Phasen
 
-### P1 — Tool-Ökosystem via MCP  *(Priorität: zuerst)*
+### P1 — Tool-Ökosystem via MCP  *(Priorität: zuerst)*  ✅ Erledigt
 
 Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung für einen „Assistenten".
 
-- **MCP-Client** via `mcp_use_stdio` / `mcp_use_sse`:
-  - Filesystem (Dateien lesen/schreiben in einem klar begrenzten Verzeichnis)
-  - GitHub (Issues/PRs/Repos)
-  - Browser (Web-Automation)
-  - Datenbank, Kalender, E-Mail
-- **Tool-Sandboxing**: jedes MCP-/Werkzeug unter einem eigenen Sandbox-Profil;
-  MCP-Subprozesse laufen nur unter bewusst eng gefasster `exec`-Freigabe.
-- **Tool-Registry/Plugin-System** in Pipe: Tools deklarativ registrieren,
-  versionieren und dem Gremium/Executor verfügbar machen.
-- Executor bekommt Aktionen, die MCP-Tools aufrufen (validierend, nicht roh).
+- ✅ **MCP-Client** via `mcp_use_stdio` / `mcp_use_sse`, konfiguriert über `MCP_SERVERS`
+  (JSON-Liste in `.env`) — `modules/mcp.pipe`: `parse_mcp_config`, `connect_servers`.
+  Beliebige Server anbindbar (Filesystem, GitHub, Datenbank, ...), sofern per stdio/SSE
+  erreichbar. End-to-End mit `@modelcontextprotocol/server-filesystem` verifiziert.
+- ✅ **Tool-Sandboxing**: Sandbox-Profil `muninn` in `muninn.pipe`; MCP-Subprozesse laufen
+  nur unter `exec_whitelist` (ausschließlich die konfigurierten Kommandos), `ai`/`network`
+  offen, `audit_log` + `max_tool_calls` aktiv. Ohne konfigurierte Server bleibt `exec` aus.
+- ✅ **Gremium-Anbindung**: entdeckte MCP-Tools gehen an einen eigenen `werkzeugmeister`-
+  Agenten (`swarm.pipe`), an den `planer`/`kritiker` bei Bedarf weiterleiten.
+- ✅ **Executor-Aktion `mcp_call`**: `executor.pipe` kann MCP-/lokale Tools jetzt
+  deterministisch aus einem Plan heraus aufrufen, ganz ohne KI-Tool-Call-Schleife —
+  ermöglicht durch einen **neuen Pipe-Builtin `tool_call(name, args?)`**
+  (`~/pipe/pkg/object/builtins_ai.go`, registriert in `object.go`, dokumentiert in
+  `pkg/analysis/builtins.go`), der `executeTool` — denselben Dispatch, den
+  `ai_with_tools` intern nutzt — direkt aufruft. Da lokale `ai_tool`s und per MCP
+  gebrückte Tools in derselben `toolRegistry` liegen, funktioniert `tool_call`
+  transparent für beide. Sandbox-Gating (`max_tool_calls`, `audit_log`) bleibt
+  identisch zu `ai_with_tools`. Go-Tests: `TestToolCallDirectInvocation` in
+  `pkg/object/ai_builtins_test.go`; Pipe-Tests: `exec_step mcp_call ...` in
+  `muninn_test.pipe`. **Achtung:** `tool_call` ist noch nicht in einem offiziellen
+  Pipe-Release enthalten — `/usr/local/bin/pipe` läuft auf einem lokalen Build ab
+  Commit `f7ae197` (Backup der vorherigen v1.2.0 unter
+  `/usr/local/bin/pipe.v1.2.0.bak`); die Änderungen in `~/pipe` sind noch
+  uncommitted.
+- ⏳ **Tool-Registry/Plugin-System**: aktuell reicht die MCP-Registry von Pipe selbst
+  (`mcp_tools`/`tool_call`) plus `ai_tool`; ein eigenes Versionierungs-/Plugin-Layer
+  ist bewusst nicht gebaut, mangels konkretem Bedarf (YAGNI) — eine `.env`-Zeile mit
+  Server-Liste deckt Muninns gesamte "Plugin"-Oberfläche ab.
+- ⏳ **Browser-Automation** als konkretes Beispiel noch nicht getestet — hängt von einem
+  MCP-Browser-Server ab (z.B. Playwright-MCP); mit der jetzigen Config nur eine
+  `MCP_SERVERS`-Zeile entfernt.
 
 ### P2 — Tiefes Gedächtnis & Wissen  *(Priorität: zuerst)*
 
@@ -107,7 +128,8 @@ modules/memory.pipe    Seele: memories, embeddings, entities, relations, goals, 
 modules/swarm.pipe     Gremium: planer/faktenwaechter/kritiker/registrator (+ Web-Tools)
 modules/executor.pipe  Autonomer Executor: Plan-Bibliothek, Checkpoints, Feedback-Loop
 modules/web.pipe       Recherche: web_lookup, web_search_full, web_fetch, research
-muninn_test.pipe       28 deterministische Tests
+modules/mcp.pipe       MCP-Tool-Ökosystem: Server-Konfig, exec-Whitelist, Verbindungsaufbau
+muninn_test.pipe       deterministische Tests
 ```
 
 ## Risiken / offene Fragen

@@ -1,0 +1,133 @@
+--! mcp.pipe — MCP-Tool-Ökosystem (Plan.md P1): beliebige externe Werkzeuge per
+--! Model Context Protocol einbinden. Server werden per Umgebungsvariable
+--! MCP_SERVERS konfiguriert (JSON-Liste), z.B.:
+--!   [{"alias":"fs","type":"stdio","command":"npx",
+--!     "args":["-y","@modelcontextprotocol/server-filesystem","/root/muninn/mcp_data"]},
+--!    {"alias":"gh","type":"stdio","command":"npx",
+--!     "args":["-y","@modelcontextprotocol/server-github"],
+--!     "env":{"GITHUB_TOKEN":"env:GITHUB_TOKEN"}}]
+--! "env:NAME"-Werte werden zur Laufzeit aus der echten Umgebung aufgelöst, damit
+--! Secrets nicht doppelt in .env stehen müssen. Jede Verbindung läuft unter dem
+--! Sandbox-Profil "muninn" mit exec-Whitelist (nur konfigurierte Kommandos) —
+--! Lehre aus der Sandbox-Audit-Reihe: nie unbeschränkten exec an die KI.
+
+--! Parst MCP_SERVERS (JSON-Liste von Server-Maps). Leer/ungueltig -> [] (MCP
+--! bleibt deaktiviert, kein Fehler und kein exec/network noetig).
+export fn parse_mcp_config raw
+    out: []
+    if raw != nil && (trim raw) != ""
+        try
+            j: parse_json raw
+            if (type_of j) == "LIST"
+                out: j
+        catch e
+            out: []
+    out
+
+--! Letztes Pfadsegment eines Kommandos (für die exec-Whitelist), z.B. "npx".
+fn cmd_basename cmd
+    parts: split cmd "/"
+    n: len parts
+    if n == 0
+        cmd
+    else
+        at parts (n - 1)
+
+--! Eindeutige Kommando-Basenamen aller stdio-Server, für sandbox_profile.exec_whitelist.
+export fn exec_whitelist_for servers
+    seen: {}
+    out: []
+    for s in servers
+        typ: get s "type"
+        if typ == nil || typ == "stdio"
+            cmd: get s "command"
+            if cmd != nil && cmd != ""
+                b: cmd_basename cmd
+                if (get seen b) == nil
+                    set seen b true
+                    push out b
+    out
+
+--! Löst eine env-Map aus der Konfig auf. Werte im Format "env:NAME" werden aus
+--! der echten Prozess-Umgebung gelesen (Secrets bleiben aus der JSON-Konfig raus).
+fn resolve_env raw_env
+    out: {}
+    if raw_env != nil
+        for k in (keys raw_env)
+            v: get raw_env k
+            if (type_of v) == "STRING" && (len v) >= 4 && (substring v 0 4) == "env:"
+                v: env (substring v 4 (len v))
+            set out k v
+    out
+
+--! Verbindet einen stdio-Server. Pipe-Builtins sind variadisch ohne Spread/Apply,
+--! daher Fallunterscheidung nach Argumentzahl (bis zu 7 Programmargumente).
+fn connect_stdio cmd cargs cenv alias
+    n: len cargs
+    if n == 0
+        mcp_use_stdio cmd cenv alias
+    else if n == 1
+        mcp_use_stdio cmd (at cargs 0) cenv alias
+    else if n == 2
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) cenv alias
+    else if n == 3
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) cenv alias
+    else if n == 4
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) cenv alias
+    else if n == 5
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) cenv alias
+    else if n == 6
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) cenv alias
+    else
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) cenv alias
+
+--! Verbindet einen einzelnen konfigurierten Server (stdio oder sse). Liefert {alias, ok, error?}.
+fn connect_one idx s
+    typ: get s "type"
+    alias: get s "alias"
+    if alias == nil || alias == ""
+        alias: "srv" ++ (to_str idx)
+    r: {alias: alias}
+    try
+        if typ == "sse"
+            mcp_use_sse (get s "url") alias
+        else
+            cargs: get s "args"
+            if cargs == nil
+                cargs: []
+            connect_stdio (get s "command") cargs (resolve_env (get s "env")) alias
+        set r "ok" true
+    catch e
+        set r "ok" false
+        set r "error" (to_str e)
+    r
+
+--! Verbindet alle konfigurierten Server. Ein fehlschlagender Server blockiert
+--! die anderen nicht (best effort, jeder Fehler wird zurückgemeldet).
+export fn connect_servers servers
+    out: []
+    i: 0
+    for s in servers
+        push out (connect_one i s)
+        i: i + 1
+    out
+
+--! Namen aller entdeckten MCP-Tools (lokal + remote), ohne die übergebenen
+--! (bereits als ai_tool registrierten) lokalen Namen. Für die Zuteilung an den
+--! "werkzeugmeister"-Agenten im Gremium.
+--! Hinweis: `mcp_tools` liefert lokale ai_tool-Eintraege nur, wenn zuvor `mcp_server`
+--! aufgerufen wurde (Muninn tut das nicht) UND liefert einen Fehler, wenn ueberhaupt
+--! keine Tools registriert sind — beides best-effort auf [] abgefangen, nicht als Fehler.
+export fn discovered_tool_names local_names
+    out: []
+    tools: []
+    try
+        tools: mcp_tools
+    catch e
+        tools: []
+    for t in tools
+        name: get t "name"
+        if name != nil
+            if !(contains local_names name)
+                push out name
+    out

@@ -1,9 +1,13 @@
 --! executor.pipe — autonomer Task-Executor mit Plan-Bibliothek + Feedback-Loop.
 --! Lehre aus der Sandbox-Audit-Reihe: keine rohen Shell-/Datei-Builtins — nur
---! registrierte, validierende Aktionen (store/graph/goal/retrieve).
+--! registrierte, validierende Aktionen (store/graph/goal/retrieve/search/fetch/
+--! research/mcp_call). mcp_call nutzt den Pipe-Builtin `tool_call` (P1), der ein
+--! per MCP angebundenes Werkzeug direkt per Name aufruft — deterministisch, ohne
+--! dass dafuer das Gremium/eine KI-Tool-Call-Schleife noetig waere.
 import "sqlite"
 import "modules/memory.pipe" as mem
 import "modules/web.pipe" as web
+import "modules/mcp.pipe" as mcp
 
 --! Legt die plans-Tabelle an (idempotent).
 export fn init_executor h
@@ -132,6 +136,23 @@ export fn exec_step h s
         set r "ok" true
         set r "result" (get rr "context")
         return r
+    if action == "mcp_call"
+        tname: get s "tool"
+        if tname == nil
+            set r "ok" false
+            set r "error" "mcp_call braucht tool"
+            return r
+        targs: get s "args"
+        if targs == nil
+            targs: {}
+        try
+            out: tool_call tname targs
+            set r "ok" true
+            set r "result" out
+        catch e
+            set r "ok" false
+            set r "error" (to_str e)
+        return r
     set r "ok" false
     set r "error" ("Unbekannte Aktion: " ++ action)
     r
@@ -145,22 +166,31 @@ fn create_plan h goal steps
 fn update_plan h pid state idx result
     db_exec h ("UPDATE plans SET state = '" ++ (mem.sql_escape state) ++ "', step_idx = " ++ (to_str idx) ++ ", result = '" ++ (mem.sql_escape result) ++ "', updated = datetime('now') WHERE id = " ++ (to_str pid))
 
+--! Beschreibt die 'mcp_call'-Aktion inkl. aktuell verfuegbarer Werkzeuge (lokal + MCP)
+--! fuer die KI-Plan-Prompts. Leer, wenn (noch) keine Werkzeuge registriert sind.
+fn mcp_call_hint _
+    tools: mcp.discovered_tool_names ([])
+    if (len tools) == 0
+        ""
+    else
+        " mcp_call braucht 'tool' (Werkzeugname) und optional 'args' (Map). Verfuegbare Werkzeuge: " ++ (join tools ", ") ++ "."
+
 --! Revidiert den Plan nach einem Fehler. Fallback: fehlgeschlagenen Schritt streichen.
 fn revise_steps h goal steps fail_idx error
     try
-        j: ai_chat_json "Du revidierst einen Aufgabenplan. Antworte ausschliesslich als JSON-Liste von Schritten mit 'action' (store, graph, goal, retrieve, search, fetch oder research) und den noetigen Parametern. Vermeide den fehlgeschlagenen Schritt." ("Aufgabe: " ++ goal ++ ". Fehler: " ++ error)
+        j: ai_chat_json ("Du revidierst einen Aufgabenplan. Antworte ausschliesslich als JSON-Liste von Schritten mit 'action' (store, graph, goal, retrieve, search, fetch, research oder mcp_call) und den noetigen Parametern. Vermeide den fehlgeschlagenen Schritt." ++ (mcp_call_hint 0)) ("Aufgabe: " ++ goal ++ ". Fehler: " ++ error)
         normalize_steps j
     catch
         drop_step steps fail_idx
 
 --! Normalisiert KI-Schritte in validierte Schritt-Maps (nur bekannte Aktionen).
-fn normalize_steps raw
+export fn normalize_steps raw
     out: []
     for e in raw
         a: get e "action"
         if a != nil
             valid: false
-            if a == "store" || a == "graph" || a == "goal" || a == "retrieve" || a == "search" || a == "fetch" || a == "research"
+            if a == "store" || a == "graph" || a == "goal" || a == "retrieve" || a == "search" || a == "fetch" || a == "research" || a == "mcp_call"
                 valid: true
             if valid
                 push out e
@@ -216,7 +246,7 @@ export fn execute_task h goal
     steps: plan_template kind goal
     if (len steps) == 0
         try
-            j: ai_chat_json "Du zerlegst eine Aufgabe in ausfuehrbare Schritte. Antworte ausschliesslich als JSON-Liste von Schritten mit 'action' (store, graph, goal oder retrieve) und den noetigen Parametern." goal
+            j: ai_chat_json ("Du zerlegst eine Aufgabe in ausfuehrbare Schritte. Antworte ausschliesslich als JSON-Liste von Schritten mit 'action' (store, graph, goal, retrieve, search, fetch, research oder mcp_call) und den noetigen Parametern." ++ (mcp_call_hint 0)) goal
             steps: normalize_steps j
         catch
             steps: []

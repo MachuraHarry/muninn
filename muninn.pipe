@@ -7,8 +7,11 @@ import "modules/memory.pipe" as mem
 import "modules/swarm.pipe" as grm
 import "modules/executor.pipe" as exe
 import "modules/web.pipe" as web
+import "modules/mcp.pipe" as mcp
 
 --! Lädt KEY=VALUE-Zeilen aus einer .env-Datei in eine Map.
+--! Werte werden am ERSTEN "=" getrennt (nicht bei jedem), damit Werte, die selbst
+--! "=" enthalten (z.B. MCP_SERVERS-JSON mit URL-Query-Strings), nicht abgeschnitten werden.
 fn load_env path
     env_map: {}
     if file_exists path
@@ -19,7 +22,9 @@ fn load_env path
                 if (at ln 0) != "#"
                     kv: split ln "="
                     if (len kv) >= 2
-                        set env_map (trim (at kv 0)) (trim (at kv 1))
+                        key: trim (at kv 0)
+                        val: join (slice kv 1 (len kv)) "="
+                        set env_map key (trim val)
     env_map
 
 --! Wert-Lookup: zuerst echte Umgebungsvariable, dann .env.
@@ -36,6 +41,19 @@ fn setup_ai cfg
     if key != nil && key != ""
         ai_set_key "deepseek" key
     ai_model "deepseek-chat"
+
+--! Aktiviert Muninns Sandbox-Profil (P1: Tool-Sandboxing). fs bleibt "full", da
+--! die reine-Pipe-sqlite-Persistenz (muninn.db) Dateizugriff braucht; exec ist
+--! nur erlaubt, wenn MCP-Server konfiguriert sind, und dann ausschliesslich auf
+--! deren Kommandos beschraenkt (Lehre der Sandbox-Audit-Reihe: nie unbeschraenkter
+--! exec an die KI). network bleibt offen, da Web-Recherche beliebige Treffer-URLs
+--! abruft; eine feste Whitelist wuerde die Recherche brechen.
+fn setup_sandbox servers
+    wl: mcp.exec_whitelist_for servers
+    allow_exec: (len wl) > 0
+    sandbox_profile "muninn" {fs: "full", network: true, exec: allow_exec, exec_whitelist: wl, ai: true, max_tool_calls: 40, audit_log: true}
+    set_sandbox "muninn"
+    nil
 
 --! Prüft, ob eine Chat-ID bedient werden darf (leere Whitelist = alle erlauben).
 fn is_allowed cid allowed
@@ -58,7 +76,8 @@ fn help_text _
 --! Status-Text (Statistiken aus der Seele).
 fn status_text dbh
     n: mem.memory_count dbh
-    "Muninn-Status:\n• Erinnerungen: " ++ (to_str n) ++ "\n• Provider: DeepSeek\n• Gremium: 4 Agenten (mit Web-Recherche)\n• Executor: aktiv\n• Web: DDG + Wikipedia"
+    tool_n: len (mcp_tools)
+    "Muninn-Status:\n• Erinnerungen: " ++ (to_str n) ++ "\n• Provider: DeepSeek\n• Gremium: 4-5 Agenten (mit Web-Recherche + MCP-Werkzeugen)\n• Werkzeuge gesamt (lokal + MCP): " ++ (to_str tool_n) ++ "\n• Executor: aktiv\n• Web: DDG + Wikipedia"
 
 --! Liste der wichtigsten Erinnerungen.
 fn list_text dbh
@@ -279,7 +298,15 @@ if (len avgs) > 0
         once_mode: true
 
 cfg: load_env ".env"
+mcp_servers: mcp.parse_mcp_config (cfg_get cfg "MCP_SERVERS")
+setup_sandbox mcp_servers
 setup_ai cfg
+mcp_results: mcp.connect_servers mcp_servers
+for r in mcp_results
+    if get r "ok"
+        print ("MCP verbunden: " ++ (get r "alias"))
+    else
+        print ("MCP fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
 grm.init_gremium 0
 tok: cfg_get cfg "TELEGRAM_BOT_TOKEN"
 if tok == nil || tok == ""

@@ -5,6 +5,7 @@ import "modules/memory.pipe" as mem
 import "modules/swarm.pipe" as grm
 import "modules/executor.pipe" as exe
 import "modules/web.pipe" as web
+import "modules/mcp.pipe" as mcp
 
 --! Regelklassifikation: Kategorien ohne KI.
 test "rule_classify erkennt 'merke/erinnere' als permanent"
@@ -147,6 +148,44 @@ test "exec_step unbekannte Aktion scheitert"
     expect_eq (get r "ok") false "scheitert"
     mem.close h
 
+--! mcp_call (P1): exec_step ruft ein registriertes Werkzeug per tool_call auf —
+--! deterministisch, ohne KI/Netz. Ein lokales ai_tool steht hier stellvertretend
+--! fuer ein per MCP gebrücktes Werkzeug (beide liegen in derselben Tool-Registry).
+fn test_echo_tool msg
+    "echo: " ++ msg
+
+test "exec_step mcp_call ruft ein registriertes Werkzeug per tool_call auf"
+    ai_tool "test_echo_tool" "Testwerkzeug fuer mcp_call" {msg: "Nachricht"} test_echo_tool
+    h: mem.init_db ":memory:"
+    exe.init_executor h
+    s: {action: "mcp_call", tool: "test_echo_tool", args: {msg: "hallo"}}
+    r: exe.exec_step h s
+    expect_eq (get r "ok") true "ok"
+    expect_eq (get r "result") "echo: hallo" "Ergebnis vom Werkzeug"
+    mem.close h
+
+test "exec_step mcp_call ohne 'tool' scheitert mit klarer Fehlermeldung"
+    h: mem.init_db ":memory:"
+    exe.init_executor h
+    s: {action: "mcp_call"}
+    r: exe.exec_step h s
+    expect_eq (get r "ok") false "scheitert ohne tool"
+    mem.close h
+
+test "exec_step mcp_call mit unbekanntem Werkzeug scheitert statt abzustuerzen"
+    h: mem.init_db ":memory:"
+    exe.init_executor h
+    s: {action: "mcp_call", tool: "kein_solches_werkzeug"}
+    r: exe.exec_step h s
+    expect_eq (get r "ok") false "scheitert sauber"
+    mem.close h
+
+test "normalize_steps akzeptiert mcp_call als bekannte Aktion"
+    raw: [{action: "mcp_call", tool: "test_echo_tool", args: {msg: "x"}}, {action: "unbekannt"}]
+    steps: exe.normalize_steps raw
+    expect_eq (len steps) 1 "nur mcp_call bleibt uebrig"
+    expect_eq (get (at steps 0) "action") "mcp_call" "action erhalten"
+
 --! Executor: Plan-Ausführung + Checkpoints + Feedback-Loop.
 test "run_plan führt einen Plan bis zum Ende aus"
     h: mem.init_db ":memory:"
@@ -186,6 +225,41 @@ test "html_clean bereinigt Whitespace"
     t: web.html_clean "  a    b\n\n\nc  "
     expect_contains t "a b" "Whitespace verdichtet"
     expect_contains t "c" "Inhalt erhalten"
+
+--! MCP (P1): Konfig-Parsing und exec-Whitelist sind pure Funktionen, ohne Netz/exec testbar.
+test "parse_mcp_config: leer/nil -> []"
+    expect_eq (len (mcp.parse_mcp_config nil)) 0 "nil -> leer"
+    expect_eq (len (mcp.parse_mcp_config "")) 0 "leerer String -> leer"
+    expect_eq (len (mcp.parse_mcp_config "  ")) 0 "nur Whitespace -> leer"
+
+test "parse_mcp_config: ungueltiges JSON -> [] statt Fehler"
+    expect_eq (len (mcp.parse_mcp_config "{nicht: valides json")) 0 "kaputtes JSON -> leer"
+
+test "parse_mcp_config: JSON-Objekt statt Liste -> []"
+    expect_eq (len (mcp.parse_mcp_config "{\"alias\":\"fs\"}")) 0 "kein Array -> leer"
+
+test "parse_mcp_config: gueltige Server-Liste wird geparst"
+    raw: "[{\"alias\":\"fs\",\"type\":\"stdio\",\"command\":\"npx\",\"args\":[\"-y\",\"server-fs\"]}]"
+    servers: mcp.parse_mcp_config raw
+    expect_eq (len servers) 1 "ein Server"
+    expect_eq (get (at servers 0) "alias") "fs" "alias korrekt"
+    expect_eq (get (at servers 0) "command") "npx" "command korrekt"
+
+test "exec_whitelist_for: leere Serverliste -> leere Whitelist"
+    expect_eq (len (mcp.exec_whitelist_for ([]))) 0 "keine Server -> kein exec noetig"
+
+test "exec_whitelist_for: extrahiert und dedupliziert Kommando-Basenamen"
+    raw: "[{\"command\":\"npx\",\"args\":[]},{\"command\":\"/usr/bin/npx\",\"args\":[]},{\"command\":\"node\",\"args\":[]}]"
+    servers: mcp.parse_mcp_config raw
+    wl: mcp.exec_whitelist_for servers
+    expect_eq (len wl) 2 "npx (dedupliziert ueber Pfad) + node"
+    expect_contains (to_json wl) "npx" "npx in Whitelist"
+    expect_contains (to_json wl) "node" "node in Whitelist"
+
+test "exec_whitelist_for: SSE-Server tragen nichts zur exec-Whitelist bei"
+    raw: "[{\"type\":\"sse\",\"url\":\"http://localhost:9090/mcp\"}]"
+    servers: mcp.parse_mcp_config raw
+    expect_eq (len (mcp.exec_whitelist_for servers)) 0 "sse braucht kein exec"
 
 --! Web: DDG-Ergebnis-Parsing (deterministisches Fixture).
 test "parse_ddg extrahiert Titel und URLs"

@@ -1,8 +1,10 @@
 --! swarm.pipe — Muninns inneres Gremium (ai_swarm-Handoffs).
---! Vier Agenten verfeinern eine Antwort: planer -> faktenwaechter -> kritiker -> registrator.
+--! Agenten verfeinern eine Antwort: planer -> faktenwaechter -> kritiker -> registrator,
+--! optional ueber "werkzeugmeister" mit Zugriff auf per MCP angebundene externe Tools (P1).
 --! Hinweis: Map-Literale müssen in Pipe einzeilig sein, daher stehen die Configs einzeilig.
 import "modules/memory.pipe" as mem
 import "modules/web.pipe" as web
+import "modules/mcp.pipe" as mcp
 
 --! Geteilter, mutabler Zustand: aktueller DB-Handle für die Tools.
 STATE: {dbh: nil}
@@ -63,6 +65,8 @@ fn tool_merken_quelle content source
     "Gemerkt (Quelle: " ++ source ++ "): " ++ content
 
 --! Registriert Tools und Gremium-Agenten (einmalig beim Start).
+--! Bindet zusaetzlich alle bereits per mcp.connect_servers verbundenen MCP-Tools
+--! (Dateisystem, GitHub, ...) an einen eigenen "werkzeugmeister"-Agenten (P1).
 export fn init_gremium _
     ai_tool "erinnerungen_suchen" "Relevante Erinnerungen aus Muninns Langzeitgedaechtnis abrufen, um Fakten zu belegen." {query: "Suchanfrage"} tool_erinnerungen_suchen
     ai_tool "merken" "Eine wichtige dauerhafte Erkenntnis ueber den Nutzer speichern." {content: "Inhalt", kind: "Kategorie"} tool_merken
@@ -70,13 +74,26 @@ export fn init_gremium _
     ai_tool "web_fetch" "Eine Webseite abrufen und deren Fließtext liefern." {url: "Vollständige URL"} tool_web_fetch
     ai_tool "merken_quelle" "Eine aus dem Web gewonnene Erkenntnis dauerhaft mit Quellen-URL speichern." {content: "Erkenntnis", source: "Quellen-URL"} tool_merken_quelle
 
-    swarm_agent "planer" {system: "Du bist der Planer im inneren Gremium von Muninn, einem persoenlichen KI-Agenten mit Langzeitgedaechtnis. Analysiere die Nutzeranfrage. Bei Fakten- oder Gedaechtnisfragen leite an 'faktenwaechter' weiter. Sonst leite an 'kritiker' weiter.", handoff: ["faktenwaechter", "kritiker"]}
+    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle"]
+    mcp_names: mcp.discovered_tool_names local_names
+    has_mcp: (len mcp_names) > 0
+
+    planer_handoff: ["faktenwaechter", "kritiker"]
+    kritiker_handoff: ["faktenwaechter", "registrator"]
+    if has_mcp
+        push planer_handoff "werkzeugmeister"
+        push kritiker_handoff "werkzeugmeister"
+
+    swarm_agent "planer" {system: "Du bist der Planer im inneren Gremium von Muninn, einem persoenlichen KI-Agenten mit Langzeitgedaechtnis. Analysiere die Nutzeranfrage. Bei Fakten- oder Gedaechtnisfragen leite an 'faktenwaechter' weiter. Erfordert die Anfrage Zugriff auf externe Systeme (Dateien, GitHub, weitere angebundene Werkzeuge), leite an 'werkzeugmeister' weiter. Sonst leite an 'kritiker' weiter.", handoff: planer_handoff}
 
     swarm_agent "faktenwaechter" {system: "Du bist der Faktenwaechter im Gremium. Stuetze jede Aussage auf Muninns Gedaechtnis UND das Internet. Rufe 'erinnerungen_suchen' auf, um relevante Erinnerungen zu finden; wenn das Gedaechtnis nichts hergibt, nutze 'web_search' und 'web_fetch', um die Antwort im Internet zu recherchieren. Leite deine fundierte Antwort an 'kritiker' weiter.", tools: ["erinnerungen_suchen", "web_search", "web_fetch"], handoff: ["kritiker", "planer"]}
 
-    swarm_agent "kritiker" {system: "Du bist der Kritiker im Gremium. Pruefe die bisherige Antwort auf Luecken, Widersprueche und Unklarheiten und verbessere sie zu einer praezisen, ehrlichen Antwort. Wenn Fakten fehlen, leite an 'faktenwaechter' zurueck. Sonst leite die verbesserte Antwort an 'registrator' weiter.", handoff: ["faktenwaechter", "registrator"]}
+    swarm_agent "kritiker" {system: "Du bist der Kritiker im Gremium. Pruefe die bisherige Antwort auf Luecken, Widersprueche und Unklarheiten und verbessere sie zu einer praezisen, ehrlichen Antwort. Wenn Fakten fehlen, leite an 'faktenwaechter' zurueck. Sonst leite die verbesserte Antwort an 'registrator' weiter.", handoff: kritiker_handoff}
 
     swarm_agent "registrator" {system: "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer, speichere sie mit 'merken'. Stammt eine neue Erkenntnis aus dem Web, speichere sie mit 'merken_quelle' samt Quellen-URL. Gib danach die endgueltige Antwort an den Nutzer aus, ohne weitere Uebergabe.", tools: ["merken", "merken_quelle"], handoff: []}
+
+    if has_mcp
+        swarm_agent "werkzeugmeister" {system: "Du bist der Werkzeugmeister im Gremium. Du hast Zugriff auf per MCP angebundene externe Werkzeuge (z.B. Dateisystem, GitHub). Nutze das passende Werkzeug, um die Anfrage zu bedienen, und leite dein Ergebnis an 'kritiker' weiter.", tools: mcp_names, handoff: ["kritiker", "planer"]}
 
     nil
 
