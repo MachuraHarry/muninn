@@ -49,10 +49,9 @@ Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung f
   identisch zu `ai_with_tools`. Go-Tests: `TestToolCallDirectInvocation` in
   `pkg/object/ai_builtins_test.go`; Pipe-Tests: `exec_step mcp_call ...` in
   `muninn_test.pipe`. **Achtung:** `tool_call` ist noch nicht in einem offiziellen
-  Pipe-Release enthalten — `/usr/local/bin/pipe` läuft auf einem lokalen Build ab
-  Commit `f7ae197` (Backup der vorherigen v1.2.0 unter
-  `/usr/local/bin/pipe.v1.2.0.bak`); die Änderungen in `~/pipe` sind noch
-  uncommitted.
+  Pipe-Release enthalten — `/usr/local/bin/pipe` läuft auf einem lokalen Build von
+  Commit `9419947` (im `pipe`-Repo committed, noch nicht gepusht/released; Backup
+  der vorherigen v1.2.0 unter `/usr/local/bin/pipe.v1.2.0.bak`).
 - ⏳ **Tool-Registry/Plugin-System**: aktuell reicht die MCP-Registry von Pipe selbst
   (`mcp_tools`/`tool_call`) plus `ai_tool`; ein eigenes Versionierungs-/Plugin-Layer
   ist bewusst nicht gebaut, mangels konkretem Bedarf (YAGNI) — eine `.env`-Zeile mit
