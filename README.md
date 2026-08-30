@@ -70,11 +70,15 @@ Weitere Schritte: [Plan.md](Plan.md)
 ### Voraussetzungen
 
 - Ein Pipe-Binary mit den Builtins `tool_call` (P1) und `file_lock`/`file_unlock`
-  (P3), sowie dem Fix für den `arguments`-`omitempty`-Bug im MCP-Client (behebt
+  (P3), dem Fix für den `arguments`-`omitempty`-Bug im MCP-Client (behebt
   Tool-Aufrufe an zod-basierte MCP-Server, die ein leeres `arguments`-Feld statt
-  eines fehlenden erwarten — betraf z.B. `mcp-docker-server`/`time-mcp`) — Stand:
-  noch nicht in einem offiziellen Release-Tag, aber committed und nach
-  `origin/master` gepusht im [`pipe`](https://github.com/MachuraHarry/pipe)-Repo.
+  eines fehlenden erwarten — betraf z.B. `mcp-docker-server`/`time-mcp`), sowie
+  einem sauberen Shutdown fuer stdio-MCP-Subprozesse (`Pdeathsig`+`Setpgid`+ein
+  SIGTERM-Handler — ohne das blieben verbundene MCP-Server samt ihren eigenen
+  Kindprozessen bei jedem Neustart als Prozessleiche haengen, siehe
+  `pkg/mcp/procattr_unix.go`) — Stand: noch nicht in einem offiziellen
+  Release-Tag, aber committed und nach `origin/master` gepusht im
+  [`pipe`](https://github.com/MachuraHarry/pipe)-Repo.
 - Die Pipe-Module `sqlite`, `pipe-test` und `pipe-web`:
 
 ```bash
