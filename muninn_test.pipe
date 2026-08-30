@@ -1,0 +1,108 @@
+--! muninn_test.pipe — deterministische Tests für Muninn (ohne KI, ohne Netz).
+--! Ausführen:  pipe -test   (aus dem muninn/ Verzeichnis)
+import "pipe-test"
+import "modules/memory.pipe" as mem
+import "modules/swarm.pipe" as grm
+
+--! Regelklassifikation: Kategorien ohne KI.
+test "rule_classify erkennt 'merke/erinnere' als permanent"
+    expect_eq (mem.rule_classify "Merke dir, dass ich Tee mag") "permanent" "merke -> permanent"
+    expect_eq (mem.rule_classify "Erinnere mich an den Zahnarzt") "permanent" "erinnere -> permanent"
+
+test "rule_classify erkennt Aufgaben"
+    expect_eq (mem.rule_classify "Erledige bitte das Reporting") "task" "erledige -> task"
+    expect_eq (mem.rule_classify "Mache die Hausaufgaben") "task" "mache -> task"
+
+test "rule_classify erkennt Ziele"
+    expect_eq (mem.rule_classify "Mein Ziel ist es, Pipe zu lernen") "goal" "ziel -> goal"
+
+test "rule_classify erkennt Fragen"
+    expect_eq (mem.rule_classify "Warum regnet es?") "question" "? -> question"
+
+test "rule_classify fällt sonst auf fleeting zurück"
+    expect_eq (mem.rule_classify "Heute ist schönes Wetter") "fleeting" "default fleeting"
+
+--! sql_escape: einfache Anführungszeichen verdoppeln.
+test "sql_escape verdoppelt Hochkommas"
+    expect_eq (mem.sql_escape "O'Brien") "O''Brien" "quote escaped"
+
+--! Seele: meta + memories auf einer In-Memory-DB.
+test "meta_set/meta_get Roundtrip"
+    h: mem.init_db ":memory:"
+    mem.meta_set h "bot_name" "Muninn"
+    expect_eq (mem.meta_get h "bot_name") "Muninn" "roundtrip"
+    mem.close h
+
+test "add_memory und top_memories nach Importance"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "Espresso-Vorliebe" "permanent" 4 "test" "persoenlich"
+    mem.add_memory h "Hausarbeit erledigen" "task" 2 "test" "persoenlich"
+    expect_eq (mem.memory_count h) 2 "zwei Erinnerungen"
+    top: mem.top_memories h 1
+    expect_eq (get (at top 0) "content") "Espresso-Vorliebe" "hoechste Importance zuerst"
+    mem.close h
+
+test "log_event protokolliert Ereignisse"
+    h: mem.init_db ":memory:"
+    mem.log_event h "42" "Hallo" "fleeting"
+    rows: mem.recent_events h 1
+    expect_eq (get (at rows 0) "msg") "Hallo" "event gespeichert"
+    mem.close h
+
+--! Wissensgraph.
+test "add_entity dedupliziert Namen"
+    h: mem.init_db ":memory:"
+    a1: mem.add_entity h "Alpha" "person"
+    a2: mem.add_entity h "Alpha" "person"
+    expect_eq a1 a2 "gleicher Name -> gleiche id"
+    mem.close h
+
+test "add_relation und neighbors_of"
+    h: mem.init_db ":memory:"
+    mem.add_relation h "Alpha" "Beta" "kennt"
+    n: mem.neighbors_of h "Alpha"
+    expect_eq (len n) 1 "ein Nachbar"
+    expect_eq (get (at n 0) "rel") "kennt" "relation"
+    expect_eq (get (at n 0) "target") "Beta" "zielname"
+    mem.close h
+
+--! RAG-Fallback: ohne Embeddings greift die Stichwortsuche.
+test "keyword_retrieve findet passende Erinnerungen"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "Der Nutzer liebt Espresso" "permanent" 3 "test" "x"
+    mem.add_memory h "Der Nutzer mag keine Ananas auf Pizza" "permanent" 3 "test" "x"
+    r: mem.keyword_retrieve h "Espresso" 5
+    expect_eq (len r) 1 "eine Treffer"
+    expect_eq (at r 0) "Der Nutzer liebt Espresso" "richtiger Inhalt"
+    mem.close h
+
+test "retrieve_context fällt ohne Vektoren auf keyword zurück"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "Der Nutzer liebt Espresso" "permanent" 3 "test" "x"
+    ctx: mem.retrieve_context h "Espresso" 3
+    expect_eq (len ctx) 1 "eine relevante Erinnerung"
+    expect_eq (at ctx 0) "Der Nutzer liebt Espresso" "korrekt"
+    mem.close h
+
+test "retrieve_context rankt nach Wortüberlappung"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "Pfannkuchen braucht Mehl und Milch" "permanent" 3 "test" "x"
+    mem.add_memory h "Die Katze schläft viel" "permanent" 3 "test" "x"
+    ctx: mem.retrieve_context h "Wie mache ich Pfannkuchen?" 1
+    expect_eq (len ctx) 1 "eine relevante Erinnerung"
+    expect_eq (at ctx 0) "Pfannkuchen braucht Mehl und Milch" "Top-Match"
+
+--! Vektor-Mathematik (kein KI-Call).
+test "cosine_sim identischer Vektoren ist 1"
+    sim: cosine_sim ([1, 0, 0]) ([1, 0, 0])
+    expect_gt sim 0.999 "identisch -> ~1"
+
+test "nearest findet den ähnlichsten Vektor"
+    top: nearest ([1, 0, 0]) ([[0, 1, 0], [1, 0, 0], [0, 0, 1]]) 1
+    expect_eq (len top) 1 "ein Index"
+    expect_eq (at top 0) 1 "Index 1 ist am ähnlichsten"
+
+--! Gremium: Registrierung läuft fehlerfrei (kein KI-Call nötig).
+test "init_gremium registriert Agenten und Tools ohne Fehler"
+    r: grm.init_gremium 0
+    expect_eq r nil "Rückgabe ist nil (kein Fehler)"

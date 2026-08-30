@@ -1,0 +1,21 @@
+# Secrets — niemals committen
+.env
+*.key
+*_key
+*TOKEN*
+
+# Lokale Zustandsdaten (Seele, sqlite-Dateien)
+.data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Pipe-Caches / Bytecode
+~/.pipe
+*.pipec
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

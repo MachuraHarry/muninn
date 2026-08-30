@@ -1,0 +1,128 @@
+--! muninn.pipe — Einstiegspunkt: Muninn, der Langzeit-KI-Agent.
+--! Telegram-Bot (Long-Polling) + persistente sqlite-"Seele".
+--! Aufruf:  pipe muninn.pipe            (Produktions-Loop)
+--!          pipe muninn.pipe once       (ein Polling-Zyklus, dann exit — zum Testen)
+import "modules/telegram.pipe" as tel
+import "modules/memory.pipe" as mem
+import "modules/swarm.pipe" as grm
+
+--! Lädt KEY=VALUE-Zeilen aus einer .env-Datei in eine Map.
+fn load_env path
+    env_map: {}
+    if file_exists path
+        lines: split (read_file path) "\n"
+        for line in lines
+            ln: trim line
+            if (len ln) > 0
+                if (at ln 0) != "#"
+                    kv: split ln "="
+                    if (len kv) >= 2
+                        set env_map (trim (at kv 0)) (trim (at kv 1))
+    env_map
+
+--! Wert-Lookup: zuerst echte Umgebungsvariable, dann .env.
+fn cfg_get cfg key
+    v: env key
+    if v != nil && v != ""
+        return v
+    get cfg key
+
+--! Richtet den AI-Provider ein (DeepSeek; KI-Klassifikation, Kondensation, Embeddings).
+fn setup_ai cfg
+    key: cfg_get cfg "DEEPSEEK_API_KEY"
+    ai_provider "deepseek" {thinking: false}
+    if key != nil && key != ""
+        ai_set_key "deepseek" key
+    ai_model "deepseek-chat"
+
+--! Prüft, ob eine Chat-ID bedient werden darf (leere Whitelist = alle erlauben).
+fn is_allowed cid allowed
+    if allowed == nil || allowed == ""
+        return true
+    allow_list: split allowed ","
+    for a in allow_list
+        if (trim a) == (to_str cid)
+            return true
+    false
+
+--! Verarbeitet eine eingehende Nachricht und antwortet.
+fn handle_message token cid text dbh
+    if text == nil
+        return nil
+    tnorm: trim text
+    if tnorm == ""
+        return nil
+    low: lower tnorm
+    if low == "/start" || low == "/hello" || low == "hallo" || low == "hi"
+        tel.tel_send_message token cid "Muninn ist online. Schreib mir etwas, das ich mir merken soll — oder stelle eine Frage."
+        return nil
+    kind: mem.classify_input tnorm
+    mem.log_event dbh (to_str cid) tnorm kind
+    if kind == "permanent" || kind == "task" || kind == "goal"
+        mem.add_memory dbh tnorm kind 2 "telegram" "nutzer"
+        tel.tel_send_message token cid ("Notiert (" ++ kind ++ "): " ++ tnorm)
+        return nil
+    if kind == "question"
+        answer: ""
+        try
+            res: grm.run_gremium dbh tnorm
+            answer: get res "content"
+        catch
+            answer: ""
+        if answer == nil || answer == ""
+            ctx: mem.retrieve_context dbh tnorm 3
+            if (len ctx) > 0
+                reply: "Dazu erinnere ich mich an:\n"
+                for c in ctx
+                    reply: reply ++ "• " ++ c ++ "\n"
+                tel.tel_send_message token cid reply
+            else
+                tel.tel_send_message token cid "Dazu fällt mir noch nichts ein."
+        else
+            tel.tel_send_message token cid answer
+        return nil
+    tel.tel_send_message token cid ("Verstanden. (" ++ kind ++ ")")
+
+--! Ein Polling-Zyklus. Liefert die letzte verarbeitete update_id zurück.
+fn poll_once token offset allowed
+    dbh: mem.init_db nil
+    updates: tel.tel_get_updates token offset 25
+    for upd in updates
+        uid: get upd "update_id"
+        if uid != nil
+            offset: uid + 1
+        msg: get upd "message"
+        if msg != nil
+            chat: get msg "chat"
+            if chat != nil
+                cid: get chat "id"
+                if is_allowed cid allowed
+                    txt: get msg "text"
+                    handle_message token cid txt dbh
+    mem.close dbh
+    offset
+
+--! CLI-Argumente lesen.
+avgs: args
+once_mode: false
+if (len avgs) > 0
+    if (at avgs 0) == "once"
+        once_mode: true
+
+cfg: load_env ".env"
+setup_ai cfg
+grm.init_gremium 0
+tok: cfg_get cfg "TELEGRAM_BOT_TOKEN"
+if tok == nil || tok == ""
+    print "TELEGRAM_BOT_TOKEN fehlt (Env oder .env). Abbruch."
+else
+    allowed: cfg_get cfg "TELEGRAM_ALLOWED_CHAT_ID"
+    print "Muninn gestartet."
+    off: nil
+    if once_mode
+        print "once-Modus: ein Zyklus"
+        off: poll_once tok off allowed
+        print "once-Zyklus fertig."
+    else
+        while true
+            off: poll_once tok off allowed

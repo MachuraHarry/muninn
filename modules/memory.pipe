@@ -1,0 +1,256 @@
+--! memory.pipe — Muninns persistente "Seele".
+--! Alles Gedächtnis liegt in einer sqlite-Datei; die Seele wird ohne KI-Call
+--! wiederhergestellt. Eingehende Nachrichten werden klassifiziert und verdichtet.
+import "sqlite"
+
+DB_PATH: "muninn.db"
+
+--! Öffnet die Datenbank und legt das Schema an (idempotent).
+--! path: optionaler Dateipfad (z.B. ":memory:"); nil = DB_PATH.
+export fn init_db path
+    p: DB_PATH
+    if path != nil && path != ""
+        p: path
+    h: db_open p
+    db_exec h "CREATE TABLE IF NOT EXISTS meta (mkey TEXT PRIMARY KEY, mval TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT, kind TEXT, importance INTEGER DEFAULT 0, source TEXT, ts TEXT, tags TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS threads (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, state TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS goals (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, status TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, msg TEXT, kind TEXT, ts TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS embeddings (memory_id INTEGER PRIMARY KEY, vec TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS entities (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, kind TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS relations (id INTEGER PRIMARY KEY AUTOINCREMENT, from_id INTEGER, to_id INTEGER, rel TEXT)"
+    h
+
+--! Schließt die Datenbank und persistiert die Änderungen auf die Datei.
+export fn close h
+    db_close h
+
+--! Setzt einen Meta-Schlüssel (INSERT oder UPDATE).
+export fn meta_set h key value
+    rows: db_query h ("SELECT mkey FROM meta WHERE mkey = '" ++ (sql_escape key) ++ "'")
+    if (len rows) > 0
+        db_exec h ("UPDATE meta SET mval = '" ++ (sql_escape value) ++ "' WHERE mkey = '" ++ (sql_escape key) ++ "'")
+    else
+        db_exec h ("INSERT INTO meta (mkey, mval) VALUES ('" ++ (sql_escape key) ++ "', '" ++ (sql_escape value) ++ "')")
+
+--! Liest einen Meta-Schlüssel (oder "").
+export fn meta_get h key
+    rows: db_query h ("SELECT mval FROM meta WHERE mkey = '" ++ (sql_escape key) ++ "'")
+    if (len rows) > 0
+        get (at rows 0) "mval"
+    else
+        ""
+
+--! SQL-Sicherheits-Escape für Strings in einfachen Anführungszeichen.
+export fn sql_escape s
+    replace_all s "'" "''"
+
+--! Merkt eine Erinnerung (kind: one of memory/task/fact/question; importance 1-5).
+--! Berechnet ein Embedding und speichert es für die RAG-Suche. Liefert die id.
+export fn add_memory h content kind importance source tags
+    db_exec h ("INSERT INTO memories (content, kind, importance, source, ts, tags) VALUES ('" ++ (sql_escape content) ++ "', '" ++ (sql_escape kind) ++ "', " ++ (to_str importance) ++ ", '" ++ (sql_escape source) ++ "', datetime('now'), '" ++ (sql_escape tags) ++ "')")
+    rid: get (at (db_query h "SELECT max(id) AS mid FROM memories") 0) "mid"
+    vec: nil
+    try
+        vec: embed content
+    catch e
+        vec: nil
+    if vec != nil
+        db_exec h ("INSERT INTO embeddings (memory_id, vec) VALUES (" ++ (to_str rid) ++ ", '" ++ (sql_escape (to_json vec)) ++ "')")
+    rid
+
+--! Protokolliert ein eingehendes Ereignis (für Audit/Debug).
+export fn log_event h chat_id text kind
+    db_exec h ("INSERT INTO events (chat_id, msg, kind, ts) VALUES ('" ++ (sql_escape chat_id) ++ "', '" ++ (sql_escape text) ++ "', '" ++ (sql_escape kind) ++ "', datetime('now'))")
+
+--! Holt die N wichtigsten Erinnerungen (hohe Importance zuerst).
+export fn top_memories h n
+    db_query h ("SELECT content, kind, importance, ts, tags FROM memories ORDER BY importance DESC, id DESC LIMIT " ++ (to_str n))
+
+--! Zählt Erinnerungen (Test-Helfer).
+export fn memory_count h
+    rows: db_query h "SELECT COUNT(*) AS c FROM memories"
+    get (at rows 0) "c"
+
+--! Holt die N jüngsten Ereignisse (Audit/Debug).
+export fn recent_events h n
+    db_query h ("SELECT chat_id, msg, kind, ts FROM events ORDER BY id DESC LIMIT " ++ (to_str n))
+
+--! Klassifiziert eine eingehende Nachricht via KI in eine Kategorie.
+--! Fallback (kein AI): einfache Regel-Klassifikation.
+export fn classify_input text
+    try
+        classify text (["permanent", "fleeting", "task", "goal", "question"])
+    catch e
+        rule_classify text
+
+--! Regelbasierte Klassifikation (deterministisch, ohne KI) — für Tests und Fallback.
+export fn rule_classify text
+    t: lower text
+    if contains t "erinnere" || contains t "merke" || contains t "denke an"
+        "permanent"
+    else
+        if contains t "erledige" || contains t "to-do" || contains t "aufgabe" || contains t "mache"
+            "task"
+        else
+            if contains t "ziel" || contains t "erreichen" || contains t "wollen"
+                "goal"
+            else
+                if contains t "?"
+                    "question"
+                else
+                    "fleeting"
+
+--! Verdichtet Text via KI auf eine Kurzform (Fallback: unverändert).
+export fn condense text
+    try
+        summarize text
+    catch e
+        text
+
+--! Stoppwort-Prüfung (Deutsch + Englisch).
+fn is_stop t
+    stops: split "a an the and or but if of in on at to for with about into is are was were be been being do does did doing how what which who this that these those it its as from by can could should would will not no nor your you we they he she has have had i me my them their there here when where why then than so too very just also using use der die das den dem des ein eine einer einem eines und oder aber wenn von im auf an zu zur zum für mit über ist sind war waren bin bist sein wird werden wie was welche wer dieser diese dieses es ich du er sie wir ihr man nicht kein keine auch als aus bei nach nur schon noch dann da hier dort warum wann" " "
+    contains stops t
+
+--! Zerlegt Text in relevante Kleinschreibungs-Tokens (ohne Stoppwörter).
+fn tokenize text
+    low: lower text
+    cleaned: regex_replace "[^a-z0-9äöüß_]+" " " low
+    parts: split cleaned " "
+    out: []
+    for t in parts
+        if (len t) > 1 && (not (is_stop t))
+            push out t
+    out
+
+--! Dokumenthäufigkeit: für jeden Token, in wie vielen Texten er vorkommt.
+fn build_df contents
+    df: {}
+    for c in contents
+        toks: tokenize c
+        seen: {}
+        for t in toks
+            if (get seen t) == nil
+                set seen t true
+                cur: get df t
+                if cur == nil
+                    set df t 1
+                else
+                    set df t (cur + 1)
+    df
+
+--! TF-IDF-artiges Termgewicht (Float, damit die Division nicht ganzzahlig kollabiert).
+fn term_weight t df n
+    dfv: get df t
+    if dfv == nil
+        dfv: 1.0
+    (n + 1.0) / (dfv + 1.0)
+
+fn keyword_denom terms df n
+    sum: 0
+    for t in terms
+        sum: sum + (term_weight t df n)
+    sum
+
+fn keyword_score content_lower terms df n
+    score: 0
+    for t in terms
+        if contains content_lower t
+            score: score + (term_weight t df n)
+    score
+
+--! RAG: hybride Suche (Keyword-TF-IDF + semantisches Embedding).
+--! DeepSeek liefert nur 128-dim lexikalische Embeddings → Keyword dominiert (0.75).
+--! Bei echten Embeddings (>300 dim, z.B. OpenAI) übernimmt Semantik (0.7).
+export fn retrieve_context h query k
+    if query == nil || query == ""
+        return []
+    rows: db_query h "SELECT id, content, importance FROM memories ORDER BY id DESC"
+    if (len rows) == 0
+        return []
+    vecs: db_query h "SELECT memory_id, vec FROM embeddings"
+    vecmap: {}
+    for v in vecs
+        set vecmap (to_str (get v "memory_id")) (get v "vec")
+    contents: []
+    for r in rows
+        push contents (get r "content")
+    n: len contents
+    terms: tokenize query
+    df: build_df contents
+    kw_denom: keyword_denom terms df n
+    qvec: nil
+    try
+        qvec: embed query
+    catch e
+        qvec: nil
+    sem_w: 0.25
+    kw_w: 0.75
+    if qvec != nil
+        if (len qvec) > 300
+            sem_w: 0.7
+            kw_w: 0.3
+    scored: []
+    for r in rows
+        c: get r "content"
+        kw: 0
+        if kw_denom > 0
+            kw: (keyword_score (lower c) terms df n) / kw_denom
+        sem: 0
+        if qvec != nil
+            vj: get vecmap (to_str (get r "id"))
+            if vj != nil
+                cv: nil
+                try
+                    cv: parse_json vj
+                catch e2
+                    cv: nil
+                if cv != nil
+                    sem: cosine_sim qvec cv
+        score: (sem * sem_w) + (kw * kw_w)
+        push scored {content: c, score: score}
+    ordered: sorted_by scored (fn x: (0 - (get x "score")))
+    out: []
+    i: 0
+    while i < k && i < (len ordered)
+        push out (get (at ordered i) "content")
+        i: i + 1
+    out
+
+--! Reine Stichwort-Suche (deterministisch, ohne Embedding).
+export fn keyword_retrieve h query k
+    terms: tokenize query
+    rows: db_query h "SELECT content FROM memories ORDER BY importance DESC, id DESC"
+    out: []
+    for r in rows
+        c: get r "content"
+        lc: lower c
+        for t in terms
+            if contains lc t
+                if !(contains out c)
+                    if (len out) < k
+                        push out c
+    out
+
+--! Wissensgraph: legt eine Entität an (oder liefert ihre id). kind: node/place/person/...
+export fn add_entity h name kind
+    rows: db_query h ("SELECT id FROM entities WHERE name = '" ++ (sql_escape name) ++ "'")
+    if (len rows) > 0
+        get (at rows 0) "id"
+    else
+        db_exec h ("INSERT INTO entities (name, kind) VALUES ('" ++ (sql_escape name) ++ "', '" ++ (sql_escape kind) ++ "')")
+        get (at (db_query h "SELECT max(id) AS mid FROM entities") 0) "mid"
+
+--! Wissensgraph: verknüpft zwei Entitäten über eine Relation.
+export fn add_relation h from_name to_name rel
+    a: add_entity h from_name "node"
+    b: add_entity h to_name "node"
+    db_exec h ("INSERT INTO relations (from_id, to_id, rel) VALUES (" ++ (to_str a) ++ ", " ++ (to_str b) ++ ", '" ++ (sql_escape rel) ++ "')")
+    "ok"
+
+--! Wissensgraph: alle Nachbarn einer Entität (mit Relation und Zielname).
+export fn neighbors_of h name
+    rows: db_query h ("SELECT r.rel, e2.name AS target FROM entities e1 JOIN relations r ON r.from_id = e1.id JOIN entities e2 ON e2.id = r.to_id WHERE e1.name = '" ++ (sql_escape name) ++ "'")
+    rows

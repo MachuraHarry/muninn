@@ -1,0 +1,107 @@
+--! telegram.pipe — Telegram Bot API client (Long-Polling), rein HTTP.
+--! Basis: https://core.telegram.org/bots/api
+--! Token wird nie im Code abgelegt — immer als Parameter durchgereicht.
+--! Pipe-Map-Literale erlauben nur bare Identifier als Keys; Telegram braucht
+--! String-Keys (chat_id, text, ...), daher wird jeder Request-Body mit `set` aufgebaut.
+
+--! Baut eine Fehler-Rückgabe-Map auf (ok: false).
+fn err_map status body
+    m: {}
+    set m "ok" false
+    set m "status" status
+    set m "body" body
+    m
+
+--! Generischer POST: liefert das parse_json-Ergebnis (Map mit "ok").
+export fn tel_post token method body_map
+    url: "https://api.telegram.org/bot" ++ token ++ "/" ++ method
+    hdrs: {}
+    set hdrs "Content-Type" "application/json"
+    body: to_json body_map
+    r: http_request "POST" url hdrs body
+    status: get r "status"
+    j: nil
+    try
+        j: parse_json (get r "body")
+    catch e
+        j: nil
+    if j == nil
+        return (err_map status (get r "body"))
+    if status != 200
+        return (err_map status j)
+    j
+
+--! Generischer GET mit Query-Parametern (query ist eine Liste von [key, value]-Paaren).
+--! Listenliterale als Funktionsargument werden in Klammern gesetzt: ([]).
+export fn tel_get token method query
+    qs: ""
+    for pair in query
+        k: at pair 0
+        v: at pair 1
+        sep: "?"
+        if (len qs) > 0
+            sep: "&"
+        qs: qs ++ sep ++ k ++ "=" ++ (urlencode v)
+    url: "https://api.telegram.org/bot" ++ token ++ "/" ++ method ++ qs
+    r: http_request "GET" url
+    j: nil
+    try
+        j: parse_json (get r "body")
+    catch e
+        j: nil
+    if j == nil
+        return (err_map (get r "status") (get r "body"))
+    j
+
+--! Primitive URL-Encoding für Query-Parameter.
+fn urlencode s
+    s: replace_all s "%" "%25"
+    s: replace_all s "&" "%26"
+    s: replace_all s "=" "%3D"
+    s: replace_all s "+" "%2B"
+    s: replace_all s " " "%20"
+    s
+
+--! Bot-Info: {"ok": true, "result": {...}}
+export fn tel_get_me token
+    tel_get token "getMe" ([])
+
+--! Offene Updates (Long-Polling). Liefert die result-Liste (oder []).
+export fn tel_get_updates token offset timeout
+    query: [["timeout", (to_str timeout)]]
+    if offset != nil
+        query: [["offset", (to_str offset)], ["timeout", (to_str timeout)]]
+    j: tel_get token "getUpdates" query
+    if get j "ok"
+        get j "result"
+    else
+        []
+
+--! Sende eine Textnachricht in einen Chat.
+export fn tel_send_message token chat_id text
+    m: {}
+    set m "chat_id" chat_id
+    set m "text" text
+    tel_post token "sendMessage" m
+
+--! Bearbeite eine gesendete Nachricht.
+export fn tel_edit_message_text token chat_id message_id text
+    m: {}
+    set m "chat_id" chat_id
+    set m "message_id" message_id
+    set m "text" text
+    tel_post token "editMessageText" m
+
+--! Lösche eine Nachricht.
+export fn tel_delete_message token chat_id message_id
+    m: {}
+    set m "chat_id" chat_id
+    set m "message_id" message_id
+    tel_post token "deleteMessage" m
+
+--! "Schreibt gerade"-Status.
+export fn tel_send_chat_action token chat_id action
+    m: {}
+    set m "chat_id" chat_id
+    set m "action" action
+    tel_post token "sendChatAction" m

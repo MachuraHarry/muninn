@@ -1,0 +1,51 @@
+--! swarm.pipe — Muninns inneres Gremium (ai_swarm-Handoffs).
+--! Vier Agenten verfeinern eine Antwort: planer -> faktenwaechter -> kritiker -> registrator.
+--! Hinweis: Map-Literale müssen in Pipe einzeilig sein, daher stehen die Configs einzeilig.
+import "modules/memory.pipe" as mem
+
+--! Geteilter, mutabler Zustand: aktueller DB-Handle für die Tools.
+STATE: {dbh: nil}
+
+fn cur_dbh _
+    get STATE "dbh"
+
+--! Tool: relevante Erinnerungen aus der Seele abrufen.
+fn tool_erinnerungen_suchen query
+    h: cur_dbh 0
+    if h == nil
+        return "Keine Datenbank verbunden."
+    ctx: mem.retrieve_context h query 5
+    if (len ctx) == 0
+        return "Keine relevanten Erinnerungen gefunden."
+    out: ""
+    for c in ctx
+        out: out ++ "- " ++ c ++ "\n"
+    out
+
+--! Tool: eine Erkenntnis dauerhaft merken.
+fn tool_merken content kind
+    h: cur_dbh 0
+    if h == nil
+        return "Keine Datenbank verbunden."
+    mem.add_memory h content kind 3 "gremium" "gremium"
+    "Gemerkt: " ++ content
+
+--! Registriert Tools und Gremium-Agenten (einmalig beim Start).
+export fn init_gremium _
+    ai_tool "erinnerungen_suchen" "Relevante Erinnerungen aus Muninns Langzeitgedaechtnis abrufen, um Fakten zu belegen." {query: "Suchanfrage"} tool_erinnerungen_suchen
+    ai_tool "merken" "Eine wichtige dauerhafte Erkenntnis ueber den Nutzer speichern." {content: "Inhalt", kind: "Kategorie"} tool_merken
+
+    swarm_agent "planer" {system: "Du bist der Planer im inneren Gremium von Muninn, einem persoenlichen KI-Agenten mit Langzeitgedaechtnis. Analysiere die Nutzeranfrage. Bei Fakten- oder Gedaechtnisfragen leite an 'faktenwaechter' weiter. Sonst leite an 'kritiker' weiter.", handoff: ["faktenwaechter", "kritiker"]}
+
+    swarm_agent "faktenwaechter" {system: "Du bist der Faktenwaechter im Gremium. Stuetze jede Aussage auf Muninns Gedaechtnis. Rufe 'erinnerungen_suchen' mit der Nutzerfrage auf und antworte ausschliesslich auf Basis der gefundenen Erinnerungen. Leite deine fundierte Antwort an 'kritiker' weiter.", tools: ["erinnerungen_suchen"], handoff: ["kritiker", "planer"]}
+
+    swarm_agent "kritiker" {system: "Du bist der Kritiker im Gremium. Pruefe die bisherige Antwort auf Luecken, Widersprueche und Unklarheiten und verbessere sie zu einer praezisen, ehrlichen Antwort. Wenn Fakten fehlen, leite an 'faktenwaechter' zurueck. Sonst leite die verbesserte Antwort an 'registrator' weiter.", handoff: ["faktenwaechter", "registrator"]}
+
+    swarm_agent "registrator" {system: "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer, speichere sie mit 'merken'. Gib danach die endgueltige Antwort an den Nutzer aus, ohne weitere Uebergabe.", tools: ["merken"], handoff: []}
+
+    nil
+
+--! Fuehrt das Gremium aus. Liefert {content, path, rounds}.
+export fn run_gremium dbh task
+    set STATE "dbh" dbh
+    ai_swarm_trace task "planer" 6
