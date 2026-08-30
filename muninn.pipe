@@ -427,7 +427,7 @@ fn handle_message token cid text dbh
             ctx_text: join ctx "\n\n"
             reply: ""
             try
-                reply: ai_chat "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des folgenden Kontexts knapp und faktentreu. Wenn der Kontext nichts Passendes enthaelt, sage ehrlich, dass du es nicht weisst. Gib nur die Antwort aus, kein internes Reasoning." ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx_text)
+                reply: ai_chat ((grm.self_context 0) ++ "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des folgenden Kontexts knapp und faktentreu. Wenn der Kontext nichts Passendes enthaelt, sage ehrlich, dass du es nicht weisst. Gib nur die Antwort aus, kein internes Reasoning.") ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx_text)
             catch
                 reply: ""
             if reply == nil || reply == ""
@@ -448,7 +448,7 @@ fn handle_message token cid text dbh
             else
                 answer2: ""
                 try
-                    answer2: ai_chat "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des recherchierten Kontexts knapp und faktentreu. Gib nur die Antwort aus, kein internes Reasoning." ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx2)
+                    answer2: ai_chat ((grm.self_context 0) ++ "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des recherchierten Kontexts knapp und faktentreu — der Kontext stammt aus einer WEB-Recherche zum Thema der Frage, NICHT aus einer Recherche ueber Muninn selbst. Geht es in der Frage um Muninns eigene Faehigkeiten/Werkzeuge, nutze dafuer das Selbstwissen oben, nicht den Web-Kontext. WICHTIG: Dieser Aufruf hier ist reine Textzusammenfassung OHNE Werkzeugzugriff — behaupte NIEMALS, gerade etwas zu tun/recherchieren/einzurichten oder Schritte einzuleiten. Ist die Anfrage eine AKTION (z.B. 'richte X ein', 'lege einen Container an') statt einer Wissensfrage, erklaere knapp, dass du das ueber deine echten Werkzeuge tun kannst, und bitte den Nutzer, es nochmal als direkte Aufforderung zu senden. Gib nur die Antwort aus, kein internes Reasoning.") ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx2)
                 catch
                     answer2: ctx2
                 if answer2 == nil || answer2 == ""

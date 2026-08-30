@@ -143,6 +143,34 @@ FORMAT_RULE: "Formatiere deine Antwort fuer einen Telegram-Chat, nicht fuer ein 
 --! Frage war, keine Aussage ueber den Nutzer.
 MEMORY_HONESTY_RULE: "Ergebnisse von 'erinnerungen_suchen', die mit '[fruehere Recherche/Protokoll, KEINE Aussage des Nutzers]' markiert sind, sind KI-generierte Recherche-Ergebnisse oder Protokolle — KEINE Aussagen des Nutzers ueber sich selbst. Aus solchen Eintraegen darfst du NIEMALS auf Interessen, Meinungen oder Praeferenzen des Nutzers schliessen. Nur unmarkierte Eintraege sind tatsaechliche Aussagen des Nutzers. Findest du zu einer Frage nach Interessen/Vorlieben nur markierte oder gar keine Eintraege, sag ehrlich, dass dazu noch nichts Eindeutiges von ihm gespeichert ist, statt aus Recherche-Nebenprodukten eine Praeferenz zu konstruieren.\n\n"
 
+--! Selbstwissen + echte, aktuelle Werkzeugliste als EIN Kontext-Block — fuer
+--! Code AUSSERHALB des Gremiums, der trotzdem "als Muninn" antworten muss
+--! (der Web-Recherche-Fallback in muninn.pipe: wenn das Gremium eine Frage
+--! nicht beantworten kann, wird zusaetzlich recherchiert und ein eigener,
+--! schlanker ai_chat-Aufruf formuliert die Antwort). Ohne dieses Wissen
+--! behauptet ein bare ai_chat-Aufruf mit nur "Du bist Muninn, ein
+--! persoenlicher KI-Assistent" als Prompt schnell faelschlich, gar keine
+--! Werkzeuge/Systemzugriff zu haben — beobachtet live: "Ich kann keine
+--! Docker-Container erstellen, ich bin ein textbasierter Recherche-
+--! Assistent", obwohl werkzeug_docker das nachweislich kann (siehe
+--! docker_tools.pipe, live mit einem echten nginx-Container getestet).
+--! Absichtlich eine schlanke Teilmenge der init_gremium-Logik (nur die
+--! Beschreibung, keine Agenten-Registrierung) statt diese zu duplizieren.
+export fn self_context _
+    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen", "docker_pull_image", "docker_create_container"]
+    mcp_groups: mcp.discovered_tools_by_source local_names
+    mcp_names: []
+    for grp in mcp_groups
+        for tn in (get grp "tools")
+            push mcp_names tn
+    desc: "ECHTE, aktuell verfuegbare Werkzeuge: 'erinnerungen_suchen' (Gedaechtnis durchsuchen), 'merken'/'merken_quelle' (dauerhaft speichern), 'web_search'/'web_fetch' (im Internet recherchieren), 'erinnerung_planen' (Termin/Erinnerung planen)"
+    if (len mcp_groups) > 0
+        desc: desc ++ ", sowie per MCP extern angebunden: " ++ (join mcp_names ", ") ++ ". Bei Docker gehoeren zusaetzlich 'docker_pull_image'/'docker_create_container' dazu (Image ziehen, Container starten — OHNE Volume-Mounts/--privileged, das ist Absicht, keine fehlende Faehigkeit)."
+    else
+        desc: desc ++ ". Kein externer MCP-Server angebunden."
+    desc: desc ++ " Behaupte NIE pauschal, keine Werkzeuge/keinen Systemzugriff zu haben, wenn diese Liste nicht leer ist.\n\n"
+    SELF_ID ++ desc
+
 --! Registriert Tools und Gremium-Agenten (einmalig beim Start).
 --! Bindet zusaetzlich alle bereits per mcp.connect_servers verbundenen MCP-Tools
 --! (Dateisystem, GitHub, ...) an einen eigenen "werkzeugmeister"-Agenten (P1).
