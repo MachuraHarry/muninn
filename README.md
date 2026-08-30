@@ -109,6 +109,7 @@ pipe -test
 | `/list` | deine wichtigsten Erinnerungen |
 | `/search <begriff>` | Web-Recherche mit Quellen |
 | `/reset` | Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen) |
+| `/consolidate` | Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen |
 
 ### Natürliche Sprache
 
@@ -165,6 +166,23 @@ Ein **Thread pro Chat** (`threads`-Tabelle) sammelt den Gesprächsverlauf
   Konversationslogik bleibt dabei stateless (`swarm.pipe` braucht keine Änderung).
 - **`/reset`** schließt den aktiven Thread; die nächste Nachricht startet einen
   frischen, leeren Kontext.
+
+### Konsolidierung („Traum", `memory.pipe`, P2)
+
+Ein periodischer Aufräum-/Verdichtungsjob, ausführbar per `pipe muninn.pipe consolidate`
+(z.B. via Cron — Pipe hat vor P4 keinen eigenen Scheduler) oder per Telegram-Befehl
+`/consolidate`:
+
+- **`consolidate_threads`** verdichtet fällige Threads (geschlossen, oder aktiv seit
+  3 Tagen ohne neue Nachricht) zu je einer Zusammenfassungs-Erinnerung und löscht
+  danach die Rohnachrichten — begrenzt das sonst unbegrenzte Wachstum von `messages`.
+- **`consolidate_memories`** senkt die Importance alter, nicht-`permanent`er
+  Erinnerungen pro Lauf um 1 und vergisst sie endgültig, sobald sie bei Importance 0
+  angekommen und alt genug sind. Explizit gemerkte (`permanent`) Erinnerungen bleiben
+  unangetastet.
+- **Bug gefixt**: das externe, reine-Pipe-`sqlite`-Modul wertet `datetime('now')`
+  nicht aus (speichert wörtlich `"now"`) — `mem.now_ts` baut Zeitstempel seither
+  selbst aus Pipes `now`/`format_time`.
 
 ### Inneres Gremium (`swarm.pipe`)
 

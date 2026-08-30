@@ -73,10 +73,32 @@ Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung f
   `/reset` schließt den aktiven Thread (frischer Kontext danach). 6 neue Tests.
   Bewusst noch **kein** Kontextfenster-Management über die letzten 6 Nachrichten
   hinaus — das übernimmt als Nächstes die Konsolidierung.
-- ⏳ **Konsolidierung („Träume")**: periodischer Job verdichtet alte, unwichtige
-  Erinnerungen, bildet Verallgemeinerungen, senkt Importance, löscht Veraltetes.
-  Mit dem Episodischen Gedächtnis jetzt auch Kandidat für alte `messages`/
-  `threads` (aktuell wächst die `messages`-Tabelle unbegrenzt).
+- ✅ **Konsolidierung („Träume")**: `memory.pipe` — `consolidate_threads` verdichtet
+  fällige Threads (geschlossen, oder aktiv seit `inactive_days` ohne neue
+  Nachricht) zu je einer Zusammenfassungs-Erinnerung (kind `summary`, KI-Kürzung
+  mit deterministischem Fallback auf die ersten 800 Zeichen) und löscht danach
+  die Rohnachrichten — löst das oben genannte unbegrenzte Wachstum von
+  `messages`. `consolidate_memories` senkt die Importance alter, nicht-
+  `permanent`er Erinnerungen pro Lauf um 1 und vergisst (löscht) sie, sobald sie
+  bei Importance 0 UND alt genug sind; `permanent`-Erinnerungen (explizites
+  „merke dir …") bleiben unangetastet. Aufgerufen über `mem.consolidate h`
+  (Orchestrator, Default 3/14/30 Tage). Aktivierbar per neuem CLI-Modus
+  `pipe muninn.pipe consolidate` (für externen Cron — Pipe hat vor P4 keinen
+  eigenen Scheduler) oder direkt per Telegram-Befehl `/consolidate`. 9 neue Tests.
+  **Nebenbei gefundener und gefixter Bug**: das reine-Pipe-`sqlite`-Modul wertet
+  `datetime('now')` nicht aus — es speicherte wörtlich den String `"now"` in
+  jeder `ts`-Spalte (memories/events/messages/plans), was jede Alters-basierte
+  Logik unmöglich gemacht hätte. Neues `mem.now_ts` baut den Zeitstempel jetzt
+  selbst aus Pipes `now`/`format_time`. Zeilen mit dem alten `"now"`-Sentinel
+  gelten als unbekannt alt und werden von der Konsolidierung übersprungen bzw.
+  nur über explizite Zustände (z.B. `closed`) fällig, nie über Inaktivitätsdauer.
+  (Der Bug betrifft nur `muninn`s eigene Nutzung des `sqlite`-Moduls — eine
+  Korrektur im `pipe-modules`-Repo selbst stand nicht an, siehe unten.)
+- ⏳ **Verallgemeinerung über reine Kürzung hinaus**: `consolidate_threads`
+  kürzt/summiert bislang nur je einen einzelnen Thread; ein echtes Verdichten
+  *mehrerer* ähnlicher, kleiner Erinnerungen zu einer generalisierten Aussage
+  (z.B. mehrere Einzel-Fakten über eine Vorliebe → eine zusammenfassende
+  Erinnerung) ist noch offen.
 - ⏳ **Auto-Entitäten + Graph**: automatische Entitäts-Extraktion und Verknüpfung
   im Wissensgraph (`entities`/`relations`).
 - ⏳ **Dokument-Ingestion**: URLs, Dateien, PDFs → eigene Wissensbasis (RAG).
@@ -148,6 +170,11 @@ muninn_test.pipe       deterministische Tests
 - **Discord**: nur REST-Polling ohne WebSocket-Go-Erweiterung (kein Echtzeit-Gateway).
 - **MCP**: Subprozesse erfordern bewusst eng gefasste `exec`-Freigabe im Profil.
 - **Voice**: Pipe hat aktuell kein Speech-to-Text; ggf. extern lösen.
+- **Externer `sqlite`-Modul-Bug** (`datetime('now')` wird nicht ausgewertet, siehe
+  P2/Konsolidierung oben): in `muninn` selbst umgangen (`mem.now_ts`); ein Fix im
+  `pipe-modules`-Repo stromaufwärts steht noch aus, falls gewünscht. Ebenso
+  `docs/de/10-builtin-referenz.md`s Beispiel `ts: now 0` ist veraltet — `now`
+  nimmt inzwischen keine Argumente mehr (`now` bar aufrufen, nicht `now 0`).
 
 ## Nicht-Ziele (bewusst)
 

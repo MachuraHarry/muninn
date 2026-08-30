@@ -1,6 +1,7 @@
 --! muninn_test.pipe — deterministische Tests für Muninn (ohne KI, ohne Netz).
 --! Ausführen:  pipe -test   (aus dem muninn/ Verzeichnis)
 import "pipe-test"
+import "sqlite"
 import "modules/memory.pipe" as mem
 import "modules/swarm.pipe" as grm
 import "modules/executor.pipe" as exe
@@ -107,6 +108,79 @@ test "close_thread beendet den aktiven Thread; naechster Aufruf legt frischen an
     hist: mem.thread_history h t2 10
     expect_eq (len hist) 0 "frischer Thread ist leer"
     mem.close h
+
+--! Konsolidierung ("Traum", P2): Zeitstempel + Verdichtung/Vergessen.
+--! Hinweis: datetime('now') wird vom reinen-Pipe-sqlite-Modul NICHT ausgewertet
+--! (siehe now_ts-Kommentar in memory.pipe) — now_ts baut den Zeitstempel daher
+--! selbst; diese Tests decken auch das ab.
+test "now_ts liefert ein sortierbares 19-Zeichen-Datumsformat"
+    ts: mem.now_ts 0
+    expect_eq (len ts) 19 "YYYY-MM-DD HH:MM:SS"
+
+test "cutoff_ts liegt in der Vergangenheit von now_ts"
+    c: mem.cutoff_ts 1
+    n: mem.now_ts 0
+    expect_eq (c < n) true "1 Tag zurueck < jetzt"
+
+test "consolidate_threads verdichtet einen geschlossenen Thread zu einer Zusammenfassung"
+    h: mem.init_db ":memory:"
+    tid: mem.active_thread h "5"
+    mem.add_message h tid "5" "user" "Ich mag Espresso sehr."
+    mem.add_message h tid "5" "assistant" "Notiert."
+    mem.close_thread h "5"
+    done: mem.consolidate_threads h 3
+    expect_eq done 1 "ein Thread verdichtet"
+    hist: mem.thread_history h tid 10
+    expect_eq (len hist) 0 "Rohnachrichten geloescht"
+    top: mem.top_memories h 5
+    expect_eq (len top) 1 "eine Zusammenfassung gespeichert"
+    expect_eq (get (at top 0) "kind") "summary" "kind summary"
+
+test "consolidate_threads laesst aktive, junge Threads unangetastet"
+    h: mem.init_db ":memory:"
+    tid: mem.active_thread h "6"
+    mem.add_message h tid "6" "user" "Frisches Gespraech"
+    done: mem.consolidate_threads h 3
+    expect_eq done 0 "kein Thread faellig"
+    hist: mem.thread_history h tid 10
+    expect_eq (len hist) 1 "Nachricht bleibt erhalten"
+
+test "consolidate_memories senkt Importance alter, nicht-permanenter Erinnerungen"
+    h: mem.init_db ":memory:"
+    id: mem.add_memory h "Alte Notiz" "fact" 3 "test" "x"
+    db_exec h ("UPDATE memories SET ts = '" ++ (mem.cutoff_ts 30) ++ "' WHERE id = " ++ (to_str id))
+    res: mem.consolidate_memories h 14 60
+    expect_eq (get res "decayed") 1 "eine Erinnerung gealtert"
+    top: mem.top_memories h 5
+    expect_eq (get (at top 0) "importance") 2 "importance von 3 auf 2 gesenkt"
+
+test "consolidate_memories vergisst alte Erinnerungen bei Importance 0"
+    h: mem.init_db ":memory:"
+    id: mem.add_memory h "Laengst vergessen" "fact" 0 "test" "x"
+    db_exec h ("UPDATE memories SET ts = '" ++ (mem.cutoff_ts 40) ++ "' WHERE id = " ++ (to_str id))
+    res: mem.consolidate_memories h 14 30
+    expect_eq (get res "forgotten") 1 "eine Erinnerung vergessen"
+    expect_eq (mem.memory_count h) 0 "geloescht"
+
+test "consolidate_memories laesst 'permanent' unangetastet"
+    h: mem.init_db ":memory:"
+    id: mem.add_memory h "Wichtige Dauer-Erinnerung" "permanent" 3 "test" "x"
+    db_exec h ("UPDATE memories SET ts = '" ++ (mem.cutoff_ts 100) ++ "' WHERE id = " ++ (to_str id))
+    res: mem.consolidate_memories h 1 1
+    expect_eq (get res "decayed") 0 "permanent decayt nicht"
+    expect_eq (get res "forgotten") 0 "permanent wird nicht vergessen"
+    top: mem.top_memories h 5
+    expect_eq (get (at top 0) "importance") 3 "importance unveraendert"
+
+test "consolidate fasst Thread- und Memory-Konsolidierung zusammen"
+    h: mem.init_db ":memory:"
+    tid: mem.active_thread h "9"
+    mem.add_message h tid "9" "user" "Test"
+    mem.close_thread h "9"
+    res: mem.consolidate h
+    expect_eq (get res "threads_summarized") 1 "ein Thread verdichtet"
+    expect_eq (get res "memories_decayed") 0 "nichts zu altern"
+    expect_eq (get res "memories_forgotten") 0 "nichts zu vergessen"
 
 --! Wissensgraph.
 test "add_entity dedupliziert Namen"

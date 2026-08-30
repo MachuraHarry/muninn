@@ -159,12 +159,13 @@ export fn exec_step h s
 
 --! Legt einen Plan an und liefert die id.
 fn create_plan h goal steps
-    db_exec h ("INSERT INTO plans (goal, steps, state, step_idx, result, created, updated) VALUES ('" ++ (mem.sql_escape goal) ++ "', '" ++ (mem.sql_escape (to_json steps)) ++ "', 'running', 0, '', datetime('now'), datetime('now'))")
+    ts: mem.sql_escape (mem.now_ts 0)
+    db_exec h ("INSERT INTO plans (goal, steps, state, step_idx, result, created, updated) VALUES ('" ++ (mem.sql_escape goal) ++ "', '" ++ (mem.sql_escape (to_json steps)) ++ "', 'running', 0, '', '" ++ ts ++ "', '" ++ ts ++ "')")
     get (at (db_query h "SELECT max(id) AS mid FROM plans") 0) "mid"
 
 --! Aktualisiert den Planzustand (Checkpoint).
 fn update_plan h pid state idx result
-    db_exec h ("UPDATE plans SET state = '" ++ (mem.sql_escape state) ++ "', step_idx = " ++ (to_str idx) ++ ", result = '" ++ (mem.sql_escape result) ++ "', updated = datetime('now') WHERE id = " ++ (to_str pid))
+    db_exec h ("UPDATE plans SET state = '" ++ (mem.sql_escape state) ++ "', step_idx = " ++ (to_str idx) ++ ", result = '" ++ (mem.sql_escape result) ++ "', updated = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str pid))
 
 --! Beschreibt die 'mcp_call'-Aktion inkl. aktuell verfuegbarer Werkzeuge (lokal + MCP)
 --! fuer die KI-Plan-Prompts. Leer, wenn (noch) keine Werkzeuge registriert sind.

@@ -35,8 +35,10 @@ fn cfg_get cfg key
     get cfg key
 
 --! Richtet den AI-Provider ein (DeepSeek; KI-Klassifikation, Kondensation, Embeddings).
-fn setup_ai cfg
-    key: cfg_get cfg "DEEPSEEK_API_KEY"
+--! Nimmt den Key direkt entgegen (nicht cfg+cfg_get): sobald die Sandbox aktiv ist,
+--! blockiert `env()` sicherheitshalber jeden Namen, der wie ein Secret aussieht
+--! (*KEY*/*TOKEN*/*SECRET*) — DEEPSEEK_API_KEY muss also VOR set_sandbox gelesen sein.
+fn setup_ai key
     ai_provider "deepseek" {thinking: false}
     if key != nil && key != ""
         ai_set_key "deepseek" key
@@ -71,7 +73,7 @@ fn greeting_text _
 
 --! Hilfetext.
 fn help_text _
-    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)"
+    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen"
 
 --! Status-Text (Statistiken aus der Seele).
 fn status_text dbh
@@ -128,6 +130,11 @@ fn handle_message token cid text dbh
     if low == "/reset"
         mem.close_thread dbh cid
         tel.tel_send_message token cid "Gespraechsverlauf zurueckgesetzt — ich starte den Kontext frisch."
+        return nil
+    if low == "/consolidate"
+        tel.tel_send_chat_action token cid "typing"
+        res: mem.consolidate dbh
+        tel.tel_send_message token cid ("Konsolidierung: " ++ (to_str (get res "threads_summarized")) ++ " Threads verdichtet, " ++ (to_str (get res "memories_decayed")) ++ " Erinnerungen gealtert, " ++ (to_str (get res "memories_forgotten")) ++ " vergessen.")
         return nil
     if low == "/search"
         tel.tel_send_message token cid "Bitte gib einen Suchbegriff an: /search <begriff>"
@@ -314,35 +321,58 @@ fn poll_once token offset allowed
 --! CLI-Argumente lesen.
 avgs: args
 once_mode: false
+consolidate_mode: false
 if (len avgs) > 0
     if (at avgs 0) == "once"
         once_mode: true
+    if (at avgs 0) == "consolidate"
+        consolidate_mode: true
 
+--! Alle Secrets/Config-Werte werden VOR der Sandbox-Aktivierung gelesen (siehe
+--! setup_ai/setup_sandbox): einmal von vertrauenswürdigem Startup-Code eingesammelt,
+--! danach nur noch als Wert weitergereicht — nie erneut per env() nachgefragt.
 cfg: load_env ".env"
-mcp_servers: mcp.parse_mcp_config (cfg_get cfg "MCP_SERVERS")
-setup_sandbox mcp_servers
-setup_ai cfg
-mcp_results: mcp.connect_servers mcp_servers
-for r in mcp_results
-    if get r "ok"
-        print ("MCP verbunden: " ++ (get r "alias"))
-    else
-        print ("MCP fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
-grm.init_gremium 0
-tok: cfg_get cfg "TELEGRAM_BOT_TOKEN"
-if tok == nil || tok == ""
-    print "TELEGRAM_BOT_TOKEN fehlt (Env oder .env). Abbruch."
+deepseek_key: cfg_get cfg "DEEPSEEK_API_KEY"
+
+--! consolidate-Modus (P2, "Traum"): einmaliger Aufraeum-/Verdichtungslauf,
+--! z.B. per externem Cron: `pipe muninn.pipe consolidate`. Kein Scheduler in
+--! Pipe selbst vor P4 — daher bewusst als eigener CLI-Modus statt Dauer-Loop.
+--! Braucht kein Telegram/MCP, nur optional KI fuer die Thread-Zusammenfassung
+--! (Fallback ohne KI: erste 800 Zeichen des Verlaufs, siehe consolidate_threads).
+if consolidate_mode
+    sandbox_profile "consolidate" {fs: "full", network: false, exec: false, ai: true, audit_log: true}
+    set_sandbox "consolidate"
+    setup_ai deepseek_key
+    dbh: mem.init_db nil
+    res: mem.consolidate dbh
+    print ("Konsolidierung: " ++ (to_str (get res "threads_summarized")) ++ " Threads verdichtet, " ++ (to_str (get res "memories_decayed")) ++ " Erinnerungen gealtert, " ++ (to_str (get res "memories_forgotten")) ++ " vergessen.")
+    mem.close dbh
 else
+    tok: cfg_get cfg "TELEGRAM_BOT_TOKEN"
     allowed: cfg_get cfg "TELEGRAM_ALLOWED_CHAT_ID"
-    print "Muninn gestartet."
-    off: nil
-    if once_mode
-        print "once-Modus: ein Zyklus"
-        off: poll_once tok off allowed
-        print "once-Zyklus fertig."
+    mcp_servers: mcp.parse_mcp_config (cfg_get cfg "MCP_SERVERS")
+    mcp_servers: mcp.resolve_all_env mcp_servers
+    setup_sandbox mcp_servers
+    setup_ai deepseek_key
+    mcp_results: mcp.connect_servers mcp_servers
+    for r in mcp_results
+        if get r "ok"
+            print ("MCP verbunden: " ++ (get r "alias"))
+        else
+            print ("MCP fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
+    grm.init_gremium 0
+    if tok == nil || tok == ""
+        print "TELEGRAM_BOT_TOKEN fehlt (Env oder .env). Abbruch."
     else
-        while true
-            try
-                off: poll_once tok off allowed
-            catch
-                print "Zyklus-Fehler — versuche erneut."
+        print "Muninn gestartet."
+        off: nil
+        if once_mode
+            print "once-Modus: ein Zyklus"
+            off: poll_once tok off allowed
+            print "once-Zyklus fertig."
+        else
+            while true
+                try
+                    off: poll_once tok off allowed
+                catch
+                    print "Zyklus-Fehler — versuche erneut."

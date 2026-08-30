@@ -60,6 +60,17 @@ fn resolve_env raw_env
             set out k v
     out
 
+--! Löst "env:NAME"-Werte in ALLEN Server-envs auf. MUSS aufgerufen werden, BEVOR
+--! ein Sandbox-Profil aktiv ist: sobald irgendein Profil aktiv ist, blockiert
+--! `env()` sicherheitshalber jeden Namen, der wie ein Secret aussieht
+--! (*KEY*/*TOKEN*/*SECRET*) — und genau solche Namen stehen typischerweise hinter
+--! "env:" (z.B. "env:GITHUB_TOKEN"). Mutiert die env-Maps der übergebenen Server
+--! in place und liefert dieselbe Liste zurück.
+export fn resolve_all_env servers
+    for s in servers
+        set s "env" (resolve_env (get s "env"))
+    servers
+
 --! Verbindet einen stdio-Server. Pipe-Builtins sind variadisch ohne Spread/Apply,
 --! daher Fallunterscheidung nach Argumentzahl (bis zu 7 Programmargumente).
 fn connect_stdio cmd cargs cenv alias

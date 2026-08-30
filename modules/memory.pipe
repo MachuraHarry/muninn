@@ -47,10 +47,18 @@ export fn meta_get h key
 export fn sql_escape s
     replace_all s "'" "''"
 
+--! Aktueller Zeitstempel im SQLite-"datetime('now')"-Format (sortierbarer String).
+--! Hinweis: das reine-Pipe-sqlite-Modul wertet `datetime('now')` NICHT als
+--! Funktion aus — es landet woertlich der String "now" in der Spalte. Deshalb
+--! bauen wir den Zeitstempel hier selbst aus Pipes eigenen now/format_time-
+--! Builtins und uebergeben ihn wie jeden anderen String-Wert.
+export fn now_ts _
+    format_time now "2006-01-02 15:04:05"
+
 --! Merkt eine Erinnerung (kind: one of memory/task/fact/question; importance 1-5).
 --! Berechnet ein Embedding und speichert es für die RAG-Suche. Liefert die id.
 export fn add_memory h content kind importance source tags
-    db_exec h ("INSERT INTO memories (content, kind, importance, source, ts, tags) VALUES ('" ++ (sql_escape content) ++ "', '" ++ (sql_escape kind) ++ "', " ++ (to_str importance) ++ ", '" ++ (sql_escape source) ++ "', datetime('now'), '" ++ (sql_escape tags) ++ "')")
+    db_exec h ("INSERT INTO memories (content, kind, importance, source, ts, tags) VALUES ('" ++ (sql_escape content) ++ "', '" ++ (sql_escape kind) ++ "', " ++ (to_str importance) ++ ", '" ++ (sql_escape source) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "', '" ++ (sql_escape tags) ++ "')")
     rid: get (at (db_query h "SELECT max(id) AS mid FROM memories") 0) "mid"
     vec: nil
     try
@@ -63,7 +71,7 @@ export fn add_memory h content kind importance source tags
 
 --! Protokolliert ein eingehendes Ereignis (für Audit/Debug).
 export fn log_event h chat_id text kind
-    db_exec h ("INSERT INTO events (chat_id, msg, kind, ts) VALUES ('" ++ (sql_escape chat_id) ++ "', '" ++ (sql_escape text) ++ "', '" ++ (sql_escape kind) ++ "', datetime('now'))")
+    db_exec h ("INSERT INTO events (chat_id, msg, kind, ts) VALUES ('" ++ (sql_escape chat_id) ++ "', '" ++ (sql_escape text) ++ "', '" ++ (sql_escape kind) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "')")
 
 --! Holt die N wichtigsten Erinnerungen (hohe Importance zuerst).
 export fn top_memories h n
@@ -104,7 +112,7 @@ export fn close_thread h chat_id
 
 --! Fuegt eine Nachricht zu einem Thread hinzu. role: "user" oder "assistant".
 export fn add_message h thread_id chat_id role content
-    db_exec h ("INSERT INTO messages (thread_id, chat_id, role, content, ts) VALUES (" ++ (to_str thread_id) ++ ", '" ++ (sql_escape (to_str chat_id)) ++ "', '" ++ (sql_escape role) ++ "', '" ++ (sql_escape content) ++ "', datetime('now'))")
+    db_exec h ("INSERT INTO messages (thread_id, chat_id, role, content, ts) VALUES (" ++ (to_str thread_id) ++ ", '" ++ (sql_escape (to_str chat_id)) ++ "', '" ++ (sql_escape role) ++ "', '" ++ (sql_escape content) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "')")
 
 --! Die letzten n Nachrichten eines Threads, chronologisch (aeltester zuerst).
 export fn thread_history h thread_id n
@@ -124,6 +132,89 @@ export fn format_history rows
         if (get r "role") == "assistant"
             who: "Muninn"
         out: out ++ who ++ ": " ++ (get r "content") ++ "\n"
+    out
+
+--! Konsolidierung ("Traum", P2): periodischer Aufraeum-/Verdichtungsjob.
+--! Nicht automatisch geplant (kein Scheduler vor P4) — manuell via
+--! `pipe muninn.pipe consolidate` oder per externem Cron aufzurufen.
+
+--! Zeitstempel-String n Tage vor jetzt, im selben Format wie now_ts (fuer
+--! Alters-Vergleiche als einfache String-WHERE-Bedingung).
+export fn cutoff_ts days_ago
+    format_time (now - (days_ago * 86400)) "2006-01-02 15:04:05"
+
+--! Verdichtet faellige Threads (geschlossen, oder aktiv aber seit
+--! inactive_days ohne neue Nachricht) zu je einer Zusammenfassungs-Erinnerung
+--! (kind "summary") und loescht danach deren Rohnachrichten. Zeilen mit dem
+--! Legacy-Sentinel-Wert "now" (siehe now_ts-Kommentar) gelten als unbekannt alt
+--! und werden nur ueber den "closed"-Zustand faellig, nie ueber Inaktivitaet.
+export fn consolidate_threads h inactive_days
+    cutoff: cutoff_ts inactive_days
+    threads: db_query h "SELECT id, state FROM threads WHERE state = 'closed' OR state = 'active'"
+    done: 0
+    for t in threads
+        tid: get t "id"
+        eligible: (get t "state") == "closed"
+        if !eligible
+            last: db_query h ("SELECT MAX(ts) AS last_ts FROM messages WHERE thread_id = " ++ (to_str tid))
+            if (len last) > 0
+                lts: get (at last 0) "last_ts"
+                if lts != nil && lts != "now" && lts < cutoff
+                    eligible: true
+        if eligible
+            msgs: db_query h ("SELECT role, content FROM messages WHERE thread_id = " ++ (to_str tid) ++ " ORDER BY id ASC")
+            if (len msgs) > 0
+                text: format_history msgs
+                summary: ""
+                try
+                    summary: summarize text
+                catch e
+                    summary: substring text 0 800
+                add_memory h ("Gespraechs-Zusammenfassung: " ++ summary) "summary" 2 "consolidation" ("thread-" ++ (to_str tid))
+                db_exec h ("DELETE FROM messages WHERE thread_id = " ++ (to_str tid))
+                done: done + 1
+            db_exec h ("UPDATE threads SET state = 'archived' WHERE id = " ++ (to_str tid))
+    done
+
+--! Senkt die Importance alter, nicht-"permanent"er Erinnerungen um 1 pro Lauf
+--! und vergisst (loescht) sie, sobald sie bei Importance 0 angekommen UND
+--! aelter als forget_after_days sind. "permanent" (explizites "merke dir ...")
+--! bleibt unangetastet — das ist bewusst dauerhaftes Wissen. Zeilen mit dem
+--! Legacy-Sentinel "now" werden uebersprungen (Alter unbekannt).
+export fn consolidate_memories h decay_after_days forget_after_days
+    decay_cut: cutoff_ts decay_after_days
+    forget_cut: cutoff_ts forget_after_days
+    rows: db_query h "SELECT id, importance, ts FROM memories WHERE kind != 'permanent'"
+    decayed: 0
+    forgotten: 0
+    for m in rows
+        ts: get m "ts"
+        if ts != nil && ts != "now"
+            mid: get m "id"
+            imp: get m "importance"
+            if imp <= 0 && ts < forget_cut
+                db_exec h ("DELETE FROM memories WHERE id = " ++ (to_str mid))
+                db_exec h ("DELETE FROM embeddings WHERE memory_id = " ++ (to_str mid))
+                forgotten: forgotten + 1
+            else
+                if imp > 0 && ts < decay_cut
+                    db_exec h ("UPDATE memories SET importance = " ++ (to_str (imp - 1)) ++ " WHERE id = " ++ (to_str mid))
+                    decayed: decayed + 1
+    out: {}
+    set out "decayed" decayed
+    set out "forgotten" forgotten
+    out
+
+--! Haupt-Einstieg der Konsolidierung: Threads nach 3 Tagen Inaktivitaet
+--! verdichten, nicht-permanente Erinnerungen ab 14 Tagen um 1 Stufe altern
+--! lassen, ab 30 Tagen bei Importance 0 endgueltig vergessen.
+export fn consolidate h
+    threads_summarized: consolidate_threads h 3
+    mres: consolidate_memories h 14 30
+    out: {}
+    set out "threads_summarized" threads_summarized
+    set out "memories_decayed" (get mres "decayed")
+    set out "memories_forgotten" (get mres "forgotten")
     out
 
 --! Klassifiziert eine eingehende Nachricht via KI in eine Kategorie.
