@@ -67,11 +67,21 @@ export fn add_memory h content kind importance source tags
         vec: nil
     if vec != nil
         db_exec h ("INSERT INTO embeddings (memory_id, vec) VALUES (" ++ (to_str rid) ++ ", '" ++ (sql_escape (to_json vec)) ++ "')")
+    auto_link h content
     rid
 
 --! Protokolliert ein eingehendes Ereignis (für Audit/Debug).
 export fn log_event h chat_id text kind
     db_exec h ("INSERT INTO events (chat_id, msg, kind, ts) VALUES ('" ++ (sql_escape chat_id) ++ "', '" ++ (sql_escape text) ++ "', '" ++ (sql_escape kind) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "')")
+
+--! Zaehlt Entitaeten und Relationen im Wissensgraphen (Status/Debug).
+export fn graph_counts h
+    e: get (at (db_query h "SELECT COUNT(*) AS c FROM entities") 0) "c"
+    r: get (at (db_query h "SELECT COUNT(*) AS c FROM relations") 0) "c"
+    out: {}
+    set out "entities" e
+    set out "relations" r
+    out
 
 --! Holt die N wichtigsten Erinnerungen (hohe Importance zuerst).
 export fn top_memories h n
@@ -383,14 +393,57 @@ export fn add_entity h name kind
         db_exec h ("INSERT INTO entities (name, kind) VALUES ('" ++ (sql_escape name) ++ "', '" ++ (sql_escape kind) ++ "')")
         get (at (db_query h "SELECT max(id) AS mid FROM entities") 0) "mid"
 
---! Wissensgraph: verknüpft zwei Entitäten über eine Relation.
+--! Wissensgraph: verknüpft zwei Entitäten über eine Relation (dedupliziert:
+--! dieselbe (from, to, rel)-Kombination wird nicht doppelt angelegt — wichtig,
+--! da auto_link (P2) dieselbe Beziehung über mehrere Erinnerungen hinweg immer
+--! wieder extrahieren kann).
 export fn add_relation h from_name to_name rel
     a: add_entity h from_name "node"
     b: add_entity h to_name "node"
-    db_exec h ("INSERT INTO relations (from_id, to_id, rel) VALUES (" ++ (to_str a) ++ ", " ++ (to_str b) ++ ", '" ++ (sql_escape rel) ++ "')")
+    existing: db_query h ("SELECT id FROM relations WHERE from_id = " ++ (to_str a) ++ " AND to_id = " ++ (to_str b) ++ " AND rel = '" ++ (sql_escape rel) ++ "'")
+    if (len existing) == 0
+        db_exec h ("INSERT INTO relations (from_id, to_id, rel) VALUES (" ++ (to_str a) ++ ", " ++ (to_str b) ++ ", '" ++ (sql_escape rel) ++ "')")
     "ok"
 
 --! Wissensgraph: alle Nachbarn einer Entität (mit Relation und Zielname).
 export fn neighbors_of h name
     rows: db_query h ("SELECT r.rel, e2.name AS target FROM entities e1 JOIN relations r ON r.from_id = e1.id JOIN entities e2 ON e2.id = r.to_id WHERE e1.name = '" ++ (sql_escape name) ++ "'")
     rows
+
+--! Auto-Entitäten (P2): schreibt Entitaeten/Relationen aus einem bereits
+--! vorliegenden Extraktions-Ergebnis (Map mit "entities"/"relations") in den
+--! Wissensgraphen. Von auto_link getrennt, damit diese Verarbeitung ohne KI
+--! deterministisch testbar ist.
+export fn apply_extraction h extraction
+    if extraction == nil
+        return nil
+    ents: get extraction "entities"
+    if ents != nil
+        for e in ents
+            n: get e "name"
+            k: get e "kind"
+            if n != nil && n != ""
+                if k == nil || k == ""
+                    k: "node"
+                add_entity h n k
+    rels: get extraction "relations"
+    if rels != nil
+        for r in rels
+            f: get r "from"
+            t: get r "to"
+            rl: get r "rel"
+            if f != nil && f != "" && t != nil && t != "" && rl != nil && rl != ""
+                add_relation h f t rl
+    nil
+
+--! Extrahiert benannte Entitaeten + ihre Beziehungen aus einem Text via KI und
+--! verknuepft sie automatisch im Wissensgraph (best-effort: ohne KI-Provider
+--! oder bei Fehlern passiert nichts, der Aufrufer wird nicht unterbrochen).
+export fn auto_link h text
+    if text == nil || (trim text) == ""
+        return nil
+    try
+        j: ai_chat_json "Extrahiere benannte Entitaeten (Personen, Orte, Organisationen, Dinge, Konzepte) und ihre Beziehungen aus dem Text. Antworte ausschliesslich als JSON-Objekt mit 'entities' (Liste von Objekten mit 'name' und 'kind') und 'relations' (Liste von Objekten mit 'from', 'to' und 'rel'). Nur eindeutig im Text genannte Entitaeten, keine Vermutungen. Ohne erkennbare Entitaeten: {\"entities\": [], \"relations\": []}." text
+        apply_extraction h j
+    catch e
+        nil

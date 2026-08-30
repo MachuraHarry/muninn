@@ -99,8 +99,18 @@ Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung f
   *mehrerer* ähnlicher, kleiner Erinnerungen zu einer generalisierten Aussage
   (z.B. mehrere Einzel-Fakten über eine Vorliebe → eine zusammenfassende
   Erinnerung) ist noch offen.
-- ⏳ **Auto-Entitäten + Graph**: automatische Entitäts-Extraktion und Verknüpfung
-  im Wissensgraph (`entities`/`relations`).
+- ✅ **Auto-Entitäten + Graph**: `memory.pipe` — `auto_link` läuft automatisch bei
+  jedem `add_memory` (also bei jeder gespeicherten Erinnerung, egal ob per
+  `/permanent`-Nachricht, Gremium-Registrator oder Executor) und extrahiert per
+  KI benannte Entitäten + Beziehungen, die dann über `apply_extraction` (rein,
+  ohne KI — deterministisch getestet) im bestehenden `entities`/`relations`-
+  Graphen landen. Best-effort: ohne KI-Provider passiert einfach nichts.
+  `add_relation` dedupliziert jetzt außerdem gleiche (from, to, rel)-Tripel, da
+  Auto-Extraktion dieselbe Beziehung über mehrere Erinnerungen hinweg erneut
+  finden kann. Neuer Telegram-Befehl `/graph <Name>` fragt Nachbarn einer
+  Entität ab; `/status` zeigt Entitäten-/Relationen-Anzahl. Live mit echter KI
+  verifiziert (Beispiel: "Harry entwickelt Pipe und lebt in Hamburg" → 3
+  Entitäten, 2 Relationen, $0,000157). 8 neue Tests.
 - ⏳ **Dokument-Ingestion**: URLs, Dateien, PDFs → eigene Wissensbasis (RAG).
 - ⏳ **Echte semantische Embeddings**: Option OpenAI/Ollama (DeepSeek liefert nur
   einen 128-dim lexikalischen Hash; hybride Suche bleibt Fallback).

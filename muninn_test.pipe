@@ -199,6 +199,51 @@ test "add_relation und neighbors_of"
     expect_eq (get (at n 0) "target") "Beta" "zielname"
     mem.close h
 
+test "add_relation dedupliziert dieselbe (from, to, rel)-Kombination"
+    h: mem.init_db ":memory:"
+    mem.add_relation h "Alpha" "Beta" "kennt"
+    mem.add_relation h "Alpha" "Beta" "kennt"
+    n: mem.neighbors_of h "Alpha"
+    expect_eq (len n) 1 "keine doppelte Relation"
+    mem.close h
+
+test "add_relation behaelt unterschiedliche Relationen zwischen denselben Entitaeten"
+    h: mem.init_db ":memory:"
+    mem.add_relation h "Alpha" "Beta" "kennt"
+    mem.add_relation h "Alpha" "Beta" "mag"
+    n: mem.neighbors_of h "Alpha"
+    expect_eq (len n) 2 "zwei verschiedene Relationen bleiben"
+    mem.close h
+
+--! Auto-Entitäten (P2): apply_extraction ist die deterministisch testbare
+--! Verarbeitung eines (hier von Hand gebauten) Extraktions-Ergebnisses —
+--! auto_link selbst braucht einen echten KI-Provider und wird hier nicht getestet.
+test "apply_extraction schreibt Entitaeten und Relationen in den Graphen"
+    h: mem.init_db ":memory:"
+    extraction: {entities: [{name: "Harry", kind: "person"}, {name: "Pipe", kind: "sprache"}], relations: [{from: "Harry", to: "Pipe", rel: "entwickelt"}]}
+    mem.apply_extraction h extraction
+    n: mem.neighbors_of h "Harry"
+    expect_eq (len n) 1 "eine Relation"
+    expect_eq (get (at n 0) "rel") "entwickelt" "relation korrekt"
+    expect_eq (get (at n 0) "target") "Pipe" "ziel korrekt"
+    mem.close h
+
+test "apply_extraction ignoriert unvollstaendige Eintraege statt abzustuerzen"
+    h: mem.init_db ":memory:"
+    extraction: {entities: [{name: "", kind: "person"}, {kind: "ohne-namen"}], relations: [{from: "X", to: "Y"}, {from: "", to: "Y", rel: "r"}]}
+    mem.apply_extraction h extraction
+    rows: db_query h "SELECT COUNT(*) AS c FROM entities"
+    expect_eq (get (at rows 0) "c") 0 "keine leeren/unvollstaendigen Eintraege gespeichert"
+    mem.close h
+
+test "apply_extraction mit nil oder leerer Extraktion tut nichts"
+    h: mem.init_db ":memory:"
+    mem.apply_extraction h nil
+    mem.apply_extraction h {}
+    rows: db_query h "SELECT COUNT(*) AS c FROM entities"
+    expect_eq (get (at rows 0) "c") 0 "nichts angelegt"
+    mem.close h
+
 --! RAG-Fallback: ohne Embeddings greift die Stichwortsuche.
 test "keyword_retrieve findet passende Erinnerungen"
     h: mem.init_db ":memory:"

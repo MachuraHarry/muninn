@@ -110,6 +110,7 @@ pipe -test
 | `/search <begriff>` | Web-Recherche mit Quellen |
 | `/reset` | Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen) |
 | `/consolidate` | Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen |
+| `/graph <Name>` | Wissensgraph abfragen (Nachbarn einer Entität) |
 
 ### Natürliche Sprache
 
@@ -147,7 +148,13 @@ verarbeitet und mit `db_close` persistiert. Eingehende Nachrichten werden klassi
 
 ### Wissen & RAG (`memory.pipe`)
 
-- **Wissensgraph:** `entities`/`relations`; `add_entity`, `add_relation`, `neighbors_of`.
+- **Wissensgraph:** `entities`/`relations`; `add_entity`, `add_relation` (dedupliziert
+  gleiche from/to/rel-Tripel), `neighbors_of`.
+- **Auto-Entitäten (P2):** `auto_link` läuft automatisch bei jeder gespeicherten
+  Erinnerung (`add_memory`) und extrahiert per KI benannte Entitäten + Beziehungen
+  in den Graphen (`apply_extraction` — rein, ohne KI, deterministisch testbar).
+  Best-effort: ohne KI-Provider passiert nichts. Telegram: `/graph <Name>` fragt
+  Nachbarn ab, `/status` zeigt die Graph-Größe.
 - **Hybride Retrieval:** `retrieve_context` kombiniert lexikalisches TF-IDF-Scoring (0.75)
   mit semantischen Embeddings (0.25). DeepSeek liefert nur einen 128-dim lexikalischen
   Hash — bei einem echten Embedding-Provider (>300 dim) schaltet die Gewichtung
