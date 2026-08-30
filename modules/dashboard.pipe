@@ -111,7 +111,7 @@ footer a{color:var(--accent2);text-decoration:none}
 </head>
 <body>
 <nav><div class="container">
-<a class="logo" href="/">Muninn<span>Dashboard</span></a>
+<a class="logo" href="./">Muninn<span>Dashboard</span></a>
 </div></nav>
 <main class="container">
 
@@ -175,7 +175,7 @@ function cardHtml(num, label){
   return '<div class="card"><div class="num">' + num + '</div><div class="label">' + label + '</div></div>';
 }
 function loadStatus(){
-  fetch(withToken('/api/status')).then(function(r){return r.json();}).then(function(d){
+  fetch(withToken('api/status')).then(function(r){return r.json();}).then(function(d){
     var el = document.getElementById('status-cards');
     el.innerHTML = cardHtml(d.memories, 'Erinnerungen') + cardHtml(d.entities + ' / ' + d.relations, 'Entitäten / Relationen') + cardHtml(d.tools, 'Werkzeuge') + cardHtml(d.threads_active, 'Aktive Threads');
   });
@@ -199,7 +199,7 @@ function sendChat(){
   addMsg('user', msg);
   input.value = '';
   var bubble = addMsg('bot', '…');
-  fetch(withToken('/api/chat'), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message: msg})})
+  fetch(withToken('api/chat'), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message: msg})})
     .then(function(r){return r.json();})
     .then(function(d){ bubble.textContent = d.reply || '(keine Antwort)'; loadMemories(); loadStatus(); })
     .catch(function(){ bubble.textContent = 'Fehler bei der Anfrage.'; });
@@ -211,7 +211,7 @@ function memItemHtml(m){
 }
 function loadMemories(){
   var q = document.getElementById('mem-q').value.trim();
-  var url = '/api/memories?limit=20';
+  var url = 'api/memories?limit=20';
   if(q) url += '&q=' + encodeURIComponent(q);
   fetch(withToken(url)).then(function(r){return r.json();}).then(function(d){
     var el = document.getElementById('mem-list');
@@ -221,12 +221,12 @@ function loadMemories(){
   });
 }
 function deleteMemory(id){
-  fetch(withToken('/api/memories/delete'), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: id})}).then(function(){ loadMemories(); loadStatus(); });
+  fetch(withToken('api/memories/delete'), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: id})}).then(function(){ loadMemories(); loadStatus(); });
 }
 function loadGraph(){
   var name = document.getElementById('graph-q').value.trim();
   if(!name) return;
-  fetch(withToken('/api/graph?name=' + encodeURIComponent(name))).then(function(r){return r.json();}).then(function(d){
+  fetch(withToken('api/graph?name=' + encodeURIComponent(name))).then(function(r){return r.json();}).then(function(d){
     var el = document.getElementById('graph-list');
     var n = d.neighbors || [];
     if(n.length === 0){ el.innerHTML = '<div class="empty">Keine Verknüpfungen gefunden.</div>'; return; }
