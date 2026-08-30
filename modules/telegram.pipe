@@ -128,6 +128,54 @@ export fn tel_send_message token chat_id text
     set m "text" text
     tel_post_with_markdown token "sendMessage" m
 
+--! Laedt eine lokale Datei per multipart/form-data an einen Telegram-Endpoint
+--! hoch (sendPhoto/sendDocument brauchen echten Datei-Upload, JSON reicht
+--! dafuer nicht). Pipe-Strings sind byte-safe (read_file ohne "bytes"-Modus
+--! liefert die Rohbytes verlustfrei als String, verifiziert), daher laesst
+--! sich der Multipart-Body als reiner String zusammenbauen und ueber
+--! http_request(..., body_string) senden — Pipe hat keinen dedizierten
+--! Multipart-Helper.
+fn tel_upload token method field_name chat_id file_path caption
+    content: read_file file_path
+    if content == nil || content == ""
+        return (err_map 0 ("Datei leer oder nicht lesbar: " ++ file_path))
+    filename: file_path
+    parts: split file_path "/"
+    if (len parts) > 0
+        filename: at parts ((len parts) - 1)
+    boundary: "MuninnBoundary" ++ (to_str now) ++ (to_str (random_range 100000 999999))
+    body: "--" ++ boundary ++ "\r\n"
+    body: body ++ "Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n" ++ (to_str chat_id) ++ "\r\n"
+    if caption != nil && caption != ""
+        body: body ++ "--" ++ boundary ++ "\r\n"
+        body: body ++ "Content-Disposition: form-data; name=\"caption\"\r\n\r\n" ++ caption ++ "\r\n"
+    body: body ++ "--" ++ boundary ++ "\r\n"
+    body: body ++ "Content-Disposition: form-data; name=\"" ++ field_name ++ "\"; filename=\"" ++ filename ++ "\"\r\n"
+    body: body ++ "Content-Type: application/octet-stream\r\n\r\n"
+    body: body ++ content ++ "\r\n"
+    body: body ++ "--" ++ boundary ++ "--\r\n"
+    url: "https://api.telegram.org/bot" ++ token ++ "/" ++ method
+    hdrs: {}
+    set hdrs "Content-Type" ("multipart/form-data; boundary=" ++ boundary)
+    r: http_request "POST" url hdrs body
+    status: get r "status"
+    j: nil
+    try
+        j: parse_json (get r "body")
+    catch e
+        j: nil
+    if j == nil
+        return (err_map status (get r "body"))
+    j
+
+--! Sendet ein Foto (JPEG/PNG/...) aus einer lokalen Datei, optional mit Bildunterschrift.
+export fn tel_send_photo token chat_id file_path caption
+    tel_upload token "sendPhoto" "photo" chat_id file_path caption
+
+--! Sendet eine beliebige Datei aus dem lokalen Dateisystem, optional mit Bildunterschrift.
+export fn tel_send_document token chat_id file_path caption
+    tel_upload token "sendDocument" "document" chat_id file_path caption
+
 --! Bearbeite eine gesendete Nachricht.
 export fn tel_edit_message_text token chat_id message_id text
     m: {}

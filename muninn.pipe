@@ -873,6 +873,9 @@ else
         tok: cfg_get cfg "TELEGRAM_BOT_TOKEN"
         allowed: cfg_get cfg "TELEGRAM_ALLOWED_CHAT_ID"
         setup_core mcp_servers deepseek_key
+        --! Fuer das Gremiums-Werkzeug bild_senden/datei_senden (siehe swarm.pipe)
+        --! — braucht den Bot-Token, um selbst an Telegram senden zu koennen.
+        grm.set_token tok
         if tok == nil || tok == ""
             print "TELEGRAM_BOT_TOKEN fehlt (Env oder .env). Abbruch."
         else

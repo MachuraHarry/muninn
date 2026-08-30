@@ -7,12 +7,13 @@ import "modules/web.pipe" as web
 import "modules/mcp.pipe" as mcp
 import "modules/scheduler.pipe" as sched
 import "modules/docker_tools.pipe" as dt
+import "modules/telegram.pipe" as tel
 
 --! Geteilter, mutabler Zustand: aktueller DB-Handle + Chat-Kontext fuer die Tools.
---! tz_offset wird einmalig beim Start gesetzt (set_tz_offset), dbh/cid pro Lauf
---! (run_gremium) — beide werden von tool_erinnerung_planen gebraucht, das sonst
---! nicht wüsste, WEN es erinnern soll oder wie spaet "morgen frueh" lokal ist.
-STATE: {dbh: nil, cid: nil, tz_offset: 0}
+--! tz_offset/token werden einmalig beim Start gesetzt (set_tz_offset/set_token),
+--! dbh/cid pro Lauf (run_gremium) — token+cid werden von tool_bild_senden/
+--! tool_datei_senden gebraucht, um ueberhaupt an Telegram senden zu koennen.
+STATE: {dbh: nil, cid: nil, tz_offset: 0, token: nil}
 
 fn cur_dbh _
     get STATE "dbh"
@@ -21,6 +22,22 @@ fn cur_dbh _
 export fn set_tz_offset off
     set STATE "tz_offset" off
     nil
+
+--! Einmalig beim Start zu setzen (siehe setup_core in muninn.pipe). Getrennt
+--! von set_tz_offset, damit der Telegram-Token — wie alle Secrets — nur an
+--! genau einer Stelle im Code angefasst wird.
+export fn set_token tok
+    set STATE "token" tok
+    nil
+
+--! Loest einen von einem Werkzeug (z.B. Playwright-Screenshot) gemeldeten,
+--! meist RELATIVEN Pfad zu einem absoluten Pfad auf. Muninn laeuft immer aus
+--! /root/muninn heraus (siehe alle Start-Kommandos in muninn.pipe).
+fn resolve_muninn_path path
+    if (len path) > 0 && (substring path 0 1) == "/"
+        path
+    else
+        "/root/muninn/" ++ path
 
 --! Tool: relevante Erinnerungen aus der Seele abrufen.
 fn tool_erinnerungen_suchen query
@@ -190,6 +207,38 @@ export fn self_context _
     desc: desc ++ " Behaupte NIE pauschal, keine Werkzeuge/keinen Systemzugriff zu haben, wenn diese Liste nicht leer ist.\n\n"
     SELF_ID ++ desc
 
+--! Tool: ein Bild (z.B. ein Screenshot, den ein anderes Werkzeug lokal
+--! gespeichert hat) an den Nutzer in Telegram senden. Nutzt sendPhoto (zeigt
+--! inline im Chat an, Telegram komprimiert/konvertiert).
+fn tool_bild_senden path caption
+    tok: get STATE "token"
+    cid: get STATE "cid"
+    if tok == nil || cid == nil
+        return "Kein Telegram-Kontext verfuegbar, kann kein Bild senden."
+    full_path: resolve_muninn_path path
+    if !(file_exists full_path)
+        return "Datei nicht gefunden: " ++ full_path
+    res: tel.tel_send_photo tok cid full_path caption
+    if (get res "ok") == false
+        return "Senden fehlgeschlagen: " ++ (to_str (get res))
+    "Bild gesendet: " ++ full_path
+
+--! Tool: eine beliebige Datei (z.B. ein per Filesystem-Werkzeug erzeugtes
+--! Dokument) an den Nutzer in Telegram senden. Nutzt sendDocument (behaelt
+--! Originalformat/-qualitaet, wird als Datei-Anhang statt inline gezeigt).
+fn tool_datei_senden path caption
+    tok: get STATE "token"
+    cid: get STATE "cid"
+    if tok == nil || cid == nil
+        return "Kein Telegram-Kontext verfuegbar, kann keine Datei senden."
+    full_path: resolve_muninn_path path
+    if !(file_exists full_path)
+        return "Datei nicht gefunden: " ++ full_path
+    res: tel.tel_send_document tok cid full_path caption
+    if (get res "ok") == false
+        return "Senden fehlgeschlagen: " ++ (to_str (get res))
+    "Datei gesendet: " ++ full_path
+
 --! Registriert Tools und Gremium-Agenten (einmalig beim Start).
 --! Bindet zusaetzlich alle bereits per mcp.connect_servers verbundenen MCP-Tools
 --! (Dateisystem, GitHub, ...) an einen eigenen "werkzeugmeister"-Agenten (P1).
@@ -205,8 +254,14 @@ export fn init_gremium _
     --! Ergaenzt den MCP-Server "docker" (verwaltet nur BESTEHENDE Container).
     ai_tool "docker_pull_image" "Ein Docker-Image von einer Registry herunterladen (z.B. 'nginx:latest')." {image: "Image-Name inkl. optionalem Tag"} dt.tool_docker_pull_image
     ai_tool "docker_create_container" "Einen neuen Container aus einem Image starten. KEINE Volume-Mounts moeglich, KEIN --privileged. Standardmaessig nur auf localhost erreichbar (public='true' fuer oeffentlich, nur wenn explizit gewuenscht)." {image: "Image-Name (ggf. vorher mit docker_pull_image geholt)", name: "Container-Name", host_port: "Port auf dem Host", container_port: "Port im Container", public: "'true' fuer oeffentlich erreichbar, sonst nur localhost"} dt.tool_docker_create_container
+    --! Bilder/Dateien an den Nutzer senden (z.B. ein Screenshot, den
+    --! werkzeug_browser lokal gespeichert hat, oder eine per Filesystem-
+    --! Werkzeug erzeugte Datei) — ohne das kann Muninn nur ÜBER Dateien
+    --! reden, sie aber nicht tatsaechlich verschicken.
+    ai_tool "bild_senden" "Ein Bild (Screenshot o.ae.) aus einer lokalen Datei an den Nutzer in Telegram senden (zeigt inline im Chat)." {path: "Pfad zur Bilddatei (relativ zu /root/muninn oder absolut)", caption: "Optionale Bildunterschrift"} tool_bild_senden
+    ai_tool "datei_senden" "Eine beliebige lokale Datei an den Nutzer in Telegram senden (als Datei-Anhang, Originalformat)." {path: "Pfad zur Datei (relativ zu /root/muninn oder absolut)", caption: "Optionale Beschreibung"} tool_datei_senden
 
-    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen", "docker_pull_image", "docker_create_container"]
+    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen", "docker_pull_image", "docker_create_container", "bild_senden", "datei_senden"]
     --! P5: EIN fokussierter Spezial-Agent PRO angebundenem MCP-Server statt
     --! eines Alleskoenners mit allen Werkzeugen — skaliert automatisch mit
     --! jedem neuen MCP-Server (kein Code-Umbau noetig), und haelt die
@@ -259,7 +314,7 @@ export fn init_gremium _
 
     swarm_agent "kritiker" {system: HANDOFF_RULE ++ MEMORY_HONESTY_RULE ++ "Du bist der Kritiker im Gremium. Pruefe die bisherige Antwort auf Luecken, Widersprueche und Unklarheiten und verbessere sie zu einer praezisen, ehrlichen Antwort. Wenn Fakten fehlen, leite an 'faktenwaechter' zurueck. Sonst rufe IMMER 'registrator' auf, um die verbesserte Antwort weiterzugeben — auch wenn die Antwort schon gut ist.", handoff: kritiker_handoff}
 
-    swarm_agent "registrator" {system: SELF_ID ++ tools_desc ++ HONESTY_RULE ++ FORMAT_RULE ++ MEMORY_HONESTY_RULE ++ VERIFY_CLAIM_RULE ++ "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Verfasst du eine Antwort ueber Muninns eigene Faehigkeiten/Werkzeuge, nutze IMMER die vollstaendige Werkzeugliste oben (SELF_ID + tools_desc) — NICHT nur deine eigenen drei Werkzeuge ('merken'/'merken_quelle'/'erinnerung_planen' sind nur DEINE Werkzeuge als Registrator, nicht Muninns komplette Ausstattung; behaupte NIE, das seien alle verfuegbaren Werkzeuge. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer (z.B. Name, Geburtsdatum, Vorlieben), speichere sie mit 'merken' — dabei gibst du als Inhalt NUR den Fakt selbst weiter, OHNE Meta-Anweisungen des Nutzers wie 'merke dir das' mit abzuspeichern. Stammt eine neue Erkenntnis aus dem Web, speichere sie mit 'merken_quelle' samt Quellen-URL. Erwaehnt die Nutzeranfrage einen Termin, eine Verpflichtung oder eine Bitte, an etwas zu einem Zeitpunkt erinnert zu werden (z.B. 'ich habe morgen um 6 Uhr einen Termin'), rufe VORHER 'erinnerung_planen' mit dem Termin-Text inkl. Zeitangabe auf und bestaetige das in deiner Antwort. Danach gibst du die endgueltige Antwort aus — AUSSCHLIESSLICH die Antwort an den Nutzer. Schreibe KEIN internes Reasoning, KEINE Meta-Kommentare wie 'Ich schliesse die Anfrage ab', KEINE Anweisungen an andere Agenten und KEINE Wiederholung deiner Gedankengaenge. Nur die fertige, knappe Antwort.", tools: ["merken", "merken_quelle", "erinnerung_planen"], handoff: []}
+    swarm_agent "registrator" {system: SELF_ID ++ tools_desc ++ HONESTY_RULE ++ FORMAT_RULE ++ MEMORY_HONESTY_RULE ++ VERIFY_CLAIM_RULE ++ "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Verfasst du eine Antwort ueber Muninns eigene Faehigkeiten/Werkzeuge, nutze IMMER die vollstaendige Werkzeugliste oben (SELF_ID + tools_desc) — NICHT nur deine eigenen drei Werkzeuge ('merken'/'merken_quelle'/'erinnerung_planen' sind nur DEINE Werkzeuge als Registrator, nicht Muninns komplette Ausstattung; behaupte NIE, das seien alle verfuegbaren Werkzeuge. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer (z.B. Name, Geburtsdatum, Vorlieben), speichere sie mit 'merken' — dabei gibst du als Inhalt NUR den Fakt selbst weiter, OHNE Meta-Anweisungen des Nutzers wie 'merke dir das' mit abzuspeichern. Stammt eine neue Erkenntnis aus dem Web, speichere sie mit 'merken_quelle' samt Quellen-URL. Erwaehnt die Nutzeranfrage einen Termin, eine Verpflichtung oder eine Bitte, an etwas zu einem Zeitpunkt erinnert zu werden (z.B. 'ich habe morgen um 6 Uhr einen Termin'), rufe VORHER 'erinnerung_planen' mit dem Termin-Text inkl. Zeitangabe auf und bestaetige das in deiner Antwort. Hat ein anderer Agent in der Konversation einen Datei-/Bildpfad erwaehnt (z.B. einen Screenshot-Pfad von werkzeug_browser oder eine per Filesystem-Werkzeug erzeugte Datei) UND wollte der Nutzer das sehen/haben, rufe VORHER 'bild_senden' bzw. 'datei_senden' mit diesem Pfad auf, ANSTATT nur zu behaupten, du koenntest die Datei nicht schicken — das kannst du. Danach gibst du die endgueltige Antwort aus — AUSSCHLIESSLICH die Antwort an den Nutzer. Schreibe KEIN internes Reasoning, KEINE Meta-Kommentare wie 'Ich schliesse die Anfrage ab', KEINE Anweisungen an andere Agenten und KEINE Wiederholung deiner Gedankengaenge. Nur die fertige, knappe Antwort.", tools: ["merken", "merken_quelle", "erinnerung_planen", "bild_senden", "datei_senden"], handoff: []}
 
     nil
 
