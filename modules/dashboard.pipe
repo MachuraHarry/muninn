@@ -60,6 +60,21 @@ fn auth_mw req
     else
         text 401 "Unauthorized — ?token=... oder X-Dashboard-Token-Header erforderlich."
 
+--! Erzwingt no-cache-Header auf einer pipe-web-Response-Map. Alles hier ist
+--! live (Chat, Erinnerungen, Status, ...) und darf vom Browser (oder einem
+--! zwischengeschalteten Proxy) NIE zwischengespeichert werden — sonst sieht
+--! ein Nutzer nach einem Update/einer Aenderung stillschweigend eine alte
+--! Version, ohne dass ein "neu laden" das bemerkt oder behebt.
+fn no_cache resp
+    hdrs: get resp "headers"
+    if hdrs == nil
+        hdrs: {}
+    set hdrs "Cache-Control" "no-store, no-cache, must-revalidate, max-age=0"
+    set hdrs "Pragma" "no-cache"
+    set hdrs "Expires" "0"
+    set resp "headers" hdrs
+    resp
+
 DASHBOARD_HTML: `<!doctype html>
 <html lang="de">
 <head>
@@ -299,7 +314,7 @@ function escapeHtml(s){
   return d.innerHTML;
 }
 function apiGet(path){
-  return fetch(withToken(path)).then(function(r){ return r.json(); });
+  return fetch(withToken(path), {cache: 'no-store'}).then(function(r){ return r.json(); });
 }
 function apiPost(path, body){
   return fetch(withToken(path), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {})}).then(function(r){ return r.json(); });
@@ -477,7 +492,7 @@ loadStatus();
 </html>`
 
 fn page_handler req
-    html 200 DASHBOARD_HTML
+    no_cache (html 200 DASHBOARD_HTML)
 
 --! Alle Handler nutzen mem.open_locked/close_locked statt init_db/close direkt
 --! — sonst koennte ein gleichzeitig laufender Telegram-Prozess Schreibvorgaenge
@@ -498,7 +513,7 @@ fn status_handler req
     catch e
         tools: 0
     mem.close_locked hl
-    ok {memories: n, entities: (get gc "entities"), relations: (get gc "relations"), threads_active: ta, tools: tools}
+    no_cache (ok {memories: n, entities: (get gc "entities"), relations: (get gc "relations"), threads_active: ta, tools: tools})
 
 fn chat_handler req
     body: json_body req
@@ -506,7 +521,7 @@ fn chat_handler req
     hl: mem.open_locked nil
     reply: dashboard_reply (get hl "h") msg
     mem.close_locked hl
-    ok {reply: reply}
+    no_cache (ok {reply: reply})
 
 fn memories_handler req
     q: get (get req "query") "q"
@@ -518,7 +533,7 @@ fn memories_handler req
     hl: mem.open_locked nil
     rows: mem.list_memories (get hl "h") q kind limit
     mem.close_locked hl
-    ok {memories: rows}
+    no_cache (ok {memories: rows})
 
 fn memories_delete_handler req
     body: json_body req
@@ -526,7 +541,7 @@ fn memories_delete_handler req
     hl: mem.open_locked nil
     mem.delete_memory (get hl "h") id
     mem.close_locked hl
-    ok {ok: true}
+    no_cache (ok {ok: true})
 
 fn memories_importance_handler req
     body: json_body req
@@ -535,13 +550,13 @@ fn memories_importance_handler req
     hl: mem.open_locked nil
     mem.set_importance (get hl "h") id importance
     mem.close_locked hl
-    ok {ok: true}
+    no_cache (ok {ok: true})
 
 fn goals_handler req
     hl: mem.open_locked nil
     rows: mem.list_goals (get hl "h") 30
     mem.close_locked hl
-    ok {goals: rows}
+    no_cache (ok {goals: rows})
 
 fn goals_toggle_handler req
     body: json_body req
@@ -550,16 +565,16 @@ fn goals_toggle_handler req
     hl: mem.open_locked nil
     mem.set_goal_status (get hl "h") id newstatus
     mem.close_locked hl
-    ok {ok: true}
+    no_cache (ok {ok: true})
 
 fn graph_handler req
     name: get (get req "query") "name"
     if name == nil || name == ""
-        return (ok {neighbors: []})
+        return (no_cache (ok {neighbors: []}))
     hl: mem.open_locked nil
     n: mem.neighbors_of (get hl "h") name
     mem.close_locked hl
-    ok {neighbors: n}
+    no_cache (ok {neighbors: n})
 
 fn activity_handler req
     hl: mem.open_locked nil
@@ -567,7 +582,7 @@ fn activity_handler req
     ev: mem.recent_events h 20
     pl: exe.recent_plans h 10
     mem.close_locked hl
-    ok {events: ev, plans: pl}
+    no_cache (ok {events: ev, plans: pl})
 
 fn tools_handler req
     tools: []
@@ -575,20 +590,20 @@ fn tools_handler req
         tools: mcp_tools
     catch e
         tools: []
-    ok {tools: tools}
+    no_cache (ok {tools: tools})
 
 fn learn_handler req
     body: json_body req
     url: get body "url"
     if url == nil || url == ""
-        return (json 400 {error: "url fehlt"})
+        return (no_cache (json 400 {error: "url fehlt"}))
     content: web.web_fetch_raw url
     if content == nil || content == ""
-        return (ok {error: "Seite nicht abrufbar oder leer"})
+        return (no_cache (ok {error: "Seite nicht abrufbar oder leer"}))
     hl: mem.open_locked nil
     res: mem.ingest_document (get hl "h") content url url 20
     mem.close_locked hl
-    ok res
+    no_cache (ok res)
 
 --! Erkennt eine /graph-Anfrage im Web-Chat und liefert den Entitätsnamen (oder "").
 fn dash_graph_query low tnorm
