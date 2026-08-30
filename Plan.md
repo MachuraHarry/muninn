@@ -49,9 +49,9 @@ Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung f
   identisch zu `ai_with_tools`. Go-Tests: `TestToolCallDirectInvocation` in
   `pkg/object/ai_builtins_test.go`; Pipe-Tests: `exec_step mcp_call ...` in
   `muninn_test.pipe`. **Achtung:** `tool_call` ist noch nicht in einem offiziellen
-  Pipe-Release enthalten — `/usr/local/bin/pipe` läuft auf einem lokalen Build von
-  Commit `9419947` (im `pipe`-Repo committed, noch nicht gepusht/released; Backup
-  der vorherigen v1.2.0 unter `/usr/local/bin/pipe.v1.2.0.bak`).
+  Pipe-Release (Tag) enthalten — `/usr/local/bin/pipe` läuft auf einem lokalen Build
+  von Commit `5c1fbe5` (im `pipe`-Repo committed und nach `origin/master` gepusht;
+  Backup der vorherigen v1.2.0 unter `/usr/local/bin/pipe.v1.2.0.bak`).
 - ⏳ **Tool-Registry/Plugin-System**: aktuell reicht die MCP-Registry von Pipe selbst
   (`mcp_tools`/`tool_call`) plus `ai_tool`; ein eigenes Versionierungs-/Plugin-Layer
   ist bewusst nicht gebaut, mangels konkretem Bedarf (YAGNI) — eine `.env`-Zeile mit
@@ -62,14 +62,25 @@ Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung f
 
 ### P2 — Tiefes Gedächtnis & Wissen  *(Priorität: zuerst)*
 
-- **Episodisches Gedächtnis**: mehrzügige Konversationen/Threads mit Verlauf,
-  Folgefragen beziehen sich auf den laufenden Kontext.
-- **Konsolidierung („Träume")**: periodischer Job verdichtet alte, unwichtige
+- ✅ **Episodisches Gedächtnis**: ein Thread pro Chat (`threads`-Tabelle, bislang
+  angelegt aber ungenutzt — jetzt aktiv) sammelt den Verlauf in einer neuen
+  `messages`-Tabelle. `memory.pipe`: `active_thread`, `add_message`,
+  `thread_history`, `format_history`, `close_thread`. Fragen (Gremium),
+  `/search`-Recherchen und „Vertiefen" bekommen die letzten 6 Nachrichten als
+  Kontext vorangestellt (`muninn.pipe`), sodass Folgefragen sich auf den
+  laufenden Kontext beziehen — `swarm.pipe`/`ai_swarm_trace` selbst bleibt
+  stateless, der Verlauf wird als Text Teil der `task`-Eingabe. Neuer Befehl
+  `/reset` schließt den aktiven Thread (frischer Kontext danach). 6 neue Tests.
+  Bewusst noch **kein** Kontextfenster-Management über die letzten 6 Nachrichten
+  hinaus — das übernimmt als Nächstes die Konsolidierung.
+- ⏳ **Konsolidierung („Träume")**: periodischer Job verdichtet alte, unwichtige
   Erinnerungen, bildet Verallgemeinerungen, senkt Importance, löscht Veraltetes.
-- **Auto-Entitäten + Graph**: automatische Entitäts-Extraktion und Verknüpfung
+  Mit dem Episodischen Gedächtnis jetzt auch Kandidat für alte `messages`/
+  `threads` (aktuell wächst die `messages`-Tabelle unbegrenzt).
+- ⏳ **Auto-Entitäten + Graph**: automatische Entitäts-Extraktion und Verknüpfung
   im Wissensgraph (`entities`/`relations`).
-- **Dokument-Ingestion**: URLs, Dateien, PDFs → eigene Wissensbasis (RAG).
-- **Echte semantische Embeddings**: Option OpenAI/Ollama (DeepSeek liefert nur
+- ⏳ **Dokument-Ingestion**: URLs, Dateien, PDFs → eigene Wissensbasis (RAG).
+- ⏳ **Echte semantische Embeddings**: Option OpenAI/Ollama (DeepSeek liefert nur
   einen 128-dim lexikalischen Hash; hybride Suche bleibt Fallback).
 
 ### P3 — Omnichannel + Dashboard

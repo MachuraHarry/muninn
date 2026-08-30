@@ -71,7 +71,7 @@ fn greeting_text _
 
 --! Hilfetext.
 fn help_text _
-    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)"
+    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)"
 
 --! Status-Text (Statistiken aus der Seele).
 fn status_text dbh
@@ -125,12 +125,16 @@ fn handle_message token cid text dbh
     if low == "/list"
         tel.tel_send_message token cid (list_text dbh)
         return nil
+    if low == "/reset"
+        mem.close_thread dbh cid
+        tel.tel_send_message token cid "Gespraechsverlauf zurueckgesetzt — ich starte den Kontext frisch."
+        return nil
     if low == "/search"
         tel.tel_send_message token cid "Bitte gib einen Suchbegriff an: /search <begriff>"
         return nil
     sq: search_query low tnorm
     if sq != ""
-        do_search token cid sq
+        do_search token cid dbh sq
         return nil
     kind: mem.classify_input tnorm
     mem.log_event dbh (to_str cid) tnorm kind
@@ -148,22 +152,32 @@ fn handle_message token cid text dbh
         return nil
     if kind == "question"
         tel.tel_send_chat_action token cid "typing"
+        tid: mem.active_thread dbh cid
+        hist: mem.thread_history dbh tid 6
+        task: tnorm
+        if (len hist) > 0
+            task: "Bisheriger Gespraechsverlauf (aeltester zuerst):\n" ++ (mem.format_history hist) ++ "\nAktuelle Frage: " ++ tnorm
         answer: ""
         try
-            res: grm.run_gremium dbh tnorm
+            res: grm.run_gremium dbh task
             answer: get res "content"
         catch
             answer: ""
+        mem.add_message dbh tid cid "user" tnorm
         if answer == nil || answer == ""
             ctx: mem.retrieve_context dbh tnorm 3
             if (len ctx) > 0
                 reply: "Dazu erinnere ich mich an:\n"
                 for c in ctx
                     reply: reply ++ "• " ++ c ++ "\n"
+                mem.add_message dbh tid cid "assistant" reply
                 tel.tel_send_message token cid reply
             else
-                tel.tel_send_message token cid "Dazu fällt mir noch nichts ein."
+                fallback: "Dazu fällt mir noch nichts ein."
+                mem.add_message dbh tid cid "assistant" fallback
+                tel.tel_send_message token cid fallback
         else
+            mem.add_message dbh tid cid "assistant" answer
             kb: []
             row: []
             push row (tel.tel_button "💾 Merken" "save")
@@ -183,19 +197,24 @@ fn shorten s
         s
 
 --! Führt eine Web-Recherche aus und antwortet mit Quellen + Buttons.
-fn do_search token cid query
+fn do_search token cid dbh query
     tel.tel_send_chat_action token cid "typing"
+    tid: mem.active_thread dbh cid
+    mem.add_message dbh tid cid "user" ("/search " ++ query)
     rr: web.research query
     ctx: get rr "context"
     srcs: get rr "sources"
     if ctx == nil || ctx == ""
-        tel.tel_send_message token cid "Keine brauchbaren Ergebnisse gefunden."
+        fallback: "Keine brauchbaren Ergebnisse gefunden."
+        mem.add_message dbh tid cid "assistant" fallback
+        tel.tel_send_message token cid fallback
         return nil
     answer: ""
     try
         answer: ai_chat "Du bist ein präziser Recherche-Assistent. Beantworte die Frage anhand des recherchierten Kontexts, kurz und faktentreu." ("Frage: " ++ query ++ "\n\nKontext:\n" ++ ctx)
     catch
         answer: ctx
+    mem.add_message dbh tid cid "assistant" answer
     src_text: ""
     for u in srcs
         src_text: src_text ++ "\n" ++ u
@@ -243,6 +262,8 @@ fn handle_callback token dbh cbq
             res: grm.run_gremium dbh ("Vertiefe bitte diesen Sachverhalt: " ++ txt)
             a: get res "content"
             if a != nil && a != ""
+                tid: mem.active_thread dbh cid
+                mem.add_message dbh tid cid "assistant" a
                 tel.tel_send_message token cid (shorten a)
             else
                 tel.tel_send_message token cid "Ich konnte leider nichts vertiefen."

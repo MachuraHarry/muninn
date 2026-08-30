@@ -108,6 +108,7 @@ pipe -test
 | `/status` | Zustand (Erinnerungen, Provider, Gremium, Executor) |
 | `/list` | deine wichtigsten Erinnerungen |
 | `/search <begriff>` | Web-Recherche mit Quellen |
+| `/reset` | Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen) |
 
 ### Natürliche Sprache
 
@@ -150,6 +151,20 @@ verarbeitet und mit `db_close` persistiert. Eingehende Nachrichten werden klassi
   mit semantischen Embeddings (0.25). DeepSeek liefert nur einen 128-dim lexikalischen
   Hash — bei einem echten Embedding-Provider (>300 dim) schaltet die Gewichtung
   automatisch auf semantisch um (0.7/0.3).
+
+### Episodisches Gedächtnis (`memory.pipe`, P2)
+
+Ein **Thread pro Chat** (`threads`-Tabelle) sammelt den Gesprächsverlauf
+(`messages`-Tabelle), damit sich Folgefragen auf den laufenden Kontext beziehen können:
+
+- **`active_thread`** liefert den aktiven Thread eines Chats (legt bei Bedarf einen an).
+- **`add_message`/`thread_history`** protokollieren bzw. lesen die letzten Nachrichten
+  chronologisch; `format_history` rendert sie als Prompt-Text.
+- Bei Fragen (Gremium), `/search`-Recherchen und „Vertiefen" wird der Verlauf der
+  letzten 6 Nachrichten dem Gremium als Kontext mitgegeben — die eigentliche
+  Konversationslogik bleibt dabei stateless (`swarm.pipe` braucht keine Änderung).
+- **`/reset`** schließt den aktiven Thread; die nächste Nachricht startet einen
+  frischen, leeren Kontext.
 
 ### Inneres Gremium (`swarm.pipe`)
 

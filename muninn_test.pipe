@@ -52,6 +52,62 @@ test "log_event protokolliert Ereignisse"
     expect_eq (get (at rows 0) "msg") "Hallo" "event gespeichert"
     mem.close h
 
+--! Episodisches Gedaechtnis (P2): Threads + Nachrichtenverlauf pro Chat.
+test "active_thread ist pro Chat stabil (legt nur einmal an)"
+    h: mem.init_db ":memory:"
+    t1: mem.active_thread h "42"
+    t2: mem.active_thread h "42"
+    expect_eq t1 t2 "gleicher Chat -> gleicher aktiver Thread"
+    mem.close h
+
+test "active_thread unterscheidet Chats"
+    h: mem.init_db ":memory:"
+    ta: mem.active_thread h "1"
+    tb: mem.active_thread h "2"
+    expect_falsy (ta == tb) "verschiedene Chats -> verschiedene Threads"
+    mem.close h
+
+test "add_message/thread_history liefert chronologische Reihenfolge"
+    h: mem.init_db ":memory:"
+    tid: mem.active_thread h "42"
+    mem.add_message h tid "42" "user" "Frage 1"
+    mem.add_message h tid "42" "assistant" "Antwort 1"
+    mem.add_message h tid "42" "user" "Frage 2"
+    hist: mem.thread_history h tid 10
+    expect_eq (len hist) 3 "drei Nachrichten"
+    expect_eq (get (at hist 0) "content") "Frage 1" "aeltester zuerst"
+    expect_eq (get (at hist 2) "content") "Frage 2" "neuester zuletzt"
+    mem.close h
+
+test "thread_history begrenzt auf n juengste Nachrichten"
+    h: mem.init_db ":memory:"
+    tid: mem.active_thread h "1"
+    mem.add_message h tid "1" "user" "a"
+    mem.add_message h tid "1" "user" "b"
+    mem.add_message h tid "1" "user" "c"
+    hist: mem.thread_history h tid 2
+    expect_eq (len hist) 2 "nur die letzten 2"
+    expect_eq (get (at hist 0) "content") "b" "b zuerst von den letzten beiden"
+    expect_eq (get (at hist 1) "content") "c" "c zuletzt"
+    mem.close h
+
+test "format_history rendert Rollen lesbar"
+    rows: [{role: "user", content: "Hallo"}, {role: "assistant", content: "Hi!"}]
+    out: mem.format_history rows
+    expect_contains out "Nutzer: Hallo" "Nutzer-Zeile"
+    expect_contains out "Muninn: Hi!" "Muninn-Zeile"
+
+test "close_thread beendet den aktiven Thread; naechster Aufruf legt frischen an"
+    h: mem.init_db ":memory:"
+    t1: mem.active_thread h "7"
+    mem.add_message h t1 "7" "user" "alte Nachricht"
+    mem.close_thread h "7"
+    t2: mem.active_thread h "7"
+    expect_falsy (t1 == t2) "neuer Thread nach /reset"
+    hist: mem.thread_history h t2 10
+    expect_eq (len hist) 0 "frischer Thread ist leer"
+    mem.close h
+
 --! Wissensgraph.
 test "add_entity dedupliziert Namen"
     h: mem.init_db ":memory:"

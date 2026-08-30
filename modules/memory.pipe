@@ -20,6 +20,7 @@ export fn init_db path
     db_exec h "CREATE TABLE IF NOT EXISTS embeddings (memory_id INTEGER PRIMARY KEY, vec TEXT)"
     db_exec h "CREATE TABLE IF NOT EXISTS entities (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, kind TEXT)"
     db_exec h "CREATE TABLE IF NOT EXISTS relations (id INTEGER PRIMARY KEY AUTOINCREMENT, from_id INTEGER, to_id INTEGER, rel TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER, chat_id TEXT, role TEXT, content TEXT, ts TEXT)"
     h
 
 --! Schließt die Datenbank und persistiert die Änderungen auf die Datei.
@@ -81,6 +82,49 @@ export fn recent_events h n
 export fn add_goal h text
     db_exec h ("INSERT INTO goals (text, status) VALUES ('" ++ (sql_escape text) ++ "', 'offen')")
     get (at (db_query h "SELECT max(id) AS mid FROM goals") 0) "mid"
+
+--! Episodisches Gedaechtnis (P2): ein Thread pro Chat, in "threads" (title = chat_id
+--! als String, state = aktiv/geschlossen) verwaltet — die Tabelle war zuvor angelegt,
+--! aber ungenutzt. Nachrichten liegen chronologisch in "messages".
+
+--! Liefert die id des aktiven Threads eines Chats (legt bei Bedarf einen neuen an).
+export fn active_thread h chat_id
+    cid: to_str chat_id
+    rows: db_query h ("SELECT id FROM threads WHERE title = '" ++ (sql_escape cid) ++ "' AND state = 'active'")
+    if (len rows) > 0
+        get (at rows 0) "id"
+    else
+        db_exec h ("INSERT INTO threads (title, state) VALUES ('" ++ (sql_escape cid) ++ "', 'active')")
+        get (at (db_query h "SELECT max(id) AS mid FROM threads") 0) "mid"
+
+--! Schliesst den aktiven Thread eines Chats (z.B. per /reset) — die naechste
+--! active_thread-Anfrage legt einen frischen Thread ohne den alten Verlauf an.
+export fn close_thread h chat_id
+    db_exec h ("UPDATE threads SET state = 'closed' WHERE title = '" ++ (sql_escape (to_str chat_id)) ++ "' AND state = 'active'")
+
+--! Fuegt eine Nachricht zu einem Thread hinzu. role: "user" oder "assistant".
+export fn add_message h thread_id chat_id role content
+    db_exec h ("INSERT INTO messages (thread_id, chat_id, role, content, ts) VALUES (" ++ (to_str thread_id) ++ ", '" ++ (sql_escape (to_str chat_id)) ++ "', '" ++ (sql_escape role) ++ "', '" ++ (sql_escape content) ++ "', datetime('now'))")
+
+--! Die letzten n Nachrichten eines Threads, chronologisch (aeltester zuerst).
+export fn thread_history h thread_id n
+    rows: db_query h ("SELECT role, content FROM messages WHERE thread_id = " ++ (to_str thread_id) ++ " ORDER BY id DESC LIMIT " ++ (to_str n))
+    out: []
+    i: (len rows) - 1
+    while i >= 0
+        push out (at rows i)
+        i: i - 1
+    out
+
+--! Formatiert eine Thread-Historie (Liste von {role, content}) als Prompt-Text.
+export fn format_history rows
+    out: ""
+    for r in rows
+        who: "Nutzer"
+        if (get r "role") == "assistant"
+            who: "Muninn"
+        out: out ++ who ++ ": " ++ (get r "content") ++ "\n"
+    out
 
 --! Klassifiziert eine eingehende Nachricht via KI in eine Kategorie.
 --! Fallback (kein AI): einfache Regel-Klassifikation.
