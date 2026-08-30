@@ -95,6 +95,13 @@ fn connect_stdio cmd cargs cenv alias
         mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) cenv alias
 
 --! Verbindet einen einzelnen konfigurierten Server (stdio oder sse). Liefert {alias, ok, error?}.
+--! Markiert bei Erfolg CONNECTED[alias] — einzige Stelle, die das tut (vorher
+--! setzte nur ensure_for_task das nach erfolgreichem Aufruf, der eager
+--! Start-Connect in setup_core lief aber direkt ueber connect_servers und
+--! liess CONNECTED leer; dadurch hielt auto_servers_for_task jeden schon
+--! verbundenen Server faelschlich fuer neu und versuchte ihn bei jeder
+--! passenden Nachricht erneut zu verbinden -> "alias already in use"-Fehler
+--! im Log bei jeder Nachricht, die auf ein Server-Keyword traf).
 fn connect_one idx s
     typ: get s "type"
     alias: get s "alias"
@@ -110,6 +117,7 @@ fn connect_one idx s
                 cargs: []
             connect_stdio (get s "command") cargs (resolve_env (get s "env")) alias
         set r "ok" true
+        set CONNECTED alias true
     catch e
         set r "ok" false
         set r "error" (to_str e)
@@ -142,14 +150,11 @@ export fn auto_servers_for_task servers task
             push out s
     out
 
---! Verbindet passende Registry-Server einmalig.
+--! Verbindet passende Registry-Server einmalig (CONNECTED wird bereits von
+--! connect_one/connect_servers selbst gepflegt, siehe dortiger Kommentar).
 export fn ensure_for_task servers task
     selected: auto_servers_for_task servers task
-    results: connect_servers selected
-    for r in results
-        if get r "ok"
-            set CONNECTED (get r "alias") true
-    results
+    connect_servers selected
 
 --! Namen aller entdeckten MCP-Tools (lokal + remote), ohne die übergebenen
 --! (bereits als ai_tool registrierten) lokalen Namen. Für die Zuteilung an den
