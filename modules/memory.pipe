@@ -22,6 +22,7 @@ export fn init_db path
     db_exec h "CREATE TABLE IF NOT EXISTS entities (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, kind TEXT)"
     db_exec h "CREATE TABLE IF NOT EXISTS relations (id INTEGER PRIMARY KEY AUTOINCREMENT, from_id INTEGER, to_id INTEGER, rel TEXT)"
     db_exec h "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER, chat_id TEXT, role TEXT, content TEXT, ts TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS cost_log (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts TEXT, cost_usd REAL, tokens INTEGER, calls INTEGER, cache_hits INTEGER, cache_misses INTEGER)"
     h
 
 --! Schließt die Datenbank und persistiert die Änderungen auf die Datei.
@@ -67,6 +68,82 @@ export fn meta_get h key
         get (at rows 0) "mval"
     else
         ""
+
+--! Neue Session-ID (fortlaufend über meta gezählt) — ein "Session" ist hier
+--! ein Prozesslauf von `pipe muninn.pipe` (Start bis Neustart/Absturz), weil
+--! ai_cost/ai_tokens reine In-Prozess-Zaehler sind, die bei jedem Neustart
+--! wieder bei 0 anfangen. Beim Start einmal aufrufen.
+export fn next_session_id h
+    cur: meta_get h "session_counter"
+    n: 0
+    if cur != nil && cur != ""
+        n: to_num cur
+    n: n + 1
+    meta_set h "session_counter" (to_str n)
+    n
+
+--! Schreibt einen Kosten-Schnappschuss (kumulierte Werte des laufenden
+--! Prozesses laut ai_cost/ai_tokens, nicht als Delta). Nur aufrufen, wenn
+--! sich seit dem letzten Schnappschuss etwas geaendert hat (Aufrufer-
+--! Verantwortung, siehe muninn.pipe) — sonst waechst die Tabelle unnoetig.
+export fn log_cost h session_id cost_usd tokens calls cache_hits cache_misses
+    db_exec h ("INSERT INTO cost_log (session_id, ts, cost_usd, tokens, calls, cache_hits, cache_misses) VALUES (" ++ (to_str session_id) ++ ", '" ++ (sql_escape (now_ts 0)) ++ "', " ++ (to_str cost_usd) ++ ", " ++ (to_str tokens) ++ ", " ++ (to_str calls) ++ ", " ++ (to_str cache_hits) ++ ", " ++ (to_str cache_misses) ++ ")")
+    nil
+
+--! Aggregiert cost_log zu einer Zusammenfassung: Gesamtkosten/-tokens/-calls
+--! ueber alle Sessions (Summe der jeweiligen Session-Maxima, da die Werte
+--! PRO SESSION monoton steigende Zaehler sind) plus eine Liste pro Session
+--! {session_id, cost_usd, tokens, calls, cache_hits, cache_misses, first_ts,
+--! last_ts}, neueste zuerst. Aggregation bewusst in Pipe statt per SQL
+--! GROUP BY/MAX (die reine-Pipe-sqlite-Engine hat an anderer Stelle bereits
+--! nicht dokumentierte SQL-Funktionen stillschweigend ignoriert, siehe
+--! add_memory-Kommentar weiter unten — hier daher lieber verifizierbar in
+--! Pipe selbst gerechnet).
+export fn cost_summary h
+    rows: db_query h "SELECT session_id, ts, cost_usd, tokens, calls, cache_hits, cache_misses FROM cost_log ORDER BY id ASC"
+    sessions: {}
+    order: []
+    for r in rows
+        sid: to_str (get r "session_id")
+        existing: get sessions sid
+        if existing == nil
+            fresh: {session_id: (get r "session_id"), cost_usd: 0, tokens: 0, calls: 0, cache_hits: 0, cache_misses: 0, first_ts: (get r "ts"), last_ts: (get r "ts")}
+            set sessions sid fresh
+            push order sid
+            existing: fresh
+        if (get r "cost_usd") > (get existing "cost_usd")
+            set existing "cost_usd" (get r "cost_usd")
+        if (get r "tokens") > (get existing "tokens")
+            set existing "tokens" (get r "tokens")
+        if (get r "calls") > (get existing "calls")
+            set existing "calls" (get r "calls")
+        if (get r "cache_hits") > (get existing "cache_hits")
+            set existing "cache_hits" (get r "cache_hits")
+        if (get r "cache_misses") > (get existing "cache_misses")
+            set existing "cache_misses" (get r "cache_misses")
+        set existing "last_ts" (get r "ts")
+    total_cost: 0
+    total_tokens: 0
+    total_calls: 0
+    per_session: []
+    for sid in order
+        s: get sessions sid
+        total_cost: total_cost + (get s "cost_usd")
+        total_tokens: total_tokens + (get s "tokens")
+        total_calls: total_calls + (get s "calls")
+        push per_session s
+    reversed: []
+    i: (len per_session) - 1
+    while i >= 0
+        push reversed (at per_session i)
+        i: i - 1
+    out: {}
+    set out "total_cost_usd" total_cost
+    set out "total_tokens" total_tokens
+    set out "total_calls" total_calls
+    set out "session_count" (len order)
+    set out "sessions" reversed
+    out
 
 --! SQL-Sicherheits-Escape für Strings in einfachen Anführungszeichen.
 export fn sql_escape s

@@ -108,7 +108,7 @@ fn greeting_text _
 
 --! Hilfetext.
 fn help_text _
-    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/learn      — Dokument lernen (z.B. /learn https://... oder eine .txt/.md-Datei schicken)\n/graph      — Wissensgraph abfragen (z.B. /graph Harry)\n/remind     — Erinnerung planen (z.B. /remind in 10 Minuten an die Pause)\n/reminders  — offene Erinnerungen/Briefings anzeigen\n/briefing   — tägliches Morgen-Briefing aktivieren (/briefing stop zum Abbestellen)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen"
+    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/costs      — KI-Betriebskosten zusammengefasst (Sessions, Tokens, $)\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/learn      — Dokument lernen (z.B. /learn https://... oder eine .txt/.md-Datei schicken)\n/graph      — Wissensgraph abfragen (z.B. /graph Harry)\n/remind     — Erinnerung planen (z.B. /remind in 10 Minuten an die Pause)\n/reminders  — offene Erinnerungen/Briefings anzeigen\n/briefing   — tägliches Morgen-Briefing aktivieren (/briefing stop zum Abbestellen)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen"
 
 --! Status-Text (Statistiken aus der Seele).
 fn status_text dbh
@@ -116,6 +116,31 @@ fn status_text dbh
     tool_n: len (mcp_tools)
     gc: mem.graph_counts dbh
     "Muninn-Status:\n• Erinnerungen: " ++ (to_str n) ++ "\n• Wissensgraph: " ++ (to_str (get gc "entities")) ++ " Entitäten, " ++ (to_str (get gc "relations")) ++ " Relationen\n• Provider: DeepSeek\n• Gremium: 4-5 Agenten (mit Web-Recherche + MCP-Werkzeugen)\n• Werkzeuge gesamt (lokal + MCP): " ++ (to_str tool_n) ++ "\n• Executor: aktiv\n• Web: DDG + Wikipedia"
+
+--! /costs: KI-generierte Kosten-Zusammenfassung. Die Zahlen selbst werden
+--! DETERMINISTISCH aus cost_log berechnet (mem.cost_summary) — der KI wird
+--! nur die Aufgabe gegeben, diese FESTEN Zahlen lesbar zu formulieren, sie
+--! soll NICHTS selbst berechnen oder schaetzen (sonst Halluzinationsrisiko
+--! bei Zahlen, siehe die Lehren aus dem restlichen Gremium heute).
+fn costs_text dbh
+    s: mem.cost_summary dbh
+    sessions: get s "sessions"
+    if (len sessions) == 0
+        return "Noch keine Kosten aufgezeichnet — das sammelt sich waehrend des laufenden Betriebs an."
+    lines: "Gesamt ueber " ++ (to_str (get s "session_count")) ++ " Sessions: $" ++ (to_str (get s "total_cost_usd")) ++ ", " ++ (to_str (get s "total_tokens")) ++ " Tokens, " ++ (to_str (get s "total_calls")) ++ " KI-Aufrufe.\n\nLetzte Sessions (neueste zuerst):\n"
+    i: 0
+    while i < 10 && i < (len sessions)
+        sess: at sessions i
+        lines: lines ++ "- Session " ++ (to_str (get sess "session_id")) ++ " (" ++ (get sess "first_ts") ++ " bis " ++ (get sess "last_ts") ++ "): $" ++ (to_str (get sess "cost_usd")) ++ ", " ++ (to_str (get sess "tokens")) ++ " Tokens, " ++ (to_str (get sess "calls")) ++ " Aufrufe, " ++ (to_str (get sess "cache_hits")) ++ " Cache-Treffer\n"
+        i: i + 1
+    summary: ""
+    try
+        summary: ai_chat "Du bist Muninn und fasst Betriebskosten fuer deinen Nutzer zusammen. Du bekommst FERTIG BERECHNETE Zahlen — uebernimm sie EXAKT und woertlich, berechne oder schaetze NICHTS selbst nach, erfinde keine zusaetzlichen Zahlen. Schreib eine kurze, natuerliche Zusammenfassung in 3-5 Saetzen: Gesamtkosten, wie viele Sessions, grober Trend falls erkennbar (steigt/faellt/stabil), und ob irgendeine Session auffaellig teuer war. Telegram-Formatierung: einfache Sternchen fuer Fettung, keine Ueberschriften." lines
+    catch
+        summary: ""
+    if summary == nil || summary == ""
+        return lines
+    summary ++ "\n\n" ++ lines
 
 --! Liste der wichtigsten Erinnerungen.
 fn list_text dbh
@@ -255,6 +280,10 @@ fn handle_message token cid text dbh
         return nil
     if low == "/status"
         tel.tel_send_message token cid (status_text dbh)
+        return nil
+    if low == "/costs"
+        tel.tel_send_chat_action token cid "typing"
+        tel.tel_send_message token cid (shorten (costs_text dbh))
         return nil
     if low == "/list"
         tel.tel_send_message token cid (list_text dbh)
@@ -727,6 +756,11 @@ fn poll_once token offset allowed timeout
     mem.close_locked hl2
     offset
 
+--! Geteilter, mutabler Kosten-Zustand fuer maybe_log_cost (siehe dortigen
+--! Kommentar zu Pipes Scoping-Regeln — top-level Variablen einfach neu
+--! binden persistiert NICHT ueber Funktionsgrenzen hinweg, eine Map schon).
+COST_STATE: {session_id: nil, last_calls: -1}
+
 --! Sandbox + KI + MCP + Gremium in einem Rutsch, gemeinsam fuer Telegram- und
 --! Web-Modus. Setzt voraus, dass Secrets/Config bereits (vor der Sandbox!)
 --! gelesen wurden — siehe die Kommentare bei setup_ai/setup_sandbox.
@@ -741,6 +775,33 @@ fn setup_core mcp_servers deepseek_key
             print ("MCP fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
     grm.init_gremium 0
     grm.set_tz_offset tz_offset
+    hl: mem.open_locked nil
+    set COST_STATE "session_id" (mem.next_session_id (get hl "h"))
+    mem.close_locked hl
+    nil
+
+--! Schreibt einen Kosten-Schnappschuss, wenn sich seit dem letzten Aufruf
+--! etwas geaendert hat (ai_cost/ai_tokens sind In-Prozess-Zaehler ueber die
+--! GESAMTE Laufzeit — ein Log pro leerem Poll-Zyklus waere reine
+--! Tabellen-Blaehung ohne neue Information).
+fn maybe_log_cost _
+    c: {}
+    try
+        c: ai_cost
+    catch
+        return nil
+    calls: get c "calls"
+    if calls == nil || calls == (get COST_STATE "last_calls")
+        return nil
+    tk: 0
+    try
+        tk: ai_tokens
+    catch
+        tk: 0
+    hl: mem.open_locked nil
+    mem.log_cost (get hl "h") (get COST_STATE "session_id") (get c "cost_usd") tk calls (get c "cache_hits") (get c "cache_misses")
+    mem.close_locked hl
+    set COST_STATE "last_calls" calls
     nil
 
 --! CLI-Argumente lesen.
@@ -829,5 +890,6 @@ else
                                 timeout: 1
                         off: poll_once tok off allowed timeout
                         sched_tick tok
+                        maybe_log_cost 0
                     catch e
                         print ("Zyklus-Fehler — versuche erneut: " ++ (to_str e))
