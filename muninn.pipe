@@ -871,6 +871,24 @@ else
             print "TELEGRAM_BOT_TOKEN fehlt (Env oder .env). Abbruch."
         else
             print "Muninn gestartet."
+            try
+                cmds: []
+                push cmds {command: "start", description: "Begrüßung"}
+                push cmds {command: "help", description: "Alle Befehle anzeigen"}
+                push cmds {command: "status", description: "Zustand von Muninn"}
+                push cmds {command: "costs", description: "KI-Betriebskosten zusammengefasst"}
+                push cmds {command: "list", description: "Wichtigste Erinnerungen"}
+                push cmds {command: "search", description: "Im Web suchen"}
+                push cmds {command: "learn", description: "Dokument/URL lernen"}
+                push cmds {command: "graph", description: "Wissensgraph abfragen"}
+                push cmds {command: "remind", description: "Erinnerung planen"}
+                push cmds {command: "reminders", description: "Offene Erinnerungen/Briefings"}
+                push cmds {command: "briefing", description: "Tägliches Briefing an/aus"}
+                push cmds {command: "reset", description: "Gesprächsverlauf zurücksetzen"}
+                push cmds {command: "consolidate", description: "Traum: Gedächtnis verdichten"}
+                tel.tel_set_my_commands tok cmds
+            catch
+                nil
             off: nil
             if once_mode
                 print "once-Modus: ein Zyklus"

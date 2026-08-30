@@ -66,6 +66,23 @@ fn urlencode s
 export fn tel_get_me token
     tel_get token "getMe" ([])
 
+--! Registriert das native Telegram-Befehlsmenue (das "/"-Aufklapp-Menue mit
+--! Beschreibungen, sichtbar auch ueber den Menue-Button neben dem
+--! Eingabefeld). cmds: Liste von {command, description} — command OHNE
+--! fuehrenden Schraegstrich (Telegram-Vorgabe), description max. 256
+--! Zeichen. Einmalig beim Start aufzurufen; Telegram merkt sich das
+--! serverseitig, bis es erneut gesetzt wird.
+export fn tel_set_my_commands token cmds
+    list: []
+    for c in cmds
+        item: {}
+        set item "command" (get c "command")
+        set item "description" (get c "description")
+        push list item
+    m: {}
+    set m "commands" list
+    tel_post token "setMyCommands" m
+
 --! Offene Updates (Long-Polling). Liefert die result-Liste (oder []).
 export fn tel_get_updates token offset timeout
     query: [["timeout", (to_str timeout)]]
