@@ -109,6 +109,23 @@ test "close_thread beendet den aktiven Thread; naechster Aufruf legt frischen an
     expect_eq (len hist) 0 "frischer Thread ist leer"
     mem.close h
 
+--! open_locked/close_locked (P3): Wrapper um init_db/close mit echter
+--! OS-Sperre (file_lock/file_unlock, in Pipe selbst getestet). Nutzt eine
+--! echte Datei statt ":memory:", da eine Sperre nur fuer Dateien Sinn ergibt.
+test "open_locked/close_locked liefern eine funktionsfaehige, persistente DB"
+    path: "/tmp/muninn_test_open_locked.db"
+    if file_exists path
+        file_delete path
+    hl: mem.open_locked path
+    expect_eq ((get hl "h") != nil) true "h vorhanden"
+    expect_eq ((get hl "lock") != nil) true "lock vorhanden"
+    mem.add_memory (get hl "h") "Gesperrt gespeichert" "fact" 3 "test" "x"
+    mem.close_locked hl
+    hl2: mem.open_locked path
+    expect_eq (mem.memory_count (get hl2 "h")) 1 "Erinnerung nach close_locked persistiert"
+    mem.close_locked hl2
+    file_delete path
+
 --! Konsolidierung ("Traum", P2): Zeitstempel + Verdichtung/Vergessen.
 --! Hinweis: datetime('now') wird vom reinen-Pipe-sqlite-Modul NICHT ausgewertet
 --! (siehe now_ts-Kommentar in memory.pipe) — now_ts baut den Zeitstempel daher

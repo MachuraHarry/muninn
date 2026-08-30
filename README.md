@@ -45,15 +45,15 @@ Weitere Schritte: [Plan.md](Plan.md)
 
 ### Voraussetzungen
 
-- Ein Pipe-Binary mit dem `tool_call`-Builtin (Stand: noch nicht in einem offiziellen
-  Release — lokal in `~/pipe` ab Commit `f7ae197` ergänzt, siehe
-  [Plan.md](Plan.md#p1--tool-ökosystem-via-mcp--priorität-zuerst--erledigt)) —
-  [pipe](https://github.com/MachuraHarry/pipe)
-- Die Pipe-Module `sqlite` und `pipe-test`:
+- Ein Pipe-Binary mit den Builtins `tool_call` (P1) und `file_lock`/`file_unlock`
+  (P3) — Stand: noch nicht in einem offiziellen Release-Tag, aber committed und
+  nach `origin/master` gepusht im [`pipe`](https://github.com/MachuraHarry/pipe)-Repo.
+- Die Pipe-Module `sqlite`, `pipe-test` und `pipe-web`:
 
 ```bash
 pipe -get sqlite
 pipe -get pipe-test
+pipe -get pipe-web
 ```
 
 ### Konfiguration
@@ -83,9 +83,16 @@ MCP_SERVERS=                            # optional: JSON-Liste externer MCP-Serv
 ### Starten
 
 ```bash
-pipe muninn.pipe          # Produktions-Loop (Long-Polling, läuft dauerhaft)
-pipe muninn.pipe once     # ein Polling-Zyklus, dann exit (Test)
+pipe muninn.pipe             # Telegram-Bot (Long-Polling, läuft dauerhaft)
+pipe muninn.pipe once        # ein Polling-Zyklus, dann exit (Test)
+pipe muninn.pipe web         # Web-Dashboard (siehe DASHBOARD_BIND/-TOKEN)
+pipe muninn.pipe consolidate # Konsolidierung ("Traum"), z.B. per Cron
 ```
+
+Telegram-Bot und Dashboard dürfen **gleichzeitig** laufen (z.B. Bot dauerhaft im
+Hintergrund, Dashboard bei Bedarf) — beide teilen sich `muninn.db` und sichern
+jeden Zugriff per `file_lock`/`file_unlock` gegeneinander ab (siehe
+[Architektur](#nebenläufigkeit-telegram--dashboard)).
 
 ### Tests
 
@@ -128,6 +135,30 @@ Antworten tragen **Inline-Buttons**: `💾 Merken` (in die Seele speichern) und
 
 ---
 
+## Bedienung (Web-Dashboard, P3)
+
+```bash
+pipe muninn.pipe web
+# -> Muninn-Dashboard: http://127.0.0.1:8787/
+```
+
+Eine einzige, selbstenthaltene Seite (kein Build-Schritt) im Stil von
+[pipe-lang.com](https://pipe-lang.com):
+
+- **Chat** — dieselben Befehle wie bei Telegram (`/status`, `/graph <Name>`,
+  `/learn <URL>`, `/reset`, `/consolidate`) plus natürliche Sprache. Eigene,
+  bewusst schlanke Kommando-Weiche (`dashboard_reply`) statt Wiederverwendung
+  von Telegrams `handle_message` — siehe Architektur unten.
+- **Erinnerungen** — durchsuchen (Stichwort) und löschen.
+- **Wissensgraph** — Nachbarn einer Entität abfragen.
+- **Status** — Erinnerungen, Entitäten/Relationen, Werkzeuge, aktive Threads.
+
+Mit `DEEPSEEK_API_KEY` konfiguriert nutzt der Dashboard-Chat dieselbe KI wie
+Telegram (Gremium, Klassifikation, Executor) — beide Kanäle teilen sich
+Gedächtnis, Threads und Wissensgraph vollständig.
+
+---
+
 ## Architektur
 
 ```
@@ -138,13 +169,37 @@ modules/swarm.pipe      Gremium: planer/faktenwaechter/kritiker/registrator (+ W
 modules/executor.pipe   Autonomer Executor: Plan-Bibliothek, Checkpoints, Feedback-Loop
 modules/web.pipe        Recherche: web_lookup, web_search_full, web_fetch, research
 modules/mcp.pipe        MCP-Tool-Ökosystem: Server-Konfig, exec-Whitelist, Verbindungsaufbau
+modules/dashboard.pipe  Web-Dashboard (P3): pipe-web-Routen, HTML/CSS/JS, eigene Chat-Weiche
 muninn_test.pipe        deterministische Tests
 ```
 
+### Nebenläufigkeit: Telegram + Dashboard
+
+Beide Kanäle laufen als **separate Prozesse** (ein gemeinsamer Prozess ist bewusst
+vermieden, da Pipes Interpreter keinen globalen Lock hat — parallele Zugriffe auf
+gemeinsamen Modul-Zustand könnten den Prozess zum Absturz bringen), teilen sich aber
+`muninn.db`. Das reine-Pipe-`sqlite`-Modul lädt beim Öffnen einen Snapshot in den
+Speicher und schreibt beim Schließen die komplette Datei atomar zurück — **ohne
+eigene prozessübergreifende Sperre**. Ohne Gegenmaßnahme kann ein Prozess beim
+Schließen den committeten Schreibvorgang eines anderen, gleichzeitig laufenden
+Prozesses stillschweigend überschreiben (live reproduziert: eine über das Dashboard
+gespeicherte Erinnerung ging beim parallel laufenden Telegram-Bot verloren).
+
+**Fix**: `mem.open_locked`/`close_locked` umschließen jeden Datei-DB-Zugriff mit
+einer echten OS-Sperre (`file_lock`/`file_unlock`, ein neuer Pipe-Builtin —
+`flock` unter Unix, `LockFileEx` unter Windows). Die Sperre wird bewusst **nicht**
+um Telegrams 25-Sekunden-Long-Polling-Wartezeit gelegt, sondern nur um die
+tatsächlichen Lese-/Schreibzugriffe — sonst wäre das Dashboard während des Wartens
+praktisch blockiert. Nachteil: solange ein Kanal eine Nachricht aktiv verarbeitet
+(z.B. ein Gremium-Aufruf, der einige Sekunden dauert), wartet der jeweils andere
+Kanal kurz auf die Sperre — für ein persönliches Ein-Nutzer-Tool ein akzeptabler
+Kompromiss gegenüber stillem Datenverlust.
+
 ### Seele (`memory.pipe`)
 
-Alles Gedächtnis liegt in `muninn.db`. Die Datenbank wird pro Polling-Zyklus geöffnet,
-verarbeitet und mit `db_close` persistiert. Eingehende Nachrichten werden klassifiziert
+Alles Gedächtnis liegt in `muninn.db`. Die Datenbank wird pro Zugriff (Polling-
+Zyklus, Dashboard-Request, Konsolidierungslauf) über `open_locked`/`close_locked`
+geöffnet, verarbeitet und persistiert. Eingehende Nachrichten werden klassifiziert
 (KI mit deterministischem Regel-Fallback) und verdichtet, bevor sie gespeichert werden.
 
 ### Wissen & RAG (`memory.pipe`)
@@ -280,6 +335,14 @@ gitignorierten `.env` gelesen.
   dann ausschließlich für dessen Kommandos (`exec_whitelist`). `audit_log` protokolliert
   alle sicherheitsrelevanten Ereignisse (HTTP, KI-Aufrufe, Tool-Calls); `max_tool_calls`
   begrenzt Tool-Ausführungen pro Gremium-Lauf gegen Endlosschleifen.
+- **Web-Dashboard**: standardmäßig nur an `127.0.0.1` gebunden (`DASHBOARD_BIND`),
+  nicht an `0.0.0.0` — es hat keinen echten Auth-Mechanismus, nur ein optionales
+  `DASHBOARD_TOKEN` (Query-Param/Header). Für eine Bereitstellung über localhost
+  hinaus gehört zwingend ein Reverse-Proxy mit TLS + echter Authentifizierung davor.
+- **Datei-Sperre statt stillem Datenverlust**: `file_lock`/`file_unlock` (neuer
+  Pipe-Builtin) sichern jeden `muninn.db`-Zugriff prozessübergreifend ab, damit
+  Telegram-Bot und Dashboard gleichzeitig laufen können, ohne sich gegenseitig
+  Schreibvorgänge zu überschreiben (siehe Architektur → Nebenläufigkeit).
 
 ---
 

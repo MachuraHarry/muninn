@@ -10,6 +10,7 @@
 *.sqlite
 *.sqlite3
 *.log
+*.lock
 
 # Pipe-Caches / Bytecode
 ~/.pipe

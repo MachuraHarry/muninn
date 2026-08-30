@@ -4,6 +4,7 @@
 import "sqlite"
 
 DB_PATH: "muninn.db"
+LOCK_PATH: "muninn.db.lock"
 
 --! Öffnet die Datenbank und legt das Schema an (idempotent).
 --! path: optionaler Dateipfad (z.B. ":memory:"); nil = DB_PATH.
@@ -26,6 +27,30 @@ export fn init_db path
 --! Schließt die Datenbank und persistiert die Änderungen auf die Datei.
 export fn close h
     db_close h
+
+--! Oeffnet die (Datei-)Datenbank exklusiv gesperrt gegen andere Muninn-
+--! Prozesse (Telegram-Loop, Dashboard, Konsolidierung — alle koennen
+--! gleichzeitig laufen). Noetig, weil das reine-Pipe-sqlite-Modul beim
+--! Oeffnen einen Snapshot in den Speicher laedt und beim Schliessen die
+--! GESAMTE Datei atomar zurueckschreibt, ohne eigene prozessuebergreifende
+--! Sperre: zwei Prozesse, die "gleichzeitig" (auch nur Sekunden auseinander)
+--! oeffnen/schreiben/schliessen, koennen sich sonst gegenseitig committete
+--! Schreibvorgaenge stillschweigend ueberschreiben (live reproduziert). Fuer
+--! ":memory:"-Datenbanken (Tests) ist das irrelevant — dort ohne Lock nutzen.
+--! Liefert {h, lock}; IMMER zusammen mit close_locked verwenden.
+export fn open_locked path
+    lock: file_lock LOCK_PATH
+    out: {}
+    set out "h" (init_db path)
+    set out "lock" lock
+    out
+
+--! Schliesst eine mit open_locked geoeffnete Datenbank und gibt die Sperre
+--! wieder frei (Reihenfolge wichtig: erst db schliessen/committen, dann
+--! entsperren — sonst koennte ein wartender Prozess vor dem Commit lesen).
+export fn close_locked handle
+    close (get handle "h")
+    file_unlock (get handle "lock")
 
 --! Setzt einen Meta-Schlüssel (INSERT oder UPDATE).
 export fn meta_set h key value
@@ -146,6 +171,26 @@ export fn graph_counts h
     set out "entities" e
     set out "relations" r
     out
+
+--! Anzahl aktiver Threads (Status/Debug, Web-Dashboard P3).
+export fn active_thread_count h
+    get (at (db_query h "SELECT COUNT(*) AS c FROM threads WHERE state = 'active'") 0) "c"
+
+--! Erinnerungen MIT id fuer Verwaltung (Web-Dashboard P3). Ohne q: die n
+--! wichtigsten. Mit q: einfache LIKE-Stichwortsuche ueber content, neueste
+--! zuerst (kein Embedding-Ranking — fuer eine schnelle Verwaltungsliste reicht
+--! das; fuer inhaltliche Fragen bleibt retrieve_context zustaendig).
+export fn list_memories h q limit
+    if q == nil || q == ""
+        db_query h ("SELECT id, content, kind, importance, ts, tags FROM memories ORDER BY importance DESC, id DESC LIMIT " ++ (to_str limit))
+    else
+        db_query h ("SELECT id, content, kind, importance, ts, tags FROM memories WHERE content LIKE '%" ++ (sql_escape q) ++ "%' ORDER BY id DESC LIMIT " ++ (to_str limit))
+
+--! Loescht eine Erinnerung inkl. ihres Embeddings (Web-Dashboard P3).
+export fn delete_memory h id
+    db_exec h ("DELETE FROM memories WHERE id = " ++ (to_str id))
+    db_exec h ("DELETE FROM embeddings WHERE memory_id = " ++ (to_str id))
+    "ok"
 
 --! Holt die N wichtigsten Erinnerungen (hohe Importance zuerst).
 export fn top_memories h n

@@ -137,11 +137,44 @@ Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung f
 
 ### P3 — Omnichannel + Dashboard
 
-- **Web-Dashboard** via `pipe-web`: Chat, Erinnerungen durchsuchen/verwalten,
-  Status, Einstellungen.
-- **Discord-Kanal** (REST-Polling, Basis `scripts/discord.pipe`).
-- **Webhook-Modus** für Telegram (effizienter als Long-Polling).
-- **CLI/REPL-Modus** (`pipe muninn.pipe ask "…"`).
+- ✅ **Web-Dashboard** via `pipe-web`: `modules/dashboard.pipe`, aktivierbar per
+  `pipe muninn.pipe web` (neuer CLI-Modus, analog zu `once`/`consolidate`).
+  Chat (eigene, bewusst duenne Kommando-Weiche `dashboard_reply` — siehe
+  Modul-Kommentar zur Abgrenzung von Telegrams `handle_message`), Erinnerungen
+  durchsuchen/verwalten (`/api/memories`, Loeschen), Wissensgraph abfragen
+  (`/api/graph`), URL-Ingestion (`/api/learn`), Status (`/api/status`).
+  Design im Stil von [pipe-lang.com](https://pipe-lang.com) (dunkles Theme,
+  lila Akzentfarben, JetBrains Mono/Inter) — als eine einzige selbstenthaltene
+  HTML-Seite mit Vanilla-JS (kein Build-Schritt, keine Frontend-Abhaengigkeit).
+  Standardmaessig nur an `127.0.0.1` gebunden (kein `0.0.0.0`); optional per
+  `DASHBOARD_TOKEN` zusaetzlich abgesichert (Query-Param/Header — kein
+  vollwertiger Auth-Mechanismus, siehe `.env.example`).
+  **"Einstellungen"** (aus der urspruenglichen Bullet-Liste) ist bewusst noch
+  nicht gebaut — es gibt aktuell keine Laufzeit-Einstellung, die sich lohnen
+  wuerde, ohne die bestehende `.env`-Konfiguration zu duplizieren.
+  - ⚠️ **Kritischer Nebenlaeufigkeits-Bug gefunden UND behoben**: Telegram-Bot
+    und Dashboard liefen anfangs als zwei unabhaengige Prozesse gegen dieselbe
+    `muninn.db` — das reine-Pipe-`sqlite`-Modul laedt beim Oeffnen einen
+    Snapshot in den Speicher und schreibt beim Schliessen die GESAMTE Datei
+    atomar zurueck, ganz ohne prozessuebergreifende Sperre. Live reproduziert:
+    eine über den Dashboard-Chat gespeicherte Erinnerung ging spurlos verloren,
+    weil der parallel laufende Telegram-Prozess sie beim naechsten
+    `db_close` unbemerkt überschrieben hat. **Behoben an der Wurzel**: neuer
+    Pipe-Builtin `file_lock`/`file_unlock` (echtes OS-Advisory-Lock — `flock`
+    unter Unix, `LockFileEx` unter Windows, No-Op unter WASM) im
+    `pipe`-Repo, dazu `mem.open_locked`/`close_locked` in `memory.pipe`, die
+    jeden Datei-DB-Zugriff (Telegram-Loop, Dashboard-Handler, Konsolidierung)
+    exklusiv sperren. Die Sperre wird bewusst NICHT um Telegrams 25s-
+    Long-Polling-Wartezeit gelegt (sonst waere das Dashboard fast permanent
+    blockiert), sondern nur um die tatsaechlichen DB-Zugriffe. Live erneut
+    verifiziert: 5 schnell aufeinanderfolgende Dashboard-Schreibvorgaenge
+    ueberlebten den parallelen Telegram-Betrieb vollstaendig (vorher ging
+    schon ein einzelner verloren). `file_lock`/`file_unlock` sind committed
+    und nach `origin/master` im `pipe`-Repo gepusht (noch nicht in einem
+    offiziellen Release-Tag).
+- ⏳ **Discord-Kanal** (REST-Polling, Basis `scripts/discord.pipe`).
+- ⏳ **Webhook-Modus** für Telegram (effizienter als Long-Polling).
+- ⏳ **CLI/REPL-Modus** (`pipe muninn.pipe ask "…"`).
 
 ### P4 — Proaktivität & Autonomie
 

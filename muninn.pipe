@@ -1,13 +1,16 @@
 --! muninn.pipe — Einstiegspunkt: Muninn, der Langzeit-KI-Agent.
 --! Telegram-Bot (Long-Polling) + persistente sqlite-"Seele".
---! Aufruf:  pipe muninn.pipe            (Produktions-Loop)
---!          pipe muninn.pipe once       (ein Polling-Zyklus, dann exit — zum Testen)
+--! Aufruf:  pipe muninn.pipe             (Produktions-Loop, Telegram)
+--!          pipe muninn.pipe once        (ein Polling-Zyklus, dann exit — zum Testen)
+--!          pipe muninn.pipe consolidate (Konsolidierung, z.B. per Cron)
+--!          pipe muninn.pipe web         (Web-Dashboard, siehe DASHBOARD_BIND/-TOKEN in .env)
 import "modules/telegram.pipe" as tel
 import "modules/memory.pipe" as mem
 import "modules/swarm.pipe" as grm
 import "modules/executor.pipe" as exe
 import "modules/web.pipe" as web
 import "modules/mcp.pipe" as mcp
+import "modules/dashboard.pipe" as dash
 
 --! Lädt KEY=VALUE-Zeilen aus einer .env-Datei in eine Map.
 --! Werte werden am ERSTEN "=" getrennt (nicht bei jedem), damit Werte, die selbst
@@ -362,17 +365,27 @@ fn handle_callback token dbh cbq
     tel.tel_send_message token cid "Unbekannte Aktion."
 
 --! Ein Polling-Zyklus. Liefert die letzte verarbeitete update_id zurück.
+--! DB-Sperre (mem.open_locked/close_locked) bewusst NICHT um den ganzen
+--! Zyklus, sondern nur um die tatsaechlichen DB-Zugriffe: tel_get_updates
+--! wartet per Long-Polling bis zu 25s auf neue Nachrichten — waere die Sperre
+--! die ganze Zeit gehalten, koennte das Web-Dashboard waehrenddessen so gut
+--! wie nie an die DB. So haelt jeder Kanal die Sperre nur, waehrend er
+--! tatsaechlich etwas verarbeitet (siehe Plan.md zur Nebenlaeufigkeit).
 fn poll_once token offset allowed
-    dbh: mem.init_db nil
+    hl: mem.open_locked nil
+    dbh: get hl "h"
     if offset == nil
         saved: mem.meta_get dbh "telegram_offset"
         if saved != ""
             offset: to_num saved
+    mem.close_locked hl
     updates: []
     try
         updates: tel.tel_get_updates token offset 25
     catch
         updates: []
+    hl2: mem.open_locked nil
+    dbh2: get hl2 "h"
     for upd in updates
         uid: get upd "update_id"
         if uid != nil
@@ -384,7 +397,7 @@ fn poll_once token offset allowed
                 cid: get chat "id"
                 if is_allowed cid allowed
                     try
-                        handle_update token cid msg dbh
+                        handle_update token cid msg dbh2
                     catch
                         nil
         cq: get upd "callback_query"
@@ -394,29 +407,51 @@ fn poll_once token offset allowed
                 cid2: get chat2 "id"
                 if is_allowed cid2 allowed
                     try
-                        handle_callback token dbh cq
+                        handle_callback token dbh2 cq
                     catch
                         nil
     if offset != nil
-        mem.meta_set dbh "telegram_offset" (to_str offset)
-    mem.close dbh
+        mem.meta_set dbh2 "telegram_offset" (to_str offset)
+    mem.close_locked hl2
     offset
+
+--! Sandbox + KI + MCP + Gremium in einem Rutsch, gemeinsam fuer Telegram- und
+--! Web-Modus. Setzt voraus, dass Secrets/Config bereits (vor der Sandbox!)
+--! gelesen wurden — siehe die Kommentare bei setup_ai/setup_sandbox.
+fn setup_core mcp_servers deepseek_key
+    setup_sandbox mcp_servers
+    setup_ai deepseek_key
+    mcp_results: mcp.connect_servers mcp_servers
+    for r in mcp_results
+        if get r "ok"
+            print ("MCP verbunden: " ++ (get r "alias"))
+        else
+            print ("MCP fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
+    grm.init_gremium 0
+    nil
 
 --! CLI-Argumente lesen.
 avgs: args
 once_mode: false
 consolidate_mode: false
+web_mode: false
 if (len avgs) > 0
     if (at avgs 0) == "once"
         once_mode: true
     if (at avgs 0) == "consolidate"
         consolidate_mode: true
+    if (at avgs 0) == "web"
+        web_mode: true
 
 --! Alle Secrets/Config-Werte werden VOR der Sandbox-Aktivierung gelesen (siehe
 --! setup_ai/setup_sandbox): einmal von vertrauenswürdigem Startup-Code eingesammelt,
 --! danach nur noch als Wert weitergereicht — nie erneut per env() nachgefragt.
 cfg: load_env ".env"
 deepseek_key: cfg_get cfg "DEEPSEEK_API_KEY"
+dash_bind: cfg_get cfg "DASHBOARD_BIND"
+dash_token: cfg_get cfg "DASHBOARD_TOKEN"
+mcp_servers: mcp.parse_mcp_config (cfg_get cfg "MCP_SERVERS")
+mcp_servers: mcp.resolve_all_env mcp_servers
 
 --! consolidate-Modus (P2, "Traum"): einmaliger Aufraeum-/Verdichtungslauf,
 --! z.B. per externem Cron: `pipe muninn.pipe consolidate`. Kein Scheduler in
@@ -427,36 +462,37 @@ if consolidate_mode
     sandbox_profile "consolidate" {fs: "full", network: false, exec: false, ai: true, audit_log: true}
     set_sandbox "consolidate"
     setup_ai deepseek_key
-    dbh: mem.init_db nil
-    res: mem.consolidate dbh
+    hl: mem.open_locked nil
+    res: mem.consolidate (get hl "h")
     print ("Konsolidierung: " ++ (to_str (get res "threads_summarized")) ++ " Threads verdichtet, " ++ (to_str (get res "memories_decayed")) ++ " Erinnerungen gealtert, " ++ (to_str (get res "memories_forgotten")) ++ " vergessen.")
-    mem.close dbh
+    mem.close_locked hl
 else
-    tok: cfg_get cfg "TELEGRAM_BOT_TOKEN"
-    allowed: cfg_get cfg "TELEGRAM_ALLOWED_CHAT_ID"
-    mcp_servers: mcp.parse_mcp_config (cfg_get cfg "MCP_SERVERS")
-    mcp_servers: mcp.resolve_all_env mcp_servers
-    setup_sandbox mcp_servers
-    setup_ai deepseek_key
-    mcp_results: mcp.connect_servers mcp_servers
-    for r in mcp_results
-        if get r "ok"
-            print ("MCP verbunden: " ++ (get r "alias"))
-        else
-            print ("MCP fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
-    grm.init_gremium 0
-    if tok == nil || tok == ""
-        print "TELEGRAM_BOT_TOKEN fehlt (Env oder .env). Abbruch."
+    if web_mode
+        --! web-Modus (P3): Dashboard statt Telegram-Loop. DASHBOARD_BIND
+        --! (Standard: nur localhost — bewusst kein "0.0.0.0", siehe
+        --! dashboard.pipe-Kommentar zur Sicherheit) und optional
+        --! DASHBOARD_TOKEN aus .env.
+        setup_core mcp_servers deepseek_key
+        bind: dash_bind
+        if bind == nil || bind == ""
+            bind: "127.0.0.1:8787"
+        dash.start bind dash_token
     else
-        print "Muninn gestartet."
-        off: nil
-        if once_mode
-            print "once-Modus: ein Zyklus"
-            off: poll_once tok off allowed
-            print "once-Zyklus fertig."
+        tok: cfg_get cfg "TELEGRAM_BOT_TOKEN"
+        allowed: cfg_get cfg "TELEGRAM_ALLOWED_CHAT_ID"
+        setup_core mcp_servers deepseek_key
+        if tok == nil || tok == ""
+            print "TELEGRAM_BOT_TOKEN fehlt (Env oder .env). Abbruch."
         else
-            while true
-                try
-                    off: poll_once tok off allowed
-                catch
-                    print "Zyklus-Fehler — versuche erneut."
+            print "Muninn gestartet."
+            off: nil
+            if once_mode
+                print "once-Modus: ein Zyklus"
+                off: poll_once tok off allowed
+                print "once-Zyklus fertig."
+            else
+                while true
+                    try
+                        off: poll_once tok off allowed
+                    catch
+                        print "Zyklus-Fehler — versuche erneut."
