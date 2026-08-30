@@ -56,6 +56,12 @@ fn setup_ai key
 --! abruft; eine feste Whitelist wuerde die Recherche brechen.
 fn setup_sandbox servers
     wl: mcp.exec_whitelist_for servers
+    --! "docker" zusaetzlich zur Whitelist: modules/docker_tools.pipe ruft
+    --! `docker pull`/`docker run` direkt per exec() auf (nicht ueber den
+    --! MCP-Server "docker", der nur bestehende Container verwaltet). Siehe
+    --! Sicherheits-Kommentar in docker_tools.pipe — strikt validierte
+    --! Argumente, kein Volume-Mount, kein --privileged.
+    push wl "docker"
     allow_exec: (len wl) > 0
     sandbox_profile "muninn" {fs: "full", network: true, exec: allow_exec, exec_whitelist: wl, ai: true, max_tool_calls: 40, audit_log: true}
     set_sandbox "muninn"

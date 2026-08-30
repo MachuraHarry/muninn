@@ -6,6 +6,7 @@ import "modules/memory.pipe" as mem
 import "modules/web.pipe" as web
 import "modules/mcp.pipe" as mcp
 import "modules/scheduler.pipe" as sched
+import "modules/docker_tools.pipe" as dt
 
 --! Geteilter, mutabler Zustand: aktueller DB-Handle + Chat-Kontext fuer die Tools.
 --! tz_offset wird einmalig beim Start gesetzt (set_tz_offset), dbh/cid pro Lauf
@@ -152,8 +153,13 @@ export fn init_gremium _
     ai_tool "web_fetch" "Eine Webseite abrufen und deren Fließtext liefern." {url: "Vollständige URL"} tool_web_fetch
     ai_tool "merken_quelle" "Eine aus dem Web gewonnene Erkenntnis dauerhaft mit Quellen-URL speichern." {content: "Erkenntnis", source: "Quellen-URL"} tool_merken_quelle
     ai_tool "erinnerung_planen" "Eine zeitgesteuerte Erinnerung fuer den Nutzer planen (z.B. bei Terminen/Verpflichtungen mit Zeitangabe)." {text: "Was erinnert werden soll, inkl. Zeitangabe in natuerlicher Sprache"} tool_erinnerung_planen
+    --! Bewusst eingeschraenkte Docker-Erweiterung (Image ziehen, Container
+    --! anlegen) — siehe docker_tools.pipe fuer die Sicherheitsbegruendung.
+    --! Ergaenzt den MCP-Server "docker" (verwaltet nur BESTEHENDE Container).
+    ai_tool "docker_pull_image" "Ein Docker-Image von einer Registry herunterladen (z.B. 'nginx:latest')." {image: "Image-Name inkl. optionalem Tag"} dt.tool_docker_pull_image
+    ai_tool "docker_create_container" "Einen neuen Container aus einem Image starten. KEINE Volume-Mounts moeglich, KEIN --privileged. Standardmaessig nur auf localhost erreichbar (public='true' fuer oeffentlich, nur wenn explizit gewuenscht)." {image: "Image-Name (ggf. vorher mit docker_pull_image geholt)", name: "Container-Name", host_port: "Port auf dem Host", container_port: "Port im Container", public: "'true' fuer oeffentlich erreichbar, sonst nur localhost"} dt.tool_docker_create_container
 
-    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen"]
+    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen", "docker_pull_image", "docker_create_container"]
     --! P5: EIN fokussierter Spezial-Agent PRO angebundenem MCP-Server statt
     --! eines Alleskoenners mit allen Werkzeugen — skaliert automatisch mit
     --! jedem neuen MCP-Server (kein Code-Umbau noetig), und haelt die
@@ -171,10 +177,19 @@ export fn init_gremium _
         gtools: get grp "tools"
         for tn in gtools
             push mcp_names tn
+        extra_note: ""
+        if alias == "docker"
+            --! Nur der Docker-Spezialist bekommt zusaetzlich die lokalen,
+            --! eingeschraenkten Image-Pull/Container-Erstellen-Werkzeuge (siehe
+            --! docker_tools.pipe) — die MCP-Werkzeuge aus '" ++ alias ++ "'
+            --! koennen das nicht, nur bestehende Container verwalten.
+            push gtools "docker_pull_image"
+            push gtools "docker_create_container"
+            extra_note: " Zusaetzlich hast du 'docker_pull_image' und 'docker_create_container' fuer neue Container/Images — dabei gibt es KEINE Volume-Mounts und KEIN --privileged, das ist Absicht (Sicherheit), nicht ein fehlendes Feature; biete das dem Nutzer nicht als moeglich an. Neue Container sind standardmaessig nur auf localhost erreichbar, ausser der Nutzer will es ausdruecklich oeffentlich (dann public='true')."
         agent_name: "werkzeug_" ++ alias
         push specialist_names agent_name
         specialist_desc: specialist_desc ++ "- '" ++ agent_name ++ "': Werkzeuge aus '" ++ alias ++ "' (" ++ (join gtools ", ") ++ ")\n"
-        swarm_agent agent_name {system: HANDOFF_RULE ++ "Du bist der Spezial-Agent fuer '" ++ alias ++ "' im Gremium von Muninn. Du hast NUR Zugriff auf die per MCP aus '" ++ alias ++ "' angebundenen Werkzeuge. Brauchst du fuer die Anfrage mehrere dieser Werkzeuge nacheinander (z.B. erst einen Ort/eine ID nachschlagen, dann damit die eigentlichen Daten abrufen), rufe sie ALLE in dieser einen Runde nacheinander auf, BEVOR du 'kritiker' aufrufst — nicht nach jedem einzelnen Werkzeug zurueckspringen, das verbraucht unnoetig Runden. Rufe erst danach IMMER 'kritiker' auf, um dein Ergebnis weiterzugeben.", tools: gtools, handoff: ["kritiker", "planer"]}
+        swarm_agent agent_name {system: HANDOFF_RULE ++ "Du bist der Spezial-Agent fuer '" ++ alias ++ "' im Gremium von Muninn. Du hast NUR Zugriff auf die per MCP aus '" ++ alias ++ "' angebundenen Werkzeuge." ++ extra_note ++ " Brauchst du fuer die Anfrage mehrere dieser Werkzeuge nacheinander (z.B. erst einen Ort/eine ID nachschlagen, dann damit die eigentlichen Daten abrufen), rufe sie ALLE in dieser einen Runde nacheinander auf, BEVOR du 'kritiker' aufrufst — nicht nach jedem einzelnen Werkzeug zurueckspringen, das verbraucht unnoetig Runden. Rufe erst danach IMMER 'kritiker' auf, um dein Ergebnis weiterzugeben.", tools: gtools, handoff: ["kritiker", "planer"]}
 
     --! Dynamisch aus dem ECHTEN Zustand gebaut (nicht statischer Text wie
     --! SELF_ID) — siehe Kommentar bei MEMORY_HONESTY_RULE oben.

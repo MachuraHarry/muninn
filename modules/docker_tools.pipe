@@ -1,0 +1,94 @@
+--! docker_tools.pipe — bewusst eingeschraenkte Docker-Erweiterung (Image
+--! ziehen, Container anlegen), zusaetzlich zum MCP-Server "docker" (der nur
+--! BESTEHENDE Container/Images verwaltet, siehe swarm.pipe-Kommentar).
+--!
+--! Sicherheits-Entscheidung (mit dem Nutzer abgestimmt): volle Docker-MCP-
+--! Server mit pull_image/create_container existieren (z.B. afstanton/
+--! docker_mcp), kommen aber mit der Warnung der Autoren, dass sie
+--! "inherently unsafe" sind — Host-Volume-Mounts in einem Container sind
+--! faktisch Root-Zugriff auf den Host. Dieses Modul deckt den konkreten
+--! Bedarf (Webserver-Container aufsetzen) OHNE diese Faehigkeit ab:
+--!   - KEINE Volume-Mounts moeglich (kein Parameter dafuer, nicht mal
+--!     optional) — ein Container kann also nie auf das Host-Dateisystem
+--!     zugreifen.
+--!   - KEIN --privileged, KEIN --network=host, KEINE frei waehlbaren
+--!     zusaetzlichen Docker-Flags — das Kommando wird aus einem FESTEN
+--!     Template gebaut, nur validierte Werte werden eingesetzt.
+--!   - Port-Bindung standardmaessig NUR auf 127.0.0.1 (nicht oeffentlich
+--!     erreichbar) — bewusster sicherer Default, damit ein frisch
+--!     aufgesetzter Webserver nicht sofort ungeschuetzt im Netz haengt.
+--!   - Image-Name/Container-Name/Ports werden gegen strikte, VERANKERTE
+--!     Regex geprueft (^...$, nicht nur "enthaelt"), bevor sie in den
+--!     exec()-Befehl eingesetzt werden. exec() tokenisiert ueber
+--!     splitShellWords und ruft das Programm DIREKT auf (kein "sh -c",
+--!     siehe pipe/pkg/object/builtins_sandbox.go) — die Regex-Pruefung ist
+--!     trotzdem noetig, um Argument-Injection zu verhindern (z.B. ein
+--!     "Image-Name" wie "nginx --privileged", der sonst als zusaetzliches
+--!     Docker-Flag durchgereicht wuerde).
+--! Braucht "docker" im Sandbox-exec_whitelist (kommt automatisch dazu, da
+--! der MCP-Server "docker" per npx laeuft und "docker" selbst nicht ueber
+--! MCP, sondern hier direkt per exec() aufgerufen wird — daher zusaetzlich
+--! in setup_sandbox eingetragen, siehe muninn.pipe).
+
+--! Docker-Image-Name: registry/namespace/name:tag, nur uebliche Zeichen.
+--! Bewusst einfach gehalten (lieber ein paar exotische, gueltige Image-Namen
+--! ablehnen als eine komplexe Regex mit einem uebersehenen Schlupfloch).
+--! Kein Leerzeichen, kein fuehrender Bindestrich (koennte sonst als
+--! zusaetzliches Docker-Flag durchgehen) — das ist der sicherheitsrelevante
+--! Teil, nicht die volle Docker-Namensgrammatik.
+export fn valid_image_name s
+    regex_match "^[a-z0-9][a-z0-9._/-]*(:[a-zA-Z0-9._-]+)?$" s
+
+--! Container-/Ressourcen-Name: Docker-uebliche Zeichen, muss mit
+--! alphanumerisch beginnen.
+export fn valid_identifier s
+    regex_match "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$" s
+
+--! Portnummer als reiner String, 1-65535.
+export fn valid_port s
+    if !(regex_match "^[0-9]{1,5}$" s)
+        return false
+    n: to_num s
+    n >= 1 && n <= 65535
+
+fn docker_exec cmd_str
+    r: exec cmd_str
+    out: get r "output"
+    if (get r "status") != 0
+        "Fehler (Status " ++ (to_str (get r "status")) ++ "): " ++ out
+    else
+        if out == "" || out == nil
+            "OK"
+        else
+            out
+
+--! Tool: ein Image von Docker Hub (oder anderer Registry) herunterladen.
+export fn tool_docker_pull_image image
+    if !(valid_image_name image)
+        return "Abgelehnt: '" ++ image ++ "' ist kein gueltiger Image-Name."
+    docker_exec ("docker pull " ++ image)
+
+--! Tool: einen neuen, laufenden Container aus einem (ggf. vorher gezogenen)
+--! Image starten. KEINE Volume-Mounts, KEIN --privileged, KEIN
+--! --network=host — siehe Datei-Kommentar oben. host_port/container_port
+--! sind PFLICHT (kein Container ohne explizite, bewusste Port-Zuordnung).
+--! public: "true" bindet auf alle Interfaces, sonst (Default, auch bei
+--! jedem anderen Wert) nur auf 127.0.0.1.
+export fn tool_docker_create_container image name host_port container_port public
+    if !(valid_image_name image)
+        return "Abgelehnt: '" ++ image ++ "' ist kein gueltiger Image-Name."
+    if !(valid_identifier name)
+        return "Abgelehnt: '" ++ name ++ "' ist kein gueltiger Container-Name."
+    if !(valid_port host_port)
+        return "Abgelehnt: '" ++ host_port ++ "' ist kein gueltiger Host-Port (1-65535)."
+    if !(valid_port container_port)
+        return "Abgelehnt: '" ++ container_port ++ "' ist kein gueltiger Container-Port (1-65535)."
+    bind: "127.0.0.1:"
+    if public == "true"
+        bind: ""
+    cmd: "docker run -d --name " ++ name ++ " -p " ++ bind ++ host_port ++ ":" ++ container_port ++ " " ++ image
+    res: docker_exec cmd
+    hint: " (nur auf localhost erreichbar — 127.0.0.1:" ++ host_port ++ ")"
+    if public == "true"
+        hint: " (oeffentlich erreichbar auf Port " ++ host_port ++ " — bewusst gewaehlt!)"
+    res ++ hint
