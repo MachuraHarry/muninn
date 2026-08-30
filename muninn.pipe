@@ -61,6 +61,37 @@ fn setup_sandbox servers
     set_sandbox "muninn"
     nil
 
+fn ensure_mcp_for_task task
+    results: mcp.ensure_for_task mcp_auto_servers task
+    for r in results
+        if get r "ok"
+            print ("MCP autonom verbunden: " ++ (get r "alias"))
+        else
+            print ("MCP autonom fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
+    if (len results) > 0
+        grm.init_gremium 0
+    nil
+
+fn list_configured_mcp_aliases _
+    names: []
+    for s in all_mcp_servers
+        alias: get s "alias"
+        if alias != nil && alias != ""
+            push names alias
+    names
+
+fn connected_mcp_tool_names _
+    out: []
+    try
+        tools: mcp_tools
+        for t in tools
+            n: get t "name"
+            if n != nil && n != ""
+                push out n
+    catch
+        nil
+    out
+
 --! Prüft, ob eine Chat-ID bedient werden darf (leere Whitelist = alle erlauben).
 fn is_allowed cid allowed
     if allowed == nil || allowed == ""
@@ -105,7 +136,7 @@ fn handle_update token cid msg dbh
             handle_document token cid dbh doc
             return nil
         if (get msg "photo") != nil
-            tel.tel_send_message token cid "Ich kann aktuell nur Text verarbeiten, keine Fotos."
+            handle_photo token cid dbh msg
             return nil
         if (get msg "sticker") != nil
             tel.tel_send_message token cid "Netter Sticker — ich verstehe aber nur Text."
@@ -128,6 +159,13 @@ fn is_text_doc fname mime
     if contains low ".md"
         return true
     if contains low ".markdown"
+        return true
+    false
+
+fn is_mcp_server_question low
+    if !contains low "mcp"
+        return false
+    if contains low "server" || contains low "werkzeug" || contains low "verfuegbar" || contains low "verfugbar" || contains low "verfügbar" || contains low "welche" || contains low "tools"
         return true
     false
 
@@ -154,6 +192,53 @@ fn handle_document token cid dbh doc
     res: mem.ingest_document dbh content ("telegram-datei:" ++ fname) fname 20
     tel.tel_send_message token cid ("Gelernt aus '" ++ fname ++ "': " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten gespeichert.")
 
+--! Verarbeitet ein hochgeladenes Foto (Telegram "photo"-Nachricht) per ai_vision.
+--! "photo" ist eine Liste von Groessen aufsteigend sortiert — das letzte Element
+--! ist die hoechste Aufloesung. Die Bytes kommen ueber Telegrams File-API als
+--! rohe Bytes zurueck; ai_vision akzeptiert dafuer explizit ein Bytes-Objekt
+--! (kein String — ein String wird sonst als lokaler Pfad/URL interpretiert,
+--! siehe resolveImageURL in pipe/pkg/object/builtins_vision.go), daher to_bytes.
+--! DeepSeeks Standardmodell (deepseek-chat, siehe setup_ai) kann keine Bilder —
+--! fuer den Aufruf kurz auf das Vision-Modell umschalten und danach IMMER
+--! zurueckschalten (try/catch), sonst laufen alle folgenden Text-Antworten mit
+--! dem falschen Modell.
+fn handle_photo token cid dbh msg
+    photos: get msg "photo"
+    if photos == nil || (len photos) == 0
+        tel.tel_send_message token cid "Foto konnte nicht gelesen werden."
+        return nil
+    largest: at photos ((len photos) - 1)
+    caption: get msg "caption"
+    prompt: "Was ist auf diesem Bild zu sehen? Beschreibe es kurz und pruefe, ob etwas Wichtiges oder Auffaelliges zu erkennen ist."
+    if caption != nil && (trim caption) != ""
+        prompt: caption
+    tel.tel_send_chat_action token cid "typing"
+    fpath: tel.tel_get_file token (get largest "file_id")
+    if fpath == nil
+        tel.tel_send_message token cid "Bild konnte nicht abgerufen werden."
+        return nil
+    raw: tel.tel_download_file token fpath
+    if raw == nil || raw == ""
+        tel.tel_send_message token cid "Bild war leer oder nicht lesbar."
+        return nil
+    answer: ""
+    try
+        ai_model "deepseek-v4-flash-vision-exp"
+        answer: ai_vision (to_bytes raw) prompt
+        ai_model "deepseek-chat"
+    catch e
+        ai_model "deepseek-chat"
+        answer: "Ich konnte das Bild nicht auswerten: " ++ (to_str e)
+    tid: mem.active_thread dbh cid
+    mem.add_message dbh tid cid "user" ("[Foto] " ++ prompt)
+    mem.add_message dbh tid cid "assistant" answer
+    kb: []
+    row: []
+    push row (tel.tel_button "💾 Merken" "save")
+    push kb row
+    tel.tel_send_message_kb token cid (shorten answer) kb
+    nil
+
 --! Verarbeitet eine eingehende Textnachricht und antwortet.
 fn handle_message token cid text dbh
     if text == nil
@@ -165,7 +250,7 @@ fn handle_message token cid text dbh
     if low == "/start" || low == "/hello" || low == "hallo" || low == "hi"
         tel.tel_send_message token cid (greeting_text 0)
         return nil
-    if low == "/help"
+    if low == "/help" || low == "hilfe" || low == "help"
         tel.tel_send_message token cid (help_text 0)
         return nil
     if low == "/status"
@@ -181,7 +266,7 @@ fn handle_message token cid text dbh
         else
             out: "Offene Erinnerungen/Briefings:\n"
             for r in rows
-                out: out ++ "• [" ++ (get r "kind") ++ "] " ++ (get r "note") ++ " — am " ++ (format_time (get r "due_ts") "2006-01-02 15:04:05") ++ "\n"
+                out: out ++ "• [" ++ (get r "kind") ++ "] " ++ (get r "note") ++ " — am " ++ (format_time ((get r "due_ts") + tz_offset) "2006-01-02 15:04:05") ++ "\n"
             tel.tel_send_message token cid (shorten out)
         return nil
     if low == "/briefing stop"
@@ -205,14 +290,14 @@ fn handle_message token cid text dbh
         nsec: now
         first_due: sched.next_hhmm (get bt "hh") (get bt "mm") nsec tz_offset
         sched.schedule dbh "briefing" (to_str cid) "Tägliches Briefing" first_due "daily"
-        tel.tel_send_message token cid ("Tägliches Briefing aktiv — ich melde mich das nächste Mal um " ++ (format_time first_due "15:04") ++ " (und danach täglich).")
+        tel.tel_send_message token cid ("Tägliches Briefing aktiv — ich melde mich das nächste Mal um " ++ (format_time (first_due + tz_offset) "15:04") ++ " (und danach täglich).")
         return nil
     rq: remind_query low tnorm
     if rq != ""
         nsec2: now
         parsed: sched.parse_reminder rq nsec2 tz_offset
         sched.schedule dbh "reminder" (to_str cid) (get parsed "text") (get parsed "due") (get parsed "repeat")
-        tel.tel_send_message token cid ("Notiert — ich erinnere dich am " ++ (format_time (get parsed "due") "2006-01-02 15:04:05") ++ " an: " ++ (get parsed "text"))
+        tel.tel_send_message token cid ("Notiert — ich erinnere dich am " ++ (format_time ((get parsed "due") + tz_offset) "2006-01-02 15:04:05") ++ " an: " ++ (get parsed "text"))
         return nil
     if low == "/reset"
         mem.close_thread dbh cid
@@ -257,102 +342,110 @@ fn handle_message token cid text dbh
         res: mem.ingest_document dbh dtext lurl lurl 20
         tel.tel_send_message token cid ("Gelernt aus " ++ lurl ++ ": " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten gespeichert.")
         return nil
-    kind: mem.classify_input tnorm
-    mem.log_event dbh (to_str cid) tnorm kind
-    if kind == "reminder"
-        nsec3: now
-        parsed: sched.parse_reminder tnorm nsec3 tz_offset
-        sched.schedule dbh "reminder" (to_str cid) (get parsed "text") (get parsed "due") (get parsed "repeat")
-        tel.tel_send_message token cid ("Notiert — ich erinnere dich am " ++ (format_time (get parsed "due") "2006-01-02 15:04:05") ++ " an: " ++ (get parsed "text"))
+    if contains low "was kannst du"
+        tel.tel_send_message token cid (capability_text 0)
         return nil
-    if kind == "permanent"
-        mem.add_memory dbh tnorm "permanent" 3 "telegram" "nutzer"
-        tel.tel_send_message token cid ("Notiert: " ++ tnorm)
-        return nil
-    if kind == "task" || kind == "goal"
-        tel.tel_send_chat_action token cid "typing"
-        res: exe.execute_task dbh tnorm
-        if get res "ok"
-            tel.tel_send_message token cid ("Erledigt (" ++ (to_str (get res "steps_done")) ++ " Schritte).")
+    if is_mcp_server_question low
+        names: list_configured_mcp_aliases 0
+        if (len names) == 0
+            tel.tel_send_message token cid "Aktuell sind keine MCP-Server konfiguriert."
         else
-            tel.tel_send_message token cid ("Plan fehlgeschlagen: " ++ (get res "error"))
+            available: "Verfügbare MCP-Server: " ++ (join names ", ") ++ "."
+            tool_names: connected_mcp_tool_names 0
+            if (len tool_names) > 0
+                available: available ++ " Verfügbare Tools: " ++ (join tool_names ", ") ++ "."
+            tel.tel_send_message token cid available
         return nil
-    if kind == "question"
-        tel.tel_send_chat_action token cid "typing"
-        tid: mem.active_thread dbh cid
-        hist: mem.thread_history dbh tid 6
-        task: tnorm
-        if (len hist) > 0
-            task: "Bisheriger Gespraechsverlauf (aeltester zuerst):\n" ++ (mem.format_history hist) ++ "\nAktuelle Frage: " ++ tnorm
+    --! Ab hier: EIN gemeinsamer Pfad fuer das gesamte freie Gespraech. Frueher
+    --! stand hier eine vorab-Klassifikation (regelbasiert + ein kontextfreier
+    --! KI-Einwort-Aufruf) in sechs isolierte Toepfe (reminder/permanent/task/
+    --! goal/fleeting/question), von denen nur "question" wirklich Werkzeuge,
+    --! Gedaechtnis und Gespraechsverlauf hatte. Das fuehrte zu widerspruechlichem
+    --! Verhalten bei identischem Text (je nachdem, welchen Topf die KI beim
+    --! naechsten Aufruf traf) und zu einem blind JSON-Schritte erfindenden
+    --! "task"-Executor ohne jeden Kontext (siehe Plan.md-Diskussion). Jetzt
+    --! bekommt das Gremium (schon fuer "question" bewaehrt: echte Werkzeuge,
+    --! Gedaechtnis, Verlauf) IMMER den vollen Kontext und entscheidet selbst,
+    --! ob es merkt, eine Erinnerung plant, recherchiert oder einfach antwortet.
+    ensure_mcp_for_task tnorm
+    tel.tel_send_chat_action token cid "typing"
+    tid: mem.active_thread dbh cid
+    hist: mem.thread_history dbh tid 6
+    task: tnorm
+    if (len hist) > 0
+        task: "Bisheriger Gespraechsverlauf (aeltester zuerst):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
+    mem.log_event dbh (to_str cid) tnorm "chat"
+    answer: ""
+    try
+        res: grm.run_gremium dbh cid task
+        answer: get res "content"
+    catch
         answer: ""
-        try
-            res: grm.run_gremium dbh task
-            answer: get res "content"
-        catch
-            answer: ""
-        mem.add_message dbh tid cid "user" tnorm
-        if answer == nil || answer == "" || question_needs_research answer
-            ctx: mem.retrieve_context dbh tnorm 3
-            if (len ctx) > 0
-                ctx_text: join ctx "\n\n"
-                reply: ""
-                try
-                    reply: ai_chat "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des folgenden Kontexts knapp und faktentreu. Wenn der Kontext nichts Passendes enthaelt, sage ehrlich, dass du es nicht weisst. Gib nur die Antwort aus, kein internes Reasoning." ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx_text)
-                catch
-                    reply: ""
-                if reply == nil || reply == ""
-                    reply: "Dazu erinnere ich mich an:\n"
-                    for c in ctx
-                        reply: reply ++ "• " ++ c ++ "\n"
-                mem.add_message dbh tid cid "assistant" reply
-                tel.tel_send_message token cid reply
-            else
-                tel.tel_send_message token cid "Kein Wissen darüber. Recherchiere..."
-                rr: web.research tnorm
-                ctx2: get rr "context"
-                srcs2: get rr "sources"
-                if ctx2 == nil || ctx2 == ""
-                    fallback: "Ich konnte online nichts Relevantes finden."
-                    mem.add_message dbh tid cid "assistant" fallback
-                    tel.tel_send_message token cid fallback
-                else
-                    answer2: ""
-                    try
-                        answer2: ai_chat "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des recherchierten Kontexts knapp und faktentreu. Gib nur die Antwort aus, kein internes Reasoning." ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx2)
-                    catch
-                        answer2: ctx2
-                    if answer2 == nil || answer2 == ""
-                        answer2: ctx2
-                    mem.add_memory dbh (mem.condense_fact answer2) "fact" 3 "web_research" "web"
-                    mem.add_message dbh tid cid "assistant" answer2
-                    src_text: ""
-                    for u in srcs2
-                        src_text: src_text ++ "\n" ++ u
-                    full: (shorten answer2) ++ "\n— Quellen:" ++ (shorten src_text)
-                    kb: []
-                    row: []
-                    push row (tel.tel_button "💾 Merken" "save")
-                    push row (tel.tel_button "🔍 Vertiefen" "more")
-                    push kb row
-                    row2: []
-                    push row2 (tel.tel_button "👍" "up")
-                    push row2 (tel.tel_button "👎" "down")
-                    push kb row2
-                    tel.tel_send_message_kb token cid (shorten full) kb
-        else
-            mem.add_message dbh tid cid "assistant" answer
-            kb: []
-            row: []
-            push row (tel.tel_button "💾 Merken" "save")
-            push row (tel.tel_button "🔍 Vertiefen" "more")
-            push kb row
-            row2: []
-            push row2 (tel.tel_button "👍" "up")
-            push row2 (tel.tel_button "👎" "down")
-            push kb row2
-            tel.tel_send_message_kb token cid (shorten answer) kb
+    mem.add_message dbh tid cid "user" tnorm
+    if question_needs_research answer
+        tel.tel_send_message token cid "Kein Wissen darüber. Recherchiere..."
+        do_search token cid dbh tnorm
         return nil
-    tel.tel_send_message token cid ("Verstanden. (" ++ kind ++ ")")
+    if answer == nil || answer == ""
+        ctx: mem.retrieve_context dbh tnorm 3
+        if (len ctx) > 0
+            ctx_text: join ctx "\n\n"
+            reply: ""
+            try
+                reply: ai_chat "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des folgenden Kontexts knapp und faktentreu. Wenn der Kontext nichts Passendes enthaelt, sage ehrlich, dass du es nicht weisst. Gib nur die Antwort aus, kein internes Reasoning." ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx_text)
+            catch
+                reply: ""
+            if reply == nil || reply == ""
+                reply: "Dazu erinnere ich mich an:\n"
+                for c in ctx
+                    reply: reply ++ "• " ++ c ++ "\n"
+            mem.add_message dbh tid cid "assistant" reply
+            tel.tel_send_message token cid reply
+        else
+            tel.tel_send_message token cid "Kein Wissen darüber. Recherchiere..."
+            rr: web.research tnorm
+            ctx2: get rr "context"
+            srcs2: get rr "sources"
+            if ctx2 == nil || ctx2 == ""
+                fallback: "Ich konnte online nichts Relevantes finden."
+                mem.add_message dbh tid cid "assistant" fallback
+                tel.tel_send_message token cid fallback
+            else
+                answer2: ""
+                try
+                    answer2: ai_chat "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des recherchierten Kontexts knapp und faktentreu. Gib nur die Antwort aus, kein internes Reasoning." ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx2)
+                catch
+                    answer2: ctx2
+                if answer2 == nil || answer2 == ""
+                    answer2: ctx2
+                mem.add_memory dbh (mem.condense_fact answer2) "fact" 3 "web_research" "web"
+                mem.add_message dbh tid cid "assistant" answer2
+                src_text: ""
+                for u in srcs2
+                    src_text: src_text ++ "\n" ++ u
+                full: (shorten answer2) ++ "\n— Quellen:" ++ (shorten src_text)
+                kb: []
+                row: []
+                push row (tel.tel_button "💾 Merken" "save")
+                push row (tel.tel_button "🔍 Vertiefen" "more")
+                push kb row
+                row2: []
+                push row2 (tel.tel_button "👍" "up")
+                push row2 (tel.tel_button "👎" "down")
+                push kb row2
+                tel.tel_send_message_kb token cid (shorten full) kb
+    else
+        mem.add_message dbh tid cid "assistant" answer
+        kb: []
+        row: []
+        push row (tel.tel_button "💾 Merken" "save")
+        push row (tel.tel_button "🔍 Vertiefen" "more")
+        push kb row
+        row2: []
+        push row2 (tel.tel_button "👍" "up")
+        push row2 (tel.tel_button "👎" "down")
+        push kb row2
+        tel.tel_send_message_kb token cid (shorten answer) kb
 
 --! Prüft, ob eine KI-Antwort einen "ich weiß es nicht"-Fallback darstellt,
 --! der nach einer Web-Recherche auffordert.
@@ -366,9 +459,15 @@ fn question_needs_research answer
         return true
     if contains low "weis es nicht"
         return true
+    if contains low "kein wissen"
+        return true
+    if contains low "kein wissen darüber"
+        return true
     if contains low "keine informationen"
         return true
     if contains low "keine relevanten informationen"
+        return true
+    if contains low "keine ahnung"
         return true
     if contains low "ich kenne keine"
         return true
@@ -380,7 +479,27 @@ fn question_needs_research answer
         return true
     if contains low "konnte keine"
         return true
+    if contains low "echtzeitdaten"
+        return true
+    if contains low "echtzeitzugriff"
+        return true
+    if contains low "keine echtzeit"
+        return true
+    if contains low "als sprachmodell"
+        return true
+    if contains low "kein internetzugriff"
+        return true
+    if contains low "keinen zugriff auf das internet"
+        return true
+    if contains low "kann ich nicht abrufen"
+        return true
+    if contains low "aktuell nicht bekannt"
+        return true
     false
+
+--! Liefert eine direkte Übersicht der Fähigkeiten statt einer Faktenantwort.
+fn capability_text _
+    "Ich kann dich unterstützen bei:\n• Fragen beantworten und bei fehlendem Wissen selbstständig im Web recherchieren\n• Informationen mit Quellen in meiner Seele speichern und später wiederfinden\n• Aufgaben planen und über den Executor ausführen\n• Ziele und zeitgesteuerte Erinnerungen verwalten\n• Wissensgraphen und Dokumente aufbauen\n• Fotos verstehen und beschreiben (einfach schicken, optional mit Bildunterschrift als Frage)\n• angebundene MCP-Werkzeuge kontrolliert nutzen\n• Telegram und das Web-Dashboard bedienen\n\nSchreib einfach eine Frage oder eine konkrete Aufgabe."
 
 --! Kürzt Text auf Telegram-Grenze (4096 Zeichen).
 fn shorten s
@@ -451,11 +570,22 @@ fn learn_query low tnorm
             return (trim (substring tnorm 7 (len tnorm)))
     ""
 
---! Erkennt eine /remind-Anfrage und liefert die Erinnerungs-Anweisung (oder "").
+--! Erkennt eine /remind- ODER frei formulierte "erinnere mich..."-Anfrage und
+--! liefert die Erinnerungs-Anweisung (oder ""). Bewusst deterministisch statt
+--! ueber das Gremiums-Werkzeug 'erinnerung_planen' gelaufen: beobachtet wurde,
+--! dass die KI bei "Erinnere mich in 30 Sekunden..." eine Bestaetigung
+--! ausgegeben hat, OHNE das Werkzeug tatsaechlich aufzurufen — kein Eintrag in
+--! der 'scheduled'-Tabelle trotz "Ich habe die Erinnerung geplant"-Antwort.
+--! Fuer eine derart erwartungsstiftende Zusage darf sich das nicht auf
+--! Tool-Call-Befolgung durchs LLM verlassen. 'erinnerung_planen' bleibt fuer
+--! implizite Faelle (z.B. "Ich habe morgen einen Termin...") zustaendig, die
+--! dieses Muster nicht matchen.
 fn remind_query low tnorm
     if (len low) >= 8
         if (substring low 0 8) == "/remind "
             return (trim (substring tnorm 8 (len tnorm)))
+    if contains low "erinnere mich"
+        return tnorm
     ""
 
 --! Verarbeitet einen Inline-Button-Druck (callback_query).
@@ -475,7 +605,7 @@ fn handle_callback token dbh cbq
     if data == "more"
         if txt != nil
             tel.tel_send_chat_action token cid "typing"
-            res: grm.run_gremium dbh ("Vertiefe bitte diesen Sachverhalt: " ++ txt)
+            res: grm.run_gremium dbh cid ("Vertiefe bitte diesen Sachverhalt: " ++ txt)
             a: get res "content"
             if a != nil && a != ""
                 tid: mem.active_thread dbh cid
@@ -601,15 +731,16 @@ fn poll_once token offset allowed timeout
 --! Web-Modus. Setzt voraus, dass Secrets/Config bereits (vor der Sandbox!)
 --! gelesen wurden — siehe die Kommentare bei setup_ai/setup_sandbox.
 fn setup_core mcp_servers deepseek_key
-    setup_sandbox mcp_servers
+    setup_sandbox all_mcp_servers
     setup_ai deepseek_key
-    mcp_results: mcp.connect_servers mcp_servers
+    mcp_results: mcp.connect_servers all_mcp_servers
     for r in mcp_results
         if get r "ok"
             print ("MCP verbunden: " ++ (get r "alias"))
         else
             print ("MCP fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
     grm.init_gremium 0
+    grm.set_tz_offset tz_offset
     nil
 
 --! CLI-Argumente lesen.
@@ -639,6 +770,13 @@ if tz_offset_raw != nil && tz_offset_raw != ""
     tz_offset: to_num tz_offset_raw
 mcp_servers: mcp.parse_mcp_config (cfg_get cfg "MCP_SERVERS")
 mcp_servers: mcp.resolve_all_env mcp_servers
+mcp_auto_servers: mcp.parse_mcp_config (cfg_get cfg "MCP_AUTO_SERVERS")
+mcp_auto_servers: mcp.resolve_all_env mcp_auto_servers
+all_mcp_servers: []
+for configured_server in mcp_servers
+    push all_mcp_servers configured_server
+for auto_server in mcp_auto_servers
+    push all_mcp_servers auto_server
 
 --! consolidate-Modus (P2, "Traum"): einmaliger Aufraeum-/Verdichtungslauf,
 --! z.B. per externem Cron: `pipe muninn.pipe consolidate`. Kein Scheduler in

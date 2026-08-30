@@ -5,12 +5,21 @@
 import "modules/memory.pipe" as mem
 import "modules/web.pipe" as web
 import "modules/mcp.pipe" as mcp
+import "modules/scheduler.pipe" as sched
 
---! Geteilter, mutabler Zustand: aktueller DB-Handle für die Tools.
-STATE: {dbh: nil}
+--! Geteilter, mutabler Zustand: aktueller DB-Handle + Chat-Kontext fuer die Tools.
+--! tz_offset wird einmalig beim Start gesetzt (set_tz_offset), dbh/cid pro Lauf
+--! (run_gremium) — beide werden von tool_erinnerung_planen gebraucht, das sonst
+--! nicht wüsste, WEN es erinnern soll oder wie spaet "morgen frueh" lokal ist.
+STATE: {dbh: nil, cid: nil, tz_offset: 0}
 
 fn cur_dbh _
     get STATE "dbh"
+
+--! Einmalig beim Start zu setzen (siehe setup_core in muninn.pipe).
+export fn set_tz_offset off
+    set STATE "tz_offset" off
+    nil
 
 --! Tool: relevante Erinnerungen aus der Seele abrufen.
 fn tool_erinnerungen_suchen query
@@ -64,6 +73,75 @@ fn tool_merken_quelle content source
     mem.add_memory h content "fact" 3 source "web"
     "Gemerkt (Quelle: " ++ source ++ "): " ++ content
 
+--! Tool: eine zeitgesteuerte Erinnerung planen (Ersatz fuer die alte, blinde
+--! "task"-Klassifikation — jetzt entscheidet das Gremium selbst, mit vollem
+--! Gespraechskontext, ob und wann etwas erinnert werden soll, statt dass ein
+--! kontextfreier Klassifikations-Aufruf das vorab und unzuverlaessig festlegt).
+--! text: die zu erinnernde Sache in natuerlicher Sprache samt Zeitangabe, z.B.
+--! "morgen um 6 Uhr: Termin zur Arbeit" — sched.parse_reminder zerlegt das.
+fn tool_erinnerung_planen text
+    h: cur_dbh 0
+    cid: get STATE "cid"
+    if h == nil || cid == nil
+        return "Kein Chat-Kontext verfuegbar, kann keine Erinnerung planen."
+    tzo: get STATE "tz_offset"
+    parsed: sched.parse_reminder text now tzo
+    sched.schedule h "reminder" (to_str cid) (get parsed "text") (get parsed "due") (get parsed "repeat")
+    "Erinnerung geplant fuer " ++ (format_time ((get parsed "due") + tzo) "2006-01-02 15:04:05") ++ ": " ++ (get parsed "text")
+
+--! Selbstwissen ueber Muninn, das allen Gremium-Agenten vorangestellt wird, damit
+--! Meta-Fragen ueber Muninns eigene Faehigkeiten direkt beantwortet werden statt
+--! faelschlich "kein Wissen" zu behaupten und eine Web-Recherche auszuloesen.
+SELF_ID: "Selbstwissen ueber Muninn (bei Fragen UEBER MUNINN SELBST — Faehigkeiten, Technik, Architektur — DIREKT aus diesem Wissen antworten, NIE 'kein Wissen' behaupten und dafuer KEINE Web-Recherche starten): Muninn ist ein persoenlicher KI-Agent, geschrieben in der Skriptsprache 'pipe' (ein Go-Interpreter). Muninn nutzt DeepSeek als LLM-Provider mit Tool-Use/Function-Calling, kann also im Prinzip auch Code lesen und schreiben. Muninn hat ein persistentes SQLite-Langzeitgedaechtnis (Erinnerungen + Wissensgraph), kann selbststaendig im Web recherchieren (DuckDuckGo + Wikipedia), Aufgaben und Ziele planen sowie ueber einen Executor ausfuehren, zeitgesteuerte Erinnerungen und ein taegliches Briefing setzen, Dokumente lernen, Fotos verstehen/beschreiben (DeepSeek-Vision) und optional per MCP an externe Werkzeuge (z.B. Dateisystem) angebunden werden. Muninn laeuft per Telegram-Bot und Web-Dashboard.\n\n"
+
+--! Harte Handoff-Regel gegen vorzeitige Antworten: ohne diese Regel beendet ein
+--! Agent den Swarm manchmal, indem er direkt Text ausgibt statt sein Handoff-
+--! Werkzeug aufzurufen (beobachtet bei faktenwaechter auf Meta-Fragen — der Swarm
+--! endete dort statt beim registrator, samt ungefiltertem internem Kommentar wie
+--! "Ich habe mich im Gremium verheddert..."). Nur der registrator darf enden.
+HANDOFF_RULE: "WICHTIG: Du bist NICHT der letzte Agent in der Kette und deine Textantwort geht NIE direkt an den Nutzer. Du MUSST am Ende IMMER dein Handoff-Werkzeug aufrufen, auch wenn du die Antwort schon fertig im Kopf hast — sonst bricht das Gespraech unsauber ab. Nur 'registrator' darf ohne Handoff enden.\n\n"
+
+--! Ohne diese Regel antwortet das Modell auf zeitabhaengige Fragen (Uhrzeit,
+--! Wetter, aktuelle Ereignisse) faelschlich mit einer generischen "als
+--! Sprachmodell habe ich keinen Echtzeitzugriff"-Ausrede, OBWOHL 'web_search'
+--! verfuegbar ist — beobachtet bei "Wie viel Uhr ist es aktuell in
+--! Deutschland?". question_needs_research (muninn.pipe) faengt das nur als
+--! Notnagel ab, wenn die Formulierung zufaellig auf der Trigger-Liste steht.
+TOOL_DISCIPLINE_RULE: "Fuer aktuelle/zeitabhaengige Informationen (Uhrzeit, Datum, Wetter, aktuelle Ereignisse, Kurse, Nachrichten) darfst du NIEMALS aus deinem eigenen Sprachmodell-Wissen antworten oder behaupten, du haettest 'keinen Echtzeitzugriff' — du HAST Zugriff via 'web_search'/'web_fetch'. Nutze sie in diesen Faellen IMMER, bevor du antwortest.\n\n"
+
+--! Ohne diese Regel erfindet das Modell bei zu vagen Anfragen ("Mach mal
+--! irgendwas") entweder eine nicht stattgefundene Aktion ("dann mach ich eben
+--! kurz den Mond an") oder bricht mit einem rohen internen Fehler ab (die alte
+--! freie JSON-Schrittplanung im Executor tat genau das, ohne jeden Kontext —
+--! deshalb ist dieser Pfad jetzt komplett durchs Gremium ersetzt, das echten
+--! Kontext und echte Werkzeuge hat).
+HONESTY_RULE: "Ist eine Nutzeranfrage zu vage oder unspezifisch, um eine konkrete, sinnvolle Aktion daraus abzuleiten (z.B. 'mach mal irgendwas'), erfinde NIEMALS eine Aktion und behaupte NIEMALS, etwas getan zu haben, das nicht wirklich stattgefunden hat. Frage stattdessen freundlich und konkret nach, was genau gewuenscht ist.\n\n"
+
+--! Telegram rendert nur sein eigenes, sehr einfaches Markdown (einfache
+--! Sternchen fuer fett, kein Markdown-Standard) — die tg_markdown-Normalisierung
+--! in telegram.pipe wandelt **fett** zwar in *fett* um, aber Ueberschriften/
+--! Tabellen/verschachtelte Listen bleiben trotzdem kaputt bzw. wirken in einem
+--! Chat overdressed. Diese Regel haelt die Ausgabe von vornherein einfach.
+FORMAT_RULE: "Formatiere deine Antwort fuer einen Telegram-Chat, nicht fuer ein Dokument: keine Markdown-Ueberschriften (#), keine Tabellen, keine verschachtelten Listen. Fettung sparsam mit *einfachen* Sternchen. Kurze Absaetze statt langer Bloecke.\n\n"
+
+--! Ohne diese Regel behauptet das Modell bei Fragen zu Muninns eigenen
+--! Werkzeugen faelschlich Dinge wie "ich habe keinen Zugriff auf Werkzeuge" —
+--! per Websuche auf generischen Hilfeseiten "recherchiert", die logischerweise
+--! nicht wissen koennen, was DIESER konkrete Bot verbunden hat (beobachtet bei
+--! "kannst du mit deinen Werkzeugen ein Google Workspace einrichten?", obwohl
+--! filesystem+memory MCP-Server verbunden waren). tools_desc wird in
+--! init_gremium dynamisch aus der ECHTEN, aktuell verbundenen Werkzeugliste
+--! gebaut, nicht als statischer Text.
+--!
+--! Ergaenzend: Ergebnisse von 'erinnerungen_suchen' duerfen nicht unbesehen als
+--! Aussagen des Nutzers gelten — mem.retrieve_context markiert alles ausser
+--! "permanent"/"document" (also KI-Recherche-Ergebnisse, Task-Protokolle) mit
+--! einem Praefix. Beobachtet: eine alte AfD-Recherche wurde bei "Wofuer
+--! interessiere ich mich?" als "klares Signal fuer politisches Interesse"
+--! fehlinterpretiert, obwohl sie nur eine fruehere Recherche zu einer ANDEREN
+--! Frage war, keine Aussage ueber den Nutzer.
+MEMORY_HONESTY_RULE: "Ergebnisse von 'erinnerungen_suchen', die mit '[fruehere Recherche/Protokoll, KEINE Aussage des Nutzers]' markiert sind, sind KI-generierte Recherche-Ergebnisse oder Protokolle — KEINE Aussagen des Nutzers ueber sich selbst. Aus solchen Eintraegen darfst du NIEMALS auf Interessen, Meinungen oder Praeferenzen des Nutzers schliessen. Nur unmarkierte Eintraege sind tatsaechliche Aussagen des Nutzers. Findest du zu einer Frage nach Interessen/Vorlieben nur markierte oder gar keine Eintraege, sag ehrlich, dass dazu noch nichts Eindeutiges von ihm gespeichert ist, statt aus Recherche-Nebenprodukten eine Praeferenz zu konstruieren.\n\n"
+
 --! Registriert Tools und Gremium-Agenten (einmalig beim Start).
 --! Bindet zusaetzlich alle bereits per mcp.connect_servers verbundenen MCP-Tools
 --! (Dateisystem, GitHub, ...) an einen eigenen "werkzeugmeister"-Agenten (P1).
@@ -73,31 +151,74 @@ export fn init_gremium _
     ai_tool "web_search" "Im Internet suchen; liefert Titel und URLs der Top-Treffer." {query: "Suchbegriffe"} tool_web_search
     ai_tool "web_fetch" "Eine Webseite abrufen und deren Fließtext liefern." {url: "Vollständige URL"} tool_web_fetch
     ai_tool "merken_quelle" "Eine aus dem Web gewonnene Erkenntnis dauerhaft mit Quellen-URL speichern." {content: "Erkenntnis", source: "Quellen-URL"} tool_merken_quelle
+    ai_tool "erinnerung_planen" "Eine zeitgesteuerte Erinnerung fuer den Nutzer planen (z.B. bei Terminen/Verpflichtungen mit Zeitangabe)." {text: "Was erinnert werden soll, inkl. Zeitangabe in natuerlicher Sprache"} tool_erinnerung_planen
 
-    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle"]
-    mcp_names: mcp.discovered_tool_names local_names
-    has_mcp: (len mcp_names) > 0
+    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen"]
+    --! P5: EIN fokussierter Spezial-Agent PRO angebundenem MCP-Server statt
+    --! eines Alleskoenners mit allen Werkzeugen — skaliert automatisch mit
+    --! jedem neuen MCP-Server (kein Code-Umbau noetig), und haelt die
+    --! Tool-Auswahl der KI pro Agent klein und treffsicher, statt sie bei
+    --! sehr vielen Werkzeugen mit einer riesigen flachen Liste zu ueberfordern.
+    mcp_groups: mcp.discovered_tools_by_source local_names
+    has_mcp: (len mcp_groups) > 0
+    mcp_names: []
+    specialist_names: []
+    specialist_desc: ""
+    for grp in mcp_groups
+        alias: get grp "alias"
+        if (len alias) > 0 && (substring alias ((len alias) - 1) (len alias)) == "_"
+            alias: substring alias 0 ((len alias) - 1)
+        gtools: get grp "tools"
+        for tn in gtools
+            push mcp_names tn
+        agent_name: "werkzeug_" ++ alias
+        push specialist_names agent_name
+        specialist_desc: specialist_desc ++ "- '" ++ agent_name ++ "': Werkzeuge aus '" ++ alias ++ "' (" ++ (join gtools ", ") ++ ")\n"
+        swarm_agent agent_name {system: HANDOFF_RULE ++ "Du bist der Spezial-Agent fuer '" ++ alias ++ "' im Gremium von Muninn. Du hast NUR Zugriff auf die per MCP aus '" ++ alias ++ "' angebundenen Werkzeuge. Brauchst du fuer die Anfrage mehrere dieser Werkzeuge nacheinander (z.B. erst einen Ort/eine ID nachschlagen, dann damit die eigentlichen Daten abrufen), rufe sie ALLE in dieser einen Runde nacheinander auf, BEVOR du 'kritiker' aufrufst — nicht nach jedem einzelnen Werkzeug zurueckspringen, das verbraucht unnoetig Runden. Rufe erst danach IMMER 'kritiker' auf, um dein Ergebnis weiterzugeben.", tools: gtools, handoff: ["kritiker", "planer"]}
+
+    --! Dynamisch aus dem ECHTEN Zustand gebaut (nicht statischer Text wie
+    --! SELF_ID) — siehe Kommentar bei MEMORY_HONESTY_RULE oben.
+    tools_desc: "ECHTE, aktuell verfuegbare Werkzeuge (fuer Fragen ueber deine eigenen Faehigkeiten/Werkzeuge IMMER diese Liste nutzen — NIE 'web_search', das Internet weiss nicht, welche Werkzeuge DU verbunden hast): 'erinnerungen_suchen' (Muninns Gedaechtnis durchsuchen), 'merken'/'merken_quelle' (dauerhaft speichern), 'web_search'/'web_fetch' (im Internet recherchieren), 'erinnerung_planen' (Termin/Erinnerung planen)"
+    if has_mcp
+        tools_desc: tools_desc ++ ", sowie per MCP extern angebunden: " ++ (join mcp_names ", ") ++ ". Verfuegbare Werkzeug-Spezialisten im Gremium:\n" ++ specialist_desc
+    else
+        tools_desc: tools_desc ++ ". Aktuell ist KEIN externer MCP-Server angebunden — Aktionen in Drittsystemen (Cloud-Dienste, Google Workspace, GitHub etc.) sind daher NICHT moeglich, bis ein passender MCP-Server konfiguriert wird."
+    tools_desc: tools_desc ++ " Fehlt ein gefragtes Werkzeug in dieser Liste, sag ehrlich, dass es aktuell nicht angebunden ist — behaupte NIE pauschal 'ich habe keinen Zugriff auf Werkzeuge', wenn diese Liste nicht leer ist.\n\n"
 
     planer_handoff: ["faktenwaechter", "kritiker"]
     kritiker_handoff: ["faktenwaechter", "registrator"]
-    if has_mcp
-        push planer_handoff "werkzeugmeister"
-        push kritiker_handoff "werkzeugmeister"
+    for sn in specialist_names
+        push planer_handoff sn
+        push kritiker_handoff sn
 
-    swarm_agent "planer" {system: "Du bist der Planer im inneren Gremium von Muninn, einem persoenlichen KI-Agenten mit Langzeitgedaechtnis. Analysiere die Nutzeranfrage. Bei Fakten- oder Gedaechtnisfragen leite an 'faktenwaechter' weiter. Erfordert die Anfrage Zugriff auf externe Systeme (Dateien, GitHub, weitere angebundene Werkzeuge), leite an 'werkzeugmeister' weiter. Sonst leite an 'kritiker' weiter. Gib selbst NIE die Endantwort und NIE internes Reasoning aus.", handoff: planer_handoff}
+    swarm_agent "planer" {system: SELF_ID ++ tools_desc ++ HANDOFF_RULE ++ HONESTY_RULE ++ "Du bist der Planer im inneren Gremium von Muninn, einem persoenlichen KI-Agenten mit Langzeitgedaechtnis. Analysiere die Nutzeranfrage. Ist es eine Meta-Frage ueber Muninn selbst ODER seine Werkzeuge/Faehigkeiten, leite trotzdem an 'faktenwaechter' weiter (der beantwortet sie direkt aus dem Selbstwissen/der Werkzeugliste oben). Bei sonstigen Fakten- oder Gedaechtnisfragen leite ebenfalls an 'faktenwaechter' weiter. Erfordert die Anfrage ein konkretes externes Werkzeug, leite an den PASSENDEN Werkzeug-Spezialisten aus der Liste oben weiter (nicht an einen falschen — waehle anhand der dort aufgefuehrten Werkzeugnamen). Sonst leite an 'kritiker' weiter. Gib selbst NIE die Endantwort und NIE internes Reasoning aus.", handoff: planer_handoff}
 
-    swarm_agent "faktenwaechter" {system: "Du bist der Faktenwaechter im Gremium. Stuetze jede Aussage auf Muninns Gedaechtnis UND das Internet. Rufe 'erinnerungen_suchen' auf, um relevante Erinnerungen zu finden; wenn das Gedaechtnis nichts hergibt, nutze 'web_search' und 'web_fetch', um die Antwort im Internet zu recherchieren. Leite deine fundierte Antwort an 'kritiker' weiter. Gib selbst NIE die Endantwort und NIE internes Reasoning aus.", tools: ["erinnerungen_suchen", "web_search", "web_fetch"], handoff: ["kritiker", "planer"]}
+    swarm_agent "faktenwaechter" {system: SELF_ID ++ tools_desc ++ HANDOFF_RULE ++ TOOL_DISCIPLINE_RULE ++ MEMORY_HONESTY_RULE ++ "Du bist der Faktenwaechter im Gremium. Ist die Frage eine Meta-Frage ueber Muninn selbst ODER seine Werkzeuge/Faehigkeiten (z.B. 'kannst du mit deinen Werkzeugen X tun'), beantworte sie DIREKT aus dem Selbstwissen/der Werkzeugliste oben, OHNE 'web_search' aufzurufen — das Internet weiss nichts ueber DEINE Werkzeugverbindungen. Auch dann rufst du danach dein Handoff-Werkzeug 'kritiker' auf, du gibst NIE selbst die finale Antwort aus. Bei allen anderen Fragen stuetze jede Aussage auf Muninns Gedaechtnis UND das Internet: rufe 'erinnerungen_suchen' auf, um relevante Erinnerungen zu finden; wenn das Gedaechtnis nichts hergibt, nutze 'web_search' und 'web_fetch', um die Antwort im Internet zu recherchieren. Rufe danach IMMER 'kritiker' auf, um deine fundierte Antwort weiterzugeben.", tools: ["erinnerungen_suchen", "web_search", "web_fetch"], handoff: ["kritiker", "planer"]}
 
-    swarm_agent "kritiker" {system: "Du bist der Kritiker im Gremium. Pruefe die bisherige Antwort auf Luecken, Widersprueche und Unklarheiten und verbessere sie zu einer praezisen, ehrlichen Antwort. Wenn Fakten fehlen, leite an 'faktenwaechter' zurueck. Sonst leite die verbesserte Antwort an 'registrator' weiter. Gib selbst NIE die Endantwort und NIE internes Reasoning aus.", handoff: kritiker_handoff}
+    swarm_agent "kritiker" {system: HANDOFF_RULE ++ MEMORY_HONESTY_RULE ++ "Du bist der Kritiker im Gremium. Pruefe die bisherige Antwort auf Luecken, Widersprueche und Unklarheiten und verbessere sie zu einer praezisen, ehrlichen Antwort. Wenn Fakten fehlen, leite an 'faktenwaechter' zurueck. Sonst rufe IMMER 'registrator' auf, um die verbesserte Antwort weiterzugeben — auch wenn die Antwort schon gut ist.", handoff: kritiker_handoff}
 
-    swarm_agent "registrator" {system: "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer, speichere sie mit 'merken'. Stammt eine neue Erkenntnis aus dem Web, speichere sie mit 'merken_quelle' samt Quellen-URL. Danach gibst du die endgueltige Antwort aus — AUSSCHLIESSLICH die Antwort an den Nutzer. Schreibe KEIN internes Reasoning, KEINE Meta-Kommentare wie 'Ich schliesse die Anfrage ab', KEINE Anweisungen an andere Agenten und KEINE Wiederholung deiner Gedankengaenge. Nur die fertige, knappe Antwort.", tools: ["merken", "merken_quelle"], handoff: []}
-
-    if has_mcp
-        swarm_agent "werkzeugmeister" {system: "Du bist der Werkzeugmeister im Gremium. Du hast Zugriff auf per MCP angebundene externe Werkzeuge (z.B. Dateisystem, GitHub). Nutze das passende Werkzeug, um die Anfrage zu bedienen, und leite dein Ergebnis an 'kritiker' weiter.", tools: mcp_names, handoff: ["kritiker", "planer"]}
+    swarm_agent "registrator" {system: HONESTY_RULE ++ FORMAT_RULE ++ MEMORY_HONESTY_RULE ++ "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer (z.B. Name, Geburtsdatum, Vorlieben), speichere sie mit 'merken' — dabei gibst du als Inhalt NUR den Fakt selbst weiter, OHNE Meta-Anweisungen des Nutzers wie 'merke dir das' mit abzuspeichern. Stammt eine neue Erkenntnis aus dem Web, speichere sie mit 'merken_quelle' samt Quellen-URL. Erwaehnt die Nutzeranfrage einen Termin, eine Verpflichtung oder eine Bitte, an etwas zu einem Zeitpunkt erinnert zu werden (z.B. 'ich habe morgen um 6 Uhr einen Termin'), rufe VORHER 'erinnerung_planen' mit dem Termin-Text inkl. Zeitangabe auf und bestaetige das in deiner Antwort. Danach gibst du die endgueltige Antwort aus — AUSSCHLIESSLICH die Antwort an den Nutzer. Schreibe KEIN internes Reasoning, KEINE Meta-Kommentare wie 'Ich schliesse die Anfrage ab', KEINE Anweisungen an andere Agenten und KEINE Wiederholung deiner Gedankengaenge. Nur die fertige, knappe Antwort.", tools: ["merken", "merken_quelle", "erinnerung_planen"], handoff: []}
 
     nil
 
---! Fuehrt das Gremium aus. Liefert {content, path, rounds}.
-export fn run_gremium dbh task
+--! Fuehrt das Gremium aus. Liefert {content, path, rounds}. cid: Chat-Kontext
+--! fuer tool_erinnerung_planen (siehe STATE-Kommentar oben).
+export fn run_gremium dbh cid task
     set STATE "dbh" dbh
-    ai_swarm_trace task "planer" 12
+    set STATE "cid" cid
+    res: ai_swarm_trace task "planer" 18
+    path: get res "path"
+    if (len path) > 0 && (at path ((len path) - 1)) != "registrator"
+        --! Backstop: die HANDOFF_RULE reduziert vorzeitige Enden (Agent gibt
+        --! Text aus statt sein Handoff-Werkzeug aufzurufen), aber garantiert es
+        --! nicht — beobachtet bei "Wer bin ich?": Pfad endete bei faktenwaechter
+        --! statt registrator, samt rohem "an den Kritiker weitergeleitet"-
+        --! Kommentar. Statt uns allein auf Prompt-Befolgung zu verlassen, hier
+        --! ein deterministischer Nachputz-Schritt.
+        cleaned: get res "content"
+        try
+            cleaned: ai_chat "Formuliere die folgende interne Notiz eines KI-Agenten als knappe, direkte Antwort an den Nutzer um. Entferne jeden Meta-Kommentar ueber das Gremium selbst (z.B. 'ich leite weiter', 'an den Kritiker uebergeben', Erwaehnung von Agentennamen wie Planer/Faktenwaechter/Kritiker/Registrator). Gib NUR die bereinigte Antwort aus, kein Meta-Kommentar darueber." (get res "content")
+        catch
+            cleaned: get res "content"
+        set res "content" cleaned
+    res

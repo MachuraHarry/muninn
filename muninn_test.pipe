@@ -24,8 +24,8 @@ test "rule_classify erkennt Ziele"
 test "rule_classify erkennt Fragen"
     expect_eq (mem.rule_classify "Warum regnet es?") "question" "? -> question"
 
-test "rule_classify fällt sonst auf fleeting zurück"
-    expect_eq (mem.rule_classify "Heute ist schönes Wetter") "fleeting" "default fleeting"
+test "rule_classify fällt sonst auf Frage zurück"
+    expect_eq (mem.rule_classify "Heute ist schönes Wetter") "question" "default question"
 
 --! sql_escape: einfache Anführungszeichen verdoppeln.
 test "sql_escape verdoppelt Hochkommas"

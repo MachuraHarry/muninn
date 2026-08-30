@@ -12,6 +12,10 @@
 *.log
 *.lock
 
+# MCP-Laufzeitdaten (Filesystem-Server-Sandbox, Playwright-Snapshots)
+mcp_data/
+.playwright-mcp/
+
 # Pipe-Caches / Bytecode
 ~/.pipe
 *.pipec

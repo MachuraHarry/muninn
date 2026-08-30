@@ -21,9 +21,12 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 - **Proaktivität (P4)** — Scheduler im Bot-Loop: Erinnerungen („Erinnere mich …"),
   tägliches Morgen-Briefing, automatisches Fortsetzen unterbrochener Pläne, 👍/👎-Feedback-Lernen.
 - **Web-Recherche** — DuckDuckGo + Wikipedia, Seiten-Fetch und Zusammenfassung (kein API-Key nötig).
-- **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, GitHub, ...) per
+- **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, Browser, Docker, ...) per
   Model Context Protocol anbinden; laufen unter einem Sandbox-Profil mit eng gefasster
-  exec-Whitelist, ein eigener „werkzeugmeister"-Agent im Gremium nutzt sie.
+  exec-Whitelist, jeder Server bekommt automatisch einen eigenen Spezial-Agenten im Gremium.
+- **Autonome MCP-Auswahl** — optional konfigurierte, vertrauenswürdige MCP-Server werden
+  bei passendem Aufgabenbedarf anhand von Keywords automatisch verbunden und dem
+  Executor/Gremium verfügbar gemacht (`MCP_AUTO_SERVERS`).
 - **Telegram-Bot** — Long-Polling, Inline-Buttons, Befehle.
 - **Deterministische Tests** — Kernlogik ohne KI/Netz testbar.
 
@@ -72,6 +75,7 @@ TELEGRAM_BOT_TOKEN=123456:ABC...        # Token von @BotFather (/newbot)
 TELEGRAM_ALLOWED_CHAT_ID=               # deine Chat-ID von @userinfobot (leer = jeder darf)
 DEEPSEEK_API_KEY=sk-...                 # für Klassifikation, Gremium, Zusammenfassung
 MCP_SERVERS=                            # optional: JSON-Liste externer MCP-Server (siehe .env.example)
+MCP_AUTO_SERVERS=                       # optional: vertrauenswürdige Server mit Keywords für Bedarfsladen
 BRIEFING_TIME=08:00                     # optional (P4): Uhrzeit des täglichen Briefings
 MUNINN_TZ_OFFSET=0                      # optional (P4): Sekunden-Offset der lokalen Zeitzone
 ```
@@ -385,8 +389,10 @@ Externe Werkzeuge (Dateisystem, GitHub, Datenbanken, ...) werden per
   Sandbox — nur genau diese Programme dürfen als Subprozess laufen.
 - **`connect_servers`** verbindet alle konfigurierten Server (`mcp_use_stdio`/`mcp_use_sse`)
   best-effort: ein fehlschlagender Server blockiert die anderen nicht.
-- **`discovered_tool_names`** liefert alle entdeckten Remote-Tool-Namen (ohne die lokal
-  registrierten), die an einen eigenen **`werkzeugmeister`**-Agenten im Gremium gehen.
+- **`discovered_tools_by_source`** gruppiert alle entdeckten Remote-Tool-Namen nach
+  Herkunfts-Server (P5): jeder verbundene MCP-Server bekommt automatisch einen eigenen,
+  fokussierten **`werkzeug_<alias>`**-Agenten im Gremium statt eines Alleskönners — skaliert
+  von selbst mit jedem neu angebundenen Server, ohne Code-Änderung.
 
 Ist kein Server konfiguriert, bleibt `exec` im Sandbox-Profil deaktiviert — Muninn läuft
 unverändert wie zuvor.

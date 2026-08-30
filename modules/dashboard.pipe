@@ -673,43 +673,37 @@ fn dashboard_reply h text
         catch e
             answer: ctx
         return answer
-    kind: mem.classify_input tnorm
-    mem.log_event h DASH_CHAT_ID tnorm kind
-    if kind == "permanent"
-        mem.add_memory h tnorm "permanent" 3 "dashboard" "nutzer"
-        return ("Notiert: " ++ tnorm)
-    if kind == "task" || kind == "goal"
-        res: exe.execute_task h tnorm
-        if get res "ok"
-            return ("Erledigt (" ++ (to_str (get res "steps_done")) ++ " Schritte).")
-        return ("Plan fehlgeschlagen: " ++ (get res "error"))
-    if kind == "question"
-        tid: mem.active_thread h DASH_CHAT_ID
-        hist: mem.thread_history h tid 6
-        task: tnorm
-        if (len hist) > 0
-            task: "Bisheriger Gespraechsverlauf (aeltester zuerst):\n" ++ (mem.format_history hist) ++ "\nAktuelle Frage: " ++ tnorm
+    --! Ab hier: EIN gemeinsamer Pfad fuers gesamte freie Gespraech (frueher hier
+    --! wie in muninn.pipe eine vorab-Klassifikation in permanent/task/goal/
+    --! question, siehe deren Ausbau-Notiz beim Umbau — dieselbe Inkonsistenz-
+    --! Problematik galt hier 1:1). Das Gremium hat volle Werkzeuge (merken,
+    --! erinnerung_planen, web_search/fetch, MCP) und entscheidet selbst.
+    mem.log_event h DASH_CHAT_ID tnorm "chat"
+    tid: mem.active_thread h DASH_CHAT_ID
+    hist: mem.thread_history h tid 6
+    task: tnorm
+    if (len hist) > 0
+        task: "Bisheriger Gespraechsverlauf (aeltester zuerst):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
+    answer: ""
+    try
+        r: grm.run_gremium h DASH_CHAT_ID task
+        answer: get r "content"
+    catch e
         answer: ""
-        try
-            r: grm.run_gremium h task
-            answer: get r "content"
-        catch e
-            answer: ""
-        mem.add_message h tid DASH_CHAT_ID "user" tnorm
-        if answer == nil || answer == ""
-            ctx: mem.retrieve_context h tnorm 3
-            if (len ctx) > 0
-                reply: "Dazu erinnere ich mich an:\n"
-                for c in ctx
-                    reply: reply ++ "• " ++ c ++ "\n"
-                mem.add_message h tid DASH_CHAT_ID "assistant" reply
-                return reply
-            fallback: "Dazu fällt mir noch nichts ein."
-            mem.add_message h tid DASH_CHAT_ID "assistant" fallback
-            return fallback
-        mem.add_message h tid DASH_CHAT_ID "assistant" answer
-        return answer
-    "Verstanden. (" ++ kind ++ ")"
+    mem.add_message h tid DASH_CHAT_ID "user" tnorm
+    if answer == nil || answer == ""
+        ctx: mem.retrieve_context h tnorm 3
+        if (len ctx) > 0
+            reply: "Dazu erinnere ich mich an:\n"
+            for c in ctx
+                reply: reply ++ "• " ++ c ++ "\n"
+            mem.add_message h tid DASH_CHAT_ID "assistant" reply
+            return reply
+        fallback: "Dazu fällt mir noch nichts ein."
+        mem.add_message h tid DASH_CHAT_ID "assistant" fallback
+        return fallback
+    mem.add_message h tid DASH_CHAT_ID "assistant" answer
+    answer
 
 --! Startet den Dashboard-Server (blockierend). bind z.B. "127.0.0.1:8787".
 export fn start bind token

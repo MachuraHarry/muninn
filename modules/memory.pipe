@@ -82,7 +82,33 @@ export fn now_ts _
 
 --! Merkt eine Erinnerung (kind: one of memory/task/fact/question; importance 1-5).
 --! Berechnet ein Embedding und speichert es für die RAG-Suche. Liefert die id.
+--! Verhindert Dubletten bei "permanent" (dauerhafte Nutzerfakten wie "Ich bin
+--! Harry..."): derselbe Inhalt (Groß-/Kleinschreibung und Whitespace egal) wird
+--! nicht erneut eingefuegt, sondern nur in der Wichtigkeit angehoben — sonst
+--! haeuft sich bei wiederholten Aussagen dieselbe Erinnerung mehrfach an, ohne
+--! dass die Retrieval-Qualitaet steigt. Andere kinds (v.a. "document" —
+--! ingest_document speichert bewusst mehrere Chunks, auch inhaltsgleiche) sind
+--! davon NICHT betroffen.
 export fn add_memory h content kind importance source tags
+    if kind == "permanent"
+        --! Normalisierung MUSS in Pipe passieren, nicht in SQL: das reine-Pipe-
+        --! sqlite-Modul (~/.pipe/modules/sqlite.pipe, eval_expr/"func") kennt nur
+        --! count/sum/avg/min/max als Funktionen — lower()/trim() im WHERE fallen
+        --! auf den unveraenderten Rohwert zurueck (dieselbe Klasse Einschraenkung
+        --! wie beim datetime('now')-Workaround bei now_ts oben).
+        norm: lower (trim content)
+        candidates: db_query h "SELECT id, content, importance FROM memories WHERE kind = 'permanent'"
+        for c in candidates
+            if (lower (trim (get c "content"))) == norm
+                eid: get c "id"
+                eimp: get c "importance"
+                newimp: eimp
+                if importance > eimp
+                    newimp: importance
+                if newimp > 5
+                    newimp: 5
+                db_exec h ("UPDATE memories SET importance = " ++ (to_str newimp) ++ ", ts = '" ++ (sql_escape (now_ts 0)) ++ "' WHERE id = " ++ (to_str eid))
+                return eid
     db_exec h ("INSERT INTO memories (content, kind, importance, source, ts, tags) VALUES ('" ++ (sql_escape content) ++ "', '" ++ (sql_escape kind) ++ "', " ++ (to_str importance) ++ ", '" ++ (sql_escape source) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "', '" ++ (sql_escape tags) ++ "')")
     rid: get (at (db_query h "SELECT max(id) AS mid FROM memories") 0) "mid"
     vec: nil
@@ -394,19 +420,16 @@ export fn rule_classify text
     if contains t "erinnere"
         "reminder"
     else
-        if contains t "merke" || contains t "denke an"
+        if contains t "merke" || contains t "denke an" || contains t "notiere"
             "permanent"
         else
-            if contains t "erledige" || contains t "to-do" || contains t "aufgabe" || contains t "mache"
+            if contains t "erledige" || contains t "to-do" || contains t "aufgabe" || contains t "mache" || contains t "lege" || contains t "erstelle" || contains t "schreibe" || contains t "anlegen" || contains t "erstellen"
                 "task"
             else
                 if contains t "ziel" || contains t "erreichen" || contains t "wollen"
                     "goal"
                 else
-                    if contains t "?"
-                        "question"
-                    else
-                        "fleeting"
+                    "question"
 
 --! Verdichtet Text via KI auf eine Kurzform (Fallback: unverändert).
 export fn condense text
@@ -483,7 +506,7 @@ fn keyword_score content_lower terms df n
 export fn retrieve_context h query k
     if query == nil || query == ""
         return []
-    rows: db_query h "SELECT id, content, importance FROM memories ORDER BY id DESC"
+    rows: db_query h "SELECT id, content, importance, kind FROM memories ORDER BY id DESC"
     if (len rows) == 0
         return []
     vecs: db_query h "SELECT memory_id, vec FROM embeddings"
@@ -526,13 +549,37 @@ export fn retrieve_context h query k
                 if cv != nil
                     sem: cosine_sim qvec cv
         score: (sem * sem_w) + (kw * kw_w)
-        push scored {content: c, score: score}
+        push scored {content: c, score: score, kind: (get r "kind")}
     ordered: sorted_by scored (fn x: (0 - (get x "score")))
     out: []
     i: 0
     while i < k && i < (len ordered)
-        push out (get (at ordered i) "content")
+        item: at ordered i
+        c: get item "content"
+        --! Herkunfts-Kennzeichnung: "fact" & Co sind KI-Recherche-Ergebnisse oder
+        --! Task-Protokolle, KEINE Aussagen des Nutzers ueber sich selbst — ohne
+        --! diese Markierung haelt das Gremium sie sonst faelschlich fuer
+        --! Nutzerpraeferenzen (beobachtet: eine alte AfD-Recherche wurde bei
+        --! "Wofuer interessiere ich mich?" als "klares Signal fuer politisches
+        --! Interesse" fehlinterpretiert, obwohl es nur eine fruehere Recherche
+        --! zu einer ANDEREN Frage war). "permanent"/"document" bleiben
+        --! unmarkiert: das sind explizite Nutzeraussagen bzw. selbst gelehrte
+        --! Inhalte.
+        k2: get item "kind"
+        if k2 != "permanent" && k2 != "document"
+            c: "[fruehere Recherche/Protokoll, KEINE Aussage des Nutzers] " ++ c
+        push out c
         i: i + 1
+    if (len out) == 0
+        --! Fallback: Fragen wie "Wer bin ich?" bestehen fast nur aus Stoppwoertern
+        --! (wer/bin/ich, siehe is_stop) und liefern daher IMMER 0 Keyword-Treffer,
+        --! egal was gespeichert ist. Ohne echte Embeddings (DeepSeek unterstuetzt
+        --! keine, OPENAI_API_KEY optional/leer, siehe Kommentar oben) gibt es sonst
+        --! keinen Signalweg zu dauerhaften Fakten — daher hier auf die wichtigsten
+        --! dauerhaften Erinnerungen zurueckfallen statt "nichts gefunden" zu liefern.
+        perm: db_query h ("SELECT content FROM memories WHERE kind = 'permanent' ORDER BY importance DESC, id DESC LIMIT " ++ (to_str k))
+        for r in perm
+            push out (get r "content")
     out
 
 --! Reine Stichwort-Suche (deterministisch, ohne Embedding).

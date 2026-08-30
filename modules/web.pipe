@@ -165,6 +165,10 @@ fn filter_junk results
             continue
         if contains u "duckduckgo.com/?q="
             continue
+        if contains u "duckduckgo.com/y.js"
+            continue
+        if contains u "bing.com/aclick"
+            continue
         if contains u "Special:Search"
             continue
         push out r

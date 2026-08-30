@@ -77,12 +77,39 @@ export fn tel_get_updates token offset timeout
     else
         []
 
+--! Normalisiert vom LLM erzeugtes Markdown auf Telegrams "Markdown"-Parse-Mode
+--! (V1): **fett**/__fett__ -> *fett* (V1 kennt nur einfache Sternchen/
+--! Unterstriche fuer fett/kursiv, KEINE doppelten). LLMs schreiben aber
+--! durchgehend CommonMark-Stil (**fett**) — ohne diese Normalisierung wuerden
+--! Nutzer entweder woertliche Sternchen sehen (kein parse_mode) oder Telegram
+--! lehnt die Nachricht als kaputte Entity ab.
+fn tg_markdown text
+    t: replace_all text "**" "*"
+    t: replace_all t "__" "_"
+    t
+
+--! Sendet mit parse_mode "Markdown"; scheitert das (z.B. unausgewogene
+--! Entities, die die Normalisierung oben nicht abdeckt), wird als Klartext
+--! nachgesendet — so geht nie eine Antwort wegen eines Formatierungsfehlers
+--! verloren, nur die Formatierung faellt in dem Fall weg.
+fn tel_post_with_markdown token method m
+    orig_text: get m "text"
+    md: {}
+    for k in (keys m)
+        set md k (get m k)
+    set md "text" (tg_markdown orig_text)
+    set md "parse_mode" "Markdown"
+    res: tel_post token method md
+    if (get res "ok") == false
+        res: tel_post token method m
+    res
+
 --! Sende eine Textnachricht in einen Chat.
 export fn tel_send_message token chat_id text
     m: {}
     set m "chat_id" chat_id
     set m "text" text
-    tel_post token "sendMessage" m
+    tel_post_with_markdown token "sendMessage" m
 
 --! Bearbeite eine gesendete Nachricht.
 export fn tel_edit_message_text token chat_id message_id text
@@ -122,7 +149,7 @@ export fn tel_send_message_kb token chat_id text kb
         rm: {}
         set rm "inline_keyboard" kb
         set m "reply_markup" rm
-    tel_post token "sendMessage" m
+    tel_post_with_markdown token "sendMessage" m
 
 --! Beantwortet einen Callback-Query (schließt den Lade-Spinner).
 export fn tel_answer_callback token cbid text

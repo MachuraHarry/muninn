@@ -6,6 +6,8 @@
 --!    {"alias":"gh","type":"stdio","command":"npx",
 --!     "args":["-y","@modelcontextprotocol/server-github"],
 --!     "env":{"GITHUB_TOKEN":"env:GITHUB_TOKEN"}}]
+CONNECTED: {}
+
 --! "env:NAME"-Werte werden zur Laufzeit aus der echten Umgebung aufgelöst, damit
 --! Secrets nicht doppelt in .env stehen müssen. Jede Verbindung läuft unter dem
 --! Sandbox-Profil "muninn" mit exec-Whitelist (nur konfigurierte Kommandos) —
@@ -123,6 +125,32 @@ export fn connect_servers servers
         i: i + 1
     out
 
+--! Waehlt MCP-Server aus einer vertrauenswuerdigen Auto-Registry. Ein Eintrag
+--! braucht `keywords` und die normale Server-Konfiguration.
+export fn auto_servers_for_task servers task
+    out: []
+    low: lower task
+    for s in servers
+        alias: get s "alias"
+        matched: false
+        words: get s "keywords"
+        if words != nil
+            for word in words
+                if contains low (lower word)
+                    matched: true
+        if matched && alias != nil && (get CONNECTED alias) == nil
+            push out s
+    out
+
+--! Verbindet passende Registry-Server einmalig.
+export fn ensure_for_task servers task
+    selected: auto_servers_for_task servers task
+    results: connect_servers selected
+    for r in results
+        if get r "ok"
+            set CONNECTED (get r "alias") true
+    results
+
 --! Namen aller entdeckten MCP-Tools (lokal + remote), ohne die übergebenen
 --! (bereits als ai_tool registrierten) lokalen Namen. Für die Zuteilung an den
 --! "werkzeugmeister"-Agenten im Gremium.
@@ -139,6 +167,38 @@ export fn discovered_tool_names local_names
     for t in tools
         name: get t "name"
         if name != nil
-            if !(contains local_names name)
+            if name != "list_tools" && name != "tools/list" && !(contains local_names name)
                 push out name
+    out
+
+--! Wie discovered_tool_names, aber nach Herkunfts-Server gruppiert (das
+--! "source"-Feld von mcp_tools ist der Verbindungs-Alias, z.B. "filesystem",
+--! "github"). Grundlage fuer P5: ein eigener, fokussierter Spezial-Agent pro
+--! MCP-Server statt ein Alleskoenner mit allen Werkzeugen — skaliert von
+--! selbst mit jedem neu angebundenen Server, ohne Code-Aenderung in swarm.pipe.
+--! Liefert eine Liste von {alias, tools} statt einer Map, weil Pipe-Maps nur
+--! bare Identifier als Literal-Keys erlauben, ein MCP-Alias aber beliebiger
+--! String sein kann (set/get funktionieren zwar mit beliebigen Keys, eine
+--! Liste ist hier trotzdem die robustere, iterationsfreundlichere Form).
+export fn discovered_tools_by_source local_names
+    groups: {}
+    order: []
+    tools: []
+    try
+        tools: mcp_tools
+    catch e
+        tools: []
+    for t in tools
+        name: get t "name"
+        src: get t "source"
+        if name != nil && src != nil
+            if name != "list_tools" && name != "tools/list" && !(contains local_names name)
+                existing: get groups src
+                if existing == nil
+                    set groups src ([])
+                    push order src
+                push (get groups src) name
+    out: []
+    for src in order
+        push out {alias: src, tools: (get groups src)}
     out

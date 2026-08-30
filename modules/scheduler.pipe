@@ -124,14 +124,17 @@ export fn parse_reminder_rule text now_sec offset_sec
     if contains t "in "
         n: leading_int t
         if n > 0
-            if contains t "minut" || contains t "min "
-                due: now_sec + (n * 60)
+            if contains t "sekund" || contains t "sek "
+                due: now_sec + n
             else
-                if contains t "stund" || contains t "std"
-                    due: now_sec + (n * 3600)
+                if contains t "minut" || contains t "min "
+                    due: now_sec + (n * 60)
                 else
-                    if contains t "tag"
-                        due: now_sec + (n * 86400)
+                    if contains t "stund" || contains t "std"
+                        due: now_sec + (n * 3600)
+                    else
+                        if contains t "tag"
+                            due: now_sec + (n * 86400)
     else
         if contains t ":"
             p: split t ":"
@@ -152,10 +155,18 @@ export fn parse_reminder_rule text now_sec offset_sec
 --! Erinnerungs-Anweisung zerlegen: bevorzugt per KI (relative Sekunden, damit
 --! Zeitzonen keine Rolle spielen), Fallback deterministisch per Regel. Liefert
 --! {due, repeat, text} — due in Unix-Sekunden.
+--! WICHTIG: "Jetzt" wird der KI in LOKALER Zeit (now_sec + offset_sec) genannt,
+--! nicht in UTC — sonst rechnet die KI bei absoluten Uhrzeiten ("um 20 Uhr")
+--! relativ zur falschen Referenz und die Erinnerung feuert um offset_sec
+--! Sekunden zu spaet/frueh. due_in_seconds ist eine reine Differenz (jetzt ->
+--! Zielzeit), die bleibt bei konsistenter Referenz korrekt, egal ob lokal
+--! oder UTC gerechnet wird — nur "jetzt" und die vom Nutzer genannte Uhrzeit
+--! muessen im selben Bezugsrahmen stehen.
 export fn parse_reminder text now_sec offset_sec
     out: {}
     try
-        j: ai_chat_json ("Du zerlegst eine Erinnerungs-Anweisung. Antworte ausschliesslich als JSON-Objekt mit 'text' (die eigentliche Erinnerung, ohne die Zeitangabe), 'due_in_seconds' (Ganzzahl: wie viele Sekunden ab jetzt, bis erinnert werden soll) und 'repeat' (eines von: once, daily, weekly). Ist keine eindeutige Zeit erkennbar, nimm 3600 und repeat 'once'. Jetzt ist es " ++ (format_time now_sec "2006-01-02 15:04:05") ++ ".") text
+        local_now: now_sec + offset_sec
+        j: ai_chat_json ("Du zerlegst eine Erinnerungs-Anweisung. Antworte ausschliesslich als JSON-Objekt mit 'text' (die eigentliche Erinnerung, ohne die Zeitangabe), 'due_in_seconds' (Ganzzahl: wie viele Sekunden ab jetzt, bis erinnert werden soll) und 'repeat' (eines von: once, daily, weekly). Ist keine eindeutige Zeit erkennbar, nimm 3600 und repeat 'once'. Jetzt ist es " ++ (format_time local_now "2006-01-02 15:04:05") ++ " (lokale Zeit des Nutzers — von ihm genannte Uhrzeiten wie 'um 20 Uhr' beziehen sich auf diese lokale Zeit).") text
         t: get j "text"
         d: get j "due_in_seconds"
         r: get j "repeat"
