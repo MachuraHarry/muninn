@@ -244,6 +244,70 @@ test "apply_extraction mit nil oder leerer Extraktion tut nichts"
     expect_eq (get (at rows 0) "c") 0 "nichts angelegt"
     mem.close h
 
+--! Dokument-Ingestion (P2): chunk_text/ingest_document sind rein (kein KI/Netz
+--! im Chunking selbst — nur das anschliessende add_memory ruft optional KI auf,
+--! faellt aber unter pipe -test wie ueberall sonst auf "kein Embedding" zurueck).
+test "chunk_text: leerer Text -> leere Liste"
+    expect_eq (len (mem.chunk_text "" 100)) 0 "nichts zu chunken"
+    expect_eq (len (mem.chunk_text "   " 100)) 0 "nur Whitespace -> nichts"
+
+test "chunk_text: kurzer Text passt in einen Chunk"
+    chunks: mem.chunk_text "Ein kurzer Absatz." 100
+    expect_eq (len chunks) 1 "ein Chunk"
+    expect_eq (at chunks 0) "Ein kurzer Absatz." "Inhalt erhalten"
+
+test "chunk_text: Absaetze, die auch zu zweit nicht passen, bleiben getrennt"
+    text: "Absatz eins.\n\nAbsatz zwei.\n\nAbsatz drei."
+    chunks: mem.chunk_text text 15
+    expect_eq (len chunks) 3 "jeder Absatz (12 Zeichen) eigener Chunk bei max_len 15"
+    expect_eq (at chunks 0) "Absatz eins." "erster Chunk"
+
+test "chunk_text: kurze Absaetze werden in einen Chunk zusammengefasst, wenn sie passen"
+    text: "eins.\n\nzwei."
+    chunks: mem.chunk_text text 100
+    expect_eq (len chunks) 1 "passen zusammen in einen Chunk"
+    expect_contains (at chunks 0) "eins." "erster Absatz enthalten"
+    expect_contains (at chunks 0) "zwei." "zweiter Absatz enthalten"
+
+test "chunk_text: ein zu langer Absatz wird hart geschnitten"
+    text: "abcdefghij"
+    chunks: mem.chunk_text text 4
+    expect_eq (len chunks) 3 "10 Zeichen / 4 -> 3 Chunks (4+4+2)"
+    expect_eq (at chunks 0) "abcd" "erster Chunk"
+    expect_eq (at chunks 2) "ij" "letzter Chunk"
+
+--! Baut einen n*10 Zeichen langen Fuellparagraphen (fuer Chunk-Grenzen-Tests
+--! gegen ingest_document's fest verdrahtetes max_len von 1200).
+fn filler_para n
+    p: ""
+    i: 0
+    while i < n
+        p: p ++ "0123456789"
+        i: i + 1
+    p
+
+test "ingest_document speichert jeden Chunk als eigene Erinnerung"
+    h: mem.init_db ":memory:"
+    p: filler_para 70
+    text: p ++ "\n\n" ++ p ++ "\n\n" ++ p
+    res: mem.ingest_document h text "test-quelle" "Testdoku" 20
+    expect_eq (get res "chunks_total") 3 "drei Chunks (je 700 Zeichen, zwei zusammen > 1200)"
+    expect_eq (get res "chunks_ingested") 3 "alle drei gespeichert"
+    expect_eq (mem.memory_count h) 3 "drei Erinnerungen"
+    top: mem.top_memories h 10
+    expect_eq (get (at top 0) "kind") "document" "kind document"
+    mem.close h
+
+test "ingest_document begrenzt auf max_chunks"
+    h: mem.init_db ":memory:"
+    p: filler_para 70
+    text: p ++ "\n\n" ++ p ++ "\n\n" ++ p
+    res: mem.ingest_document h text "test-quelle" "Testdoku" 2
+    expect_eq (get res "chunks_total") 3 "insgesamt drei Chunks vorhanden"
+    expect_eq (get res "chunks_ingested") 2 "aber nur zwei gespeichert (Limit)"
+    expect_eq (mem.memory_count h) 2 "zwei Erinnerungen"
+    mem.close h
+
 --! RAG-Fallback: ohne Embeddings greift die Stichwortsuche.
 test "keyword_retrieve findet passende Erinnerungen"
     h: mem.init_db ":memory:"

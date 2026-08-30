@@ -111,8 +111,8 @@ export fn web_search_full query
         return []
     parse_ddg body
 
---! Seite abrufen und zu Fließtext reduzieren (gekürzt).
-export fn web_fetch url
+--! Roher HTTP-GET-Body (leer bei Fehler). Gemeinsame Basis fuer web_fetch/web_fetch_raw.
+fn fetch_body url
     hdrs: {}
     set hdrs "User-Agent" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     body: ""
@@ -121,12 +121,25 @@ export fn web_fetch url
         body: get r "body"
     catch
         body: ""
+    body
+
+--! Seite abrufen und zu Fließtext reduzieren (gekürzt, fuer schnelle Lookups).
+export fn web_fetch url
+    body: fetch_body url
     if body == ""
         return ""
     t: strip_html body
     if (len t) > 4000
         t: substring t 0 4000
     t
+
+--! Wie web_fetch, aber OHNE Kuerzung — fuer Dokument-Ingestion (P2), wo der
+--! vollstaendige Text gebraucht wird (wird anschliessend gechunked).
+export fn web_fetch_raw url
+    body: fetch_body url
+    if body == ""
+        return ""
+    strip_html body
 
 --! Dedupliziert Ergebnisse nach URL.
 fn dedup results

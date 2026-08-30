@@ -111,7 +111,27 @@ Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung f
   Entität ab; `/status` zeigt Entitäten-/Relationen-Anzahl. Live mit echter KI
   verifiziert (Beispiel: "Harry entwickelt Pipe und lebt in Hamburg" → 3
   Entitäten, 2 Relationen, $0,000157). 8 neue Tests.
-- ⏳ **Dokument-Ingestion**: URLs, Dateien, PDFs → eigene Wissensbasis (RAG).
+- ✅ **Dokument-Ingestion** (URLs + Textdateien; PDFs bewusst außen vor, siehe
+  unten): `memory.pipe` — `chunk_text` zerlegt einen langen Text rein und
+  deterministisch in ≤1200-Zeichen-Stücke (bevorzugt an Absatzgrenzen);
+  `ingest_document` speichert jeden Chunk als eigene Erinnerung (kind
+  `document`, inkl. Embedding + Auto-Verknüpfung über `add_memory`) und
+  begrenzt die Anzahl über `max_chunks` (Kosten-/Zeit-Deckel bei großen
+  Dokumenten). `web.pipe` bekam `web_fetch_raw` (wie `web_fetch`, aber ohne die
+  4000-Zeichen-Kürzung — für Ingestion wird der volle Text gebraucht).
+  Telegram: neuer Befehl **`/learn <URL>`** sowie automatische Erkennung
+  hochgeladener **`.txt`/`.md`-Dateien** (`telegram.pipe`: `tel_get_file`/
+  `tel_download_file` gegen Telegrams File-API). **PDFs/Binärformate sind
+  bewusst nicht unterstützt** — Pipe ist ein dependency-freies Binary ohne
+  PDF-Bibliothek; eine Erweiterung um PDF-Text-Extraktion wäre am saubersten
+  über einen angebundenen MCP-Server lösbar (P1) statt eine Abhängigkeit ins
+  Kernbinary zu ziehen. Live mit echter KI verifiziert: Wikipedia-Artikel
+  "Huginn and Muninn" (31 KB Rohtext) → 26 Chunks erkannt, 5 gespeichert (Limit),
+  passende Entitäten (Huginn, Muninn, Odin, Sleipnir, ...) automatisch verlinkt,
+  $0,0024 für 5 Chunks. 8 neue Tests.
+  **Bekannte Grenze**: `strip_html`/`web_fetch_raw` entfernen nur Tags/Scripts,
+  keine Wikipedia-Navigations-/Sprachlink-Boilerplate — Inhalts-Erkennung
+  (Readability-artige Hauptinhalt-Extraktion) ist nicht implementiert.
 - ⏳ **Echte semantische Embeddings**: Option OpenAI/Ollama (DeepSeek liefert nur
   einen 128-dim lexikalischen Hash; hybride Suche bleibt Fallback).
 

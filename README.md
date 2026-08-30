@@ -111,6 +111,7 @@ pipe -test
 | `/reset` | Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen) |
 | `/consolidate` | Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen |
 | `/graph <Name>` | Wissensgraph abfragen (Nachbarn einer Entität) |
+| `/learn <URL>` | Dokument lernen (oder direkt eine `.txt`/`.md`-Datei schicken) |
 
 ### Natürliche Sprache
 
@@ -155,6 +156,21 @@ verarbeitet und mit `db_close` persistiert. Eingehende Nachrichten werden klassi
   in den Graphen (`apply_extraction` — rein, ohne KI, deterministisch testbar).
   Best-effort: ohne KI-Provider passiert nichts. Telegram: `/graph <Name>` fragt
   Nachbarn ab, `/status` zeigt die Graph-Größe.
+
+### Dokument-Ingestion (P2)
+
+`/learn <URL>` oder eine hochgeladene `.txt`/`.md`-Datei nehmen ein Dokument in
+die Wissensbasis auf:
+
+- **`chunk_text`** zerlegt den Text rein/deterministisch in ≤1200-Zeichen-Stücke
+  (bevorzugt an Absatzgrenzen).
+- **`ingest_document`** speichert jeden Chunk als eigene Erinnerung (kind
+  `document`, mit Embedding + Auto-Verknüpfung) und begrenzt die Anzahl über
+  `max_chunks` (Kosten-/Zeit-Deckel).
+- **PDFs/Binärformate werden bewusst nicht unterstützt** — Pipe ist ein
+  dependency-freies Binary ohne PDF-Bibliothek. Der saubere Weg dafür wäre ein
+  angebundener MCP-Server mit PDF-Extraktion (siehe P1) statt einer Abhängigkeit
+  im Kernbinary.
 - **Hybride Retrieval:** `retrieve_context` kombiniert lexikalisches TF-IDF-Scoring (0.75)
   mit semantischen Embeddings (0.25). DeepSeek liefert nur einen 128-dim lexikalischen
   Hash — bei einem echten Embedding-Provider (>300 dim) schaltet die Gewichtung

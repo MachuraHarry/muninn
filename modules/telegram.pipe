@@ -131,3 +131,17 @@ export fn tel_answer_callback token cbid text
     if text != nil && text != ""
         set m "text" text
     tel_post token "answerCallbackQuery" m
+
+--! Löst eine file_id zu einem herunterladbaren file_path auf (oder nil).
+export fn tel_get_file token file_id
+    j: tel_get token "getFile" ([["file_id", file_id]])
+    if get j "ok"
+        get (get j "result") "file_path"
+    else
+        nil
+
+--! Lädt eine Datei über Telegrams File-API herunter (Rohinhalt als String).
+export fn tel_download_file token file_path
+    url: "https://api.telegram.org/file/bot" ++ token ++ "/" ++ file_path
+    r: http_request "GET" url
+    get r "body"

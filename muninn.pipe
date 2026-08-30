@@ -73,7 +73,7 @@ fn greeting_text _
 
 --! Hilfetext.
 fn help_text _
-    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/graph      — Wissensgraph abfragen (z.B. /graph Harry)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen"
+    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/learn      — Dokument lernen (z.B. /learn https://... oder eine .txt/.md-Datei schicken)\n/graph      — Wissensgraph abfragen (z.B. /graph Harry)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen"
 
 --! Status-Text (Statistiken aus der Seele).
 fn status_text dbh
@@ -96,6 +96,10 @@ fn list_text dbh
 fn handle_update token cid msg dbh
     txt: get msg "text"
     if txt == nil
+        doc: get msg "document"
+        if doc != nil
+            handle_document token cid dbh doc
+            return nil
         if (get msg "photo") != nil
             tel.tel_send_message token cid "Ich kann aktuell nur Text verarbeiten, keine Fotos."
             return nil
@@ -107,6 +111,44 @@ fn handle_update token cid msg dbh
             return nil
         return nil
     handle_message token cid txt dbh
+
+--! Prüft anhand Dateiname/Mime-Type, ob ein Dokument reiner Text ist (.txt/.md
+--! oder mime "text/..."). PDFs/Binärformate liefern hier false.
+fn is_text_doc fname mime
+    if mime != nil
+        if contains mime "text/"
+            return true
+    low: lower fname
+    if contains low ".txt"
+        return true
+    if contains low ".md"
+        return true
+    if contains low ".markdown"
+        return true
+    false
+
+--! Verarbeitet ein hochgeladenes Dokument (Telegram "document"-Nachricht, P2).
+--! Nur reiner Text wird unterstützt — siehe ingest_document-Kommentar in
+--! memory.pipe zur bewussten PDF-Einschränkung.
+fn handle_document token cid dbh doc
+    fname: get doc "file_name"
+    if fname == nil
+        fname: "Dokument"
+    mime: get doc "mime_type"
+    if !(is_text_doc fname mime)
+        tel.tel_send_message token cid ("'" ++ fname ++ "' wird nicht unterstützt — aktuell nur reine Textdateien (.txt, .md). Für PDFs/Binärformate bräuchte es einen angebundenen MCP-Server mit Extraktion.")
+        return nil
+    tel.tel_send_chat_action token cid "typing"
+    fpath: tel.tel_get_file token (get doc "file_id")
+    if fpath == nil
+        tel.tel_send_message token cid "Datei konnte nicht abgerufen werden."
+        return nil
+    content: tel.tel_download_file token fpath
+    if content == nil || content == ""
+        tel.tel_send_message token cid "Datei war leer oder nicht lesbar."
+        return nil
+    res: mem.ingest_document dbh content ("telegram-datei:" ++ fname) fname 20
+    tel.tel_send_message token cid ("Gelernt aus '" ++ fname ++ "': " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten gespeichert.")
 
 --! Verarbeitet eine eingehende Textnachricht und antwortet.
 fn handle_message token cid text dbh
@@ -157,6 +199,19 @@ fn handle_message token cid text dbh
     sq: search_query low tnorm
     if sq != ""
         do_search token cid dbh sq
+        return nil
+    if low == "/learn"
+        tel.tel_send_message token cid "Bitte gib eine URL an: /learn <URL> — oder schick mir direkt eine .txt/.md-Datei."
+        return nil
+    lurl: learn_query low tnorm
+    if lurl != ""
+        tel.tel_send_chat_action token cid "typing"
+        dtext: web.web_fetch_raw lurl
+        if dtext == nil || dtext == ""
+            tel.tel_send_message token cid "Seite nicht abrufbar oder leer."
+            return nil
+        res: mem.ingest_document dbh dtext lurl lurl 20
+        tel.tel_send_message token cid ("Gelernt aus " ++ lurl ++ ": " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten gespeichert.")
         return nil
     kind: mem.classify_input tnorm
     mem.log_event dbh (to_str cid) tnorm kind
@@ -268,6 +323,13 @@ fn search_query low tnorm
 fn graph_query low tnorm
     if (len low) >= 7
         if (substring low 0 7) == "/graph "
+            return (trim (substring tnorm 7 (len tnorm)))
+    ""
+
+--! Erkennt eine /learn-Anfrage und liefert die URL (oder "").
+fn learn_query low tnorm
+    if (len low) >= 7
+        if (substring low 0 7) == "/learn "
             return (trim (substring tnorm 7 (len tnorm)))
     ""
 

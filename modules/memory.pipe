@@ -74,6 +74,70 @@ export fn add_memory h content kind importance source tags
 export fn log_event h chat_id text kind
     db_exec h ("INSERT INTO events (chat_id, msg, kind, ts) VALUES ('" ++ (sql_escape chat_id) ++ "', '" ++ (sql_escape text) ++ "', '" ++ (sql_escape kind) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "')")
 
+--! Dokument-Ingestion (P2): URLs/hochgeladene Textdateien in die Wissensbasis
+--! aufnehmen. PDFs/Binärformate sind bewusst außen vor — Pipe ist ein
+--! dependency-freies Binary ohne PDF-Bibliothek; dafür wäre ein angebundener
+--! MCP-Server mit Extraktion der naheliegende Weg (P1).
+
+--! Zerlegt einen langen Text in Chunks von bis zu max_len Zeichen, bevorzugt an
+--! Absatzgrenzen (Leerzeile), sonst hart geschnitten. Reine Funktion (kein
+--! KI/Netz), deterministisch testbar.
+export fn chunk_text text max_len
+    text: trim text
+    out: []
+    if text == ""
+        return out
+    paras: split text "\n\n"
+    cur: ""
+    for p0 in paras
+        p: trim p0
+        if p != ""
+            if cur == ""
+                fits: (len p) <= max_len
+            else
+                fits: ((len cur) + (len p) + 2) <= max_len
+            if fits
+                if cur == ""
+                    cur: p
+                else
+                    cur: cur ++ "\n\n" ++ p
+            else
+                if cur != ""
+                    push out cur
+                    cur: ""
+                if (len p) <= max_len
+                    cur: p
+                else
+                    i: 0
+                    while i < (len p)
+                        push out (substring p i (i + max_len))
+                        i: i + max_len
+    if cur != ""
+        push out cur
+    out
+
+--! Nimmt einen bereits als Text vorliegenden Dokumentinhalt (von einer URL oder
+--! einer hochgeladenen Datei) in die Wissensbasis auf: zerlegt ihn in Chunks
+--! und speichert jeden als eigene Erinnerung (kind "document", inkl. Embedding
+--! fuer RAG und Auto-Verknuepfung ueber add_memory). max_chunks begrenzt
+--! Kosten/Dauer bei sehr grossen Dokumenten (weitere Chunks werden verworfen).
+--! Liefert {chunks_total, chunks_ingested}.
+export fn ingest_document h text source title max_chunks
+    chunks: chunk_text text 1200
+    total: len chunks
+    n: total
+    if n > max_chunks
+        n: max_chunks
+    i: 0
+    while i < n
+        tag: title ++ " [" ++ (to_str (i + 1)) ++ "/" ++ (to_str total) ++ "]"
+        add_memory h (at chunks i) "document" 2 source tag
+        i: i + 1
+    out: {}
+    set out "chunks_total" total
+    set out "chunks_ingested" n
+    out
+
 --! Zaehlt Entitaeten und Relationen im Wissensgraphen (Status/Debug).
 export fn graph_counts h
     e: get (at (db_query h "SELECT COUNT(*) AS c FROM entities") 0) "c"
