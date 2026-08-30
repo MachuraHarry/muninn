@@ -3,6 +3,7 @@
 import "pipe-test"
 import "modules/memory.pipe" as mem
 import "modules/swarm.pipe" as grm
+import "modules/executor.pipe" as exe
 
 --! Regelklassifikation: Kategorien ohne KI.
 test "rule_classify erkennt 'merke/erinnere' als permanent"
@@ -106,3 +107,68 @@ test "nearest findet den ähnlichsten Vektor"
 test "init_gremium registriert Agenten und Tools ohne Fehler"
     r: grm.init_gremium 0
     expect_eq r nil "Rückgabe ist nil (kein Fehler)"
+
+--! Executor: Plan-Bibliothek (deterministisch).
+test "plan_template: permanent -> store-Schritt"
+    steps: exe.plan_template "permanent" "Merke Espresso"
+    expect_eq (len steps) 1 "ein Schritt"
+    expect_eq (get (at steps 0) "action") "store" "action store"
+
+test "plan_template: task -> store + goal"
+    steps: exe.plan_template "task" "Erledige Reporting"
+    expect_eq (len steps) 2 "zwei Schritte"
+    expect_eq (get (at steps 1) "action") "goal" "zweiter Schritt goal"
+
+test "plan_template: unbekannte Art -> leer"
+    steps: exe.plan_template "fleeting" "Wetter"
+    expect_eq (len steps) 0 "keine Schritte"
+
+--! Executor: Schritt-Dispatcher.
+test "exec_step store schreibt in die Seele"
+    h: mem.init_db ":memory:"
+    exe.init_executor h
+    s: {}
+    set s "action" "store"
+    set s "content" "Test"
+    set s "kind" "permanent"
+    set s "importance" 3
+    r: exe.exec_step h s
+    expect_eq (get r "ok") true "ok"
+    expect_eq (mem.memory_count h) 1 "eine Erinnerung"
+    mem.close h
+
+test "exec_step unbekannte Aktion scheitert"
+    h: mem.init_db ":memory:"
+    exe.init_executor h
+    s: {}
+    set s "action" "boom"
+    r: exe.exec_step h s
+    expect_eq (get r "ok") false "scheitert"
+    mem.close h
+
+--! Executor: Plan-Ausführung + Checkpoints + Feedback-Loop.
+test "run_plan führt einen Plan bis zum Ende aus"
+    h: mem.init_db ":memory:"
+    steps: exe.plan_template "permanent" "Merke Espresso"
+    r: exe.run_plan h "Merke Espresso" steps
+    expect_eq (get r "ok") true "ok"
+    st: exe.plan_state h (get r "plan_id")
+    expect_eq (get st "state") "done" "state done"
+    mem.close h
+
+test "run_plan Feedback-Loop streicht fehlgeschlagenen Schritt"
+    h: mem.init_db ":memory:"
+    steps: []
+    bad: {}
+    set bad "action" "boom"
+    push steps bad
+    good: {}
+    set good "action" "store"
+    set good "content" "Trotzdem gemerkt"
+    set good "kind" "permanent"
+    set good "importance" 2
+    push steps good
+    r: exe.run_plan h "Test" steps
+    expect_eq (get r "ok") true "trotz Fehler erfolgreich"
+    expect_eq (mem.memory_count h) 1 "guter Schritt ausgeführt"
+    mem.close h

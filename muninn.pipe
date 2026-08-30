@@ -5,6 +5,7 @@
 import "modules/telegram.pipe" as tel
 import "modules/memory.pipe" as mem
 import "modules/swarm.pipe" as grm
+import "modules/executor.pipe" as exe
 
 --! Lädt KEY=VALUE-Zeilen aus einer .env-Datei in eine Map.
 fn load_env path
@@ -45,7 +46,46 @@ fn is_allowed cid allowed
             return true
     false
 
---! Verarbeitet eine eingehende Nachricht und antwortet.
+--! Begrüßungstext.
+fn greeting_text _
+    "Muninn ist online.\n\nDu kannst mir etwas sagen, das ich mir merken soll (z.B. \"Merke dir, dass ich Tee mag\"), mir eine Aufgabe geben (z.B. \"Erledige das Reporting\") oder mir eine Frage stellen.\n\n/help für alle Befehle."
+
+--! Hilfetext.
+fn help_text _
+    "/start   — Begrüßung\n/help    — diese Hilfe\n/status  — Zustand von Muninn\n/list    — deine wichtigsten Erinnerungen"
+
+--! Status-Text (Statistiken aus der Seele).
+fn status_text dbh
+    n: mem.memory_count dbh
+    "Muninn-Status:\n• Erinnerungen: " ++ (to_str n) ++ "\n• Provider: DeepSeek\n• Gremium: 4 Agenten\n• Executor: aktiv"
+
+--! Liste der wichtigsten Erinnerungen.
+fn list_text dbh
+    rows: mem.top_memories dbh 10
+    if (len rows) == 0
+        return "Noch keine Erinnerungen gespeichert."
+    out: "Deine wichtigsten Erinnerungen:\n"
+    for r in rows
+        out: out ++ "• " ++ (get r "content") ++ "\n"
+    out
+
+--! Verarbeitet ein eingehendes Update (extrahiert Text, behandelt Nicht-Text).
+fn handle_update token cid msg dbh
+    txt: get msg "text"
+    if txt == nil
+        if (get msg "photo") != nil
+            tel.tel_send_message token cid "Ich kann aktuell nur Text verarbeiten, keine Fotos."
+            return nil
+        if (get msg "sticker") != nil
+            tel.tel_send_message token cid "Netter Sticker — ich verstehe aber nur Text."
+            return nil
+        if (get msg "voice") != nil
+            tel.tel_send_message token cid "Sprachnachrichten verstehe ich noch nicht. Bitte tippe es."
+            return nil
+        return nil
+    handle_message token cid txt dbh
+
+--! Verarbeitet eine eingehende Textnachricht und antwortet.
 fn handle_message token cid text dbh
     if text == nil
         return nil
@@ -54,15 +94,33 @@ fn handle_message token cid text dbh
         return nil
     low: lower tnorm
     if low == "/start" || low == "/hello" || low == "hallo" || low == "hi"
-        tel.tel_send_message token cid "Muninn ist online. Schreib mir etwas, das ich mir merken soll — oder stelle eine Frage."
+        tel.tel_send_message token cid (greeting_text 0)
+        return nil
+    if low == "/help"
+        tel.tel_send_message token cid (help_text 0)
+        return nil
+    if low == "/status"
+        tel.tel_send_message token cid (status_text dbh)
+        return nil
+    if low == "/list"
+        tel.tel_send_message token cid (list_text dbh)
         return nil
     kind: mem.classify_input tnorm
     mem.log_event dbh (to_str cid) tnorm kind
-    if kind == "permanent" || kind == "task" || kind == "goal"
-        mem.add_memory dbh tnorm kind 2 "telegram" "nutzer"
-        tel.tel_send_message token cid ("Notiert (" ++ kind ++ "): " ++ tnorm)
+    if kind == "permanent"
+        mem.add_memory dbh tnorm "permanent" 3 "telegram" "nutzer"
+        tel.tel_send_message token cid ("Notiert: " ++ tnorm)
+        return nil
+    if kind == "task" || kind == "goal"
+        tel.tel_send_chat_action token cid "typing"
+        res: exe.execute_task dbh tnorm
+        if get res "ok"
+            tel.tel_send_message token cid ("Erledigt (" ++ (to_str (get res "steps_done")) ++ " Schritte).")
+        else
+            tel.tel_send_message token cid ("Plan fehlgeschlagen: " ++ (get res "error"))
         return nil
     if kind == "question"
+        tel.tel_send_chat_action token cid "typing"
         answer: ""
         try
             res: grm.run_gremium dbh tnorm
@@ -86,7 +144,15 @@ fn handle_message token cid text dbh
 --! Ein Polling-Zyklus. Liefert die letzte verarbeitete update_id zurück.
 fn poll_once token offset allowed
     dbh: mem.init_db nil
-    updates: tel.tel_get_updates token offset 25
+    if offset == nil
+        saved: mem.meta_get dbh "telegram_offset"
+        if saved != ""
+            offset: to_num saved
+    updates: []
+    try
+        updates: tel.tel_get_updates token offset 25
+    catch
+        updates: []
     for upd in updates
         uid: get upd "update_id"
         if uid != nil
@@ -97,8 +163,12 @@ fn poll_once token offset allowed
             if chat != nil
                 cid: get chat "id"
                 if is_allowed cid allowed
-                    txt: get msg "text"
-                    handle_message token cid txt dbh
+                    try
+                        handle_update token cid msg dbh
+                    catch
+                        nil
+    if offset != nil
+        mem.meta_set dbh "telegram_offset" (to_str offset)
     mem.close dbh
     offset
 
@@ -125,4 +195,7 @@ else
         print "once-Zyklus fertig."
     else
         while true
-            off: poll_once tok off allowed
+            try
+                off: poll_once tok off allowed
+            catch
+                print "Zyklus-Fehler — versuche erneut."

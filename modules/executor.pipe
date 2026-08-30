@@ -1,0 +1,198 @@
+--! executor.pipe — autonomer Task-Executor mit Plan-Bibliothek + Feedback-Loop.
+--! Lehre aus der Sandbox-Audit-Reihe: keine rohen Shell-/Datei-Builtins — nur
+--! registrierte, validierende Aktionen (store/graph/goal/retrieve).
+import "sqlite"
+import "modules/memory.pipe" as mem
+
+--! Legt die plans-Tabelle an (idempotent).
+export fn init_executor h
+    db_exec h "CREATE TABLE IF NOT EXISTS plans (id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, steps TEXT, state TEXT, step_idx INTEGER, result TEXT, created TEXT, updated TEXT)"
+    nil
+
+--! Baut einen leeren Schritt mit gegebener Aktion.
+fn step action
+    s: {}
+    set s "action" action
+    s
+
+--! Deterministische Plan-Bibliothek: bekannte Aufgabenarten -> Schrittliste.
+export fn plan_template kind goal
+    out: []
+    if kind == "permanent" || kind == "remember"
+        s: step "store"
+        set s "content" goal
+        set s "kind" "permanent"
+        set s "importance" 3
+        push out s
+    else
+        if kind == "task"
+            s1: step "store"
+            set s1 "content" goal
+            set s1 "kind" "task"
+            set s1 "importance" 2
+            push out s1
+            s2: step "goal"
+            set s2 "text" goal
+            push out s2
+        else
+            if kind == "goal"
+                s1: step "goal"
+                set s1 "text" goal
+                push out s1
+    out
+
+--! Führt einen einzelnen Schritt aus. Liefert {ok, result|error}.
+export fn exec_step h s
+    action: get s "action"
+    r: {}
+    if action == "store"
+        c: get s "content"
+        k: get s "kind"
+        imp: get s "importance"
+        if imp == nil
+            imp: 3
+        if c == nil || k == nil
+            set r "ok" false
+            set r "error" "store braucht content und kind"
+            return r
+        mem.add_memory h c k imp "executor" "plan"
+        set r "ok" true
+        set r "result" ("Gemerkt: " ++ c)
+        return r
+    if action == "goal"
+        t: get s "text"
+        if t == nil
+            set r "ok" false
+            set r "error" "goal braucht text"
+            return r
+        gid: mem.add_goal h t
+        set r "ok" true
+        set r "result" ("Ziel angelegt (id " ++ (to_str gid) ++ ")")
+        return r
+    if action == "graph"
+        f: get s "from"
+        t: get s "to"
+        rel: get s "rel"
+        if f == nil || t == nil || rel == nil
+            set r "ok" false
+            set r "error" "graph braucht from, to, rel"
+            return r
+        mem.add_relation h f t rel
+        set r "ok" true
+        set r "result" ("Verknuepft: " ++ f ++ " -> " ++ t)
+        return r
+    if action == "retrieve"
+        q: get s "query"
+        if q == nil
+            set r "ok" false
+            set r "error" "retrieve braucht query"
+            return r
+        ctx: mem.retrieve_context h q 3
+        out: ""
+        for c in ctx
+            out: out ++ "- " ++ c ++ "\n"
+        set r "ok" true
+        set r "result" out
+        return r
+    set r "ok" false
+    set r "error" ("Unbekannte Aktion: " ++ action)
+    r
+
+--! Legt einen Plan an und liefert die id.
+fn create_plan h goal steps
+    db_exec h ("INSERT INTO plans (goal, steps, state, step_idx, result, created, updated) VALUES ('" ++ (mem.sql_escape goal) ++ "', '" ++ (mem.sql_escape (to_json steps)) ++ "', 'running', 0, '', datetime('now'), datetime('now'))")
+    get (at (db_query h "SELECT max(id) AS mid FROM plans") 0) "mid"
+
+--! Aktualisiert den Planzustand (Checkpoint).
+fn update_plan h pid state idx result
+    db_exec h ("UPDATE plans SET state = '" ++ (mem.sql_escape state) ++ "', step_idx = " ++ (to_str idx) ++ ", result = '" ++ (mem.sql_escape result) ++ "', updated = datetime('now') WHERE id = " ++ (to_str pid))
+
+--! Revidiert den Plan nach einem Fehler. Fallback: fehlgeschlagenen Schritt streichen.
+fn revise_steps h goal steps fail_idx error
+    try
+        j: ai_chat_json "Du revidierst einen Aufgabenplan. Antworte ausschliesslich als JSON-Liste von Schritten mit 'action' (store, graph, goal oder retrieve) und den noetigen Parametern. Vermeide den fehlgeschlagenen Schritt." ("Aufgabe: " ++ goal ++ ". Fehler: " ++ error)
+        normalize_steps j
+    catch
+        drop_step steps fail_idx
+
+--! Normalisiert KI-Schritte in validierte Schritt-Maps (nur bekannte Aktionen).
+fn normalize_steps raw
+    out: []
+    for e in raw
+        a: get e "action"
+        if a != nil
+            valid: false
+            if a == "store" || a == "graph" || a == "goal" || a == "retrieve"
+                valid: true
+            if valid
+                push out e
+    out
+
+--! Deterministischer Fallback: streicht den fehlgeschlagenen Schritt.
+fn drop_step steps fail_idx
+    out: []
+    i: 0
+    while i < (len steps)
+        if i != fail_idx
+            push out (at steps i)
+        i: i + 1
+    out
+
+--! Führt einen Plan mit Checkpoints und Feedback-Loop aus.
+export fn run_plan h goal steps
+    init_executor h
+    pid: create_plan h goal steps
+    i: 0
+    errs: 0
+    while i < (len steps)
+        update_plan h pid "running" i ""
+        s: at steps i
+        r: exec_step h s
+        if get r "ok"
+            i: i + 1
+            errs: 0
+        else
+            errs: errs + 1
+            if errs > 2
+                revised: revise_steps h goal steps i (get r "error")
+                if (len revised) <= i
+                    update_plan h pid "failed" i (get r "error")
+                    f: {}
+                    set f "ok" false
+                    set f "plan_id" pid
+                    set f "error" (get r "error")
+                    return f
+                steps: revised
+                errs: 0
+    update_plan h pid "done" i ""
+    out: {}
+    set out "ok" true
+    set out "plan_id" pid
+    set out "steps_done" i
+    out
+
+--! Haupt-Einstieg: leitet einen Plan ab (Template oder KI) und führt ihn aus.
+export fn execute_task h goal
+    init_executor h
+    kind: mem.rule_classify goal
+    steps: plan_template kind goal
+    if (len steps) == 0
+        try
+            j: ai_chat_json "Du zerlegst eine Aufgabe in ausfuehrbare Schritte. Antworte ausschliesslich als JSON-Liste von Schritten mit 'action' (store, graph, goal oder retrieve) und den noetigen Parametern." goal
+            steps: normalize_steps j
+        catch
+            steps: []
+    if (len steps) == 0
+        f: {}
+        set f "ok" false
+        set f "error" "Keine Schritte ableitbar"
+        return f
+    run_plan h goal steps
+
+--! Liest den Zustand eines Plans (Test/Debug).
+export fn plan_state h pid
+    rows: db_query h ("SELECT id, goal, state, step_idx, result FROM plans WHERE id = " ++ (to_str pid))
+    if (len rows) > 0
+        at rows 0
+    else
+        nil

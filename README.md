@@ -15,7 +15,7 @@ Kein kurzer Chat-Bot, sondern ein Agent mit **persistenter "Seele"** (SQLite) un
 | M1b — Kern-Seele (SQLite + Klassifikation) | ✅ |
 | M2 — Wissensgraph + RAG | ✅ |
 | M3 — Inneres Gremium (ai_swarm) | ✅ |
-| M4 — Autonomer Executor | ⏳ geplant |
+| M4 — Autonomer Executor | ✅ |
 | M5 — Discord | ⏳ geplant |
 
 ## Schnellstart
@@ -55,6 +55,7 @@ muninn.pipe             Einstiegspunkt: dotenv, Whitelist, Long-Polling-Loop
 modules/telegram.pipe   Telegram Bot API (Long-Polling, rein HTTP)
 modules/memory.pipe     persistente "Seele" (SQLite) + Klassifikation + RAG + Wissensgraph
 modules/swarm.pipe      inneres Gremium (ai_swarm-Handoffs)
+modules/executor.pipe   autonomer Task-Executor (Plan-Bibliothek + Feedback-Loop)
 muninn_test.pipe        deterministische Tests
 ```
 
@@ -86,6 +87,15 @@ Vier Swarm-Agenten (`ai_swarm`) verfeinern eine Antwort in einer Handoff-Kette:
 - **registrator** schreibt neue Erkenntnisse über `merken` zurück in die Seele.
 
 Die Tools erhalten den DB-Handle über einen geteilten, mutablen Modul-State.
+
+### Autonomer Executor
+
+Aufgaben (`task`/`goal`) werden als **Pläne** ausgeführt:
+
+- **Plan-Bibliothek** mit deterministischen Templates (permanent → store; task → store+goal; goal → goal).
+- **Schritt-Dispatcher** `exec_step` mit validierenden Aktionen (`store`/`graph`/`goal`/`retrieve`) — keine rohen Shell-/Datei-Builtins.
+- **Checkpoints** in SQLite (`plans`-Tabelle): jeder Schritt wird vor/nach der Ausführung persistiert (resumefähig).
+- **Feedback-Loop**: schlägt ein Schritt fehl, wird der Plan revidiert (KI) bzw. der fehlgeschlagene Schritt gestrichen (deterministischer Fallback), dann erneut versucht.
 
 ### Telegram
 
