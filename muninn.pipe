@@ -11,6 +11,7 @@ import "modules/executor.pipe" as exe
 import "modules/web.pipe" as web
 import "modules/mcp.pipe" as mcp
 import "modules/dashboard.pipe" as dash
+import "modules/scheduler.pipe" as sched
 
 --! Lädt KEY=VALUE-Zeilen aus einer .env-Datei in eine Map.
 --! Werte werden am ERSTEN "=" getrennt (nicht bei jedem), damit Werte, die selbst
@@ -76,7 +77,7 @@ fn greeting_text _
 
 --! Hilfetext.
 fn help_text _
-    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/learn      — Dokument lernen (z.B. /learn https://... oder eine .txt/.md-Datei schicken)\n/graph      — Wissensgraph abfragen (z.B. /graph Harry)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen"
+    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/learn      — Dokument lernen (z.B. /learn https://... oder eine .txt/.md-Datei schicken)\n/graph      — Wissensgraph abfragen (z.B. /graph Harry)\n/remind     — Erinnerung planen (z.B. /remind in 10 Minuten an die Pause)\n/reminders  — offene Erinnerungen/Briefings anzeigen\n/briefing   — tägliches Morgen-Briefing aktivieren (/briefing stop zum Abbestellen)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen"
 
 --! Status-Text (Statistiken aus der Seele).
 fn status_text dbh
@@ -173,6 +174,46 @@ fn handle_message token cid text dbh
     if low == "/list"
         tel.tel_send_message token cid (list_text dbh)
         return nil
+    if low == "/reminders"
+        rows: sched.list dbh cid
+        if (len rows) == 0
+            tel.tel_send_message token cid "Keine offenen Erinnerungen oder Briefings geplant."
+        else
+            out: "Offene Erinnerungen/Briefings:\n"
+            for r in rows
+                out: out ++ "• [" ++ (get r "kind") ++ "] " ++ (get r "note") ++ " — am " ++ (format_time (get r "due_ts") "2006-01-02 15:04:05") ++ "\n"
+            tel.tel_send_message token cid (shorten out)
+        return nil
+    if low == "/briefing stop"
+        rows: sched.list dbh cid
+        cancelled: 0
+        for r in rows
+            if (get r "kind") == "briefing"
+                sched.cancel dbh (get r "id")
+                cancelled: cancelled + 1
+        if cancelled > 0
+            tel.tel_send_message token cid "Tägliches Briefing abbestellt."
+        else
+            tel.tel_send_message token cid "Kein aktives Briefing gefunden."
+        return nil
+    if low == "/briefing"
+        rows: sched.list dbh cid
+        for r in rows
+            if (get r "kind") == "briefing"
+                sched.cancel dbh (get r "id")
+        bt: parse_briefing_time briefing_time
+        nsec: now
+        first_due: sched.next_hhmm (get bt "hh") (get bt "mm") nsec tz_offset
+        sched.schedule dbh "briefing" (to_str cid) "Tägliches Briefing" first_due "daily"
+        tel.tel_send_message token cid ("Tägliches Briefing aktiv — ich melde mich das nächste Mal um " ++ (format_time first_due "15:04") ++ " (und danach täglich).")
+        return nil
+    rq: remind_query low tnorm
+    if rq != ""
+        nsec2: now
+        parsed: sched.parse_reminder rq nsec2 tz_offset
+        sched.schedule dbh "reminder" (to_str cid) (get parsed "text") (get parsed "due") (get parsed "repeat")
+        tel.tel_send_message token cid ("Notiert — ich erinnere dich am " ++ (format_time (get parsed "due") "2006-01-02 15:04:05") ++ " an: " ++ (get parsed "text"))
+        return nil
     if low == "/reset"
         mem.close_thread dbh cid
         tel.tel_send_message token cid "Gespraechsverlauf zurueckgesetzt — ich starte den Kontext frisch."
@@ -218,6 +259,12 @@ fn handle_message token cid text dbh
         return nil
     kind: mem.classify_input tnorm
     mem.log_event dbh (to_str cid) tnorm kind
+    if kind == "reminder"
+        nsec3: now
+        parsed: sched.parse_reminder tnorm nsec3 tz_offset
+        sched.schedule dbh "reminder" (to_str cid) (get parsed "text") (get parsed "due") (get parsed "repeat")
+        tel.tel_send_message token cid ("Notiert — ich erinnere dich am " ++ (format_time (get parsed "due") "2006-01-02 15:04:05") ++ " an: " ++ (get parsed "text"))
+        return nil
     if kind == "permanent"
         mem.add_memory dbh tnorm "permanent" 3 "telegram" "nutzer"
         tel.tel_send_message token cid ("Notiert: " ++ tnorm)
@@ -244,18 +291,54 @@ fn handle_message token cid text dbh
         catch
             answer: ""
         mem.add_message dbh tid cid "user" tnorm
-        if answer == nil || answer == ""
+        if answer == nil || answer == "" || question_needs_research answer
             ctx: mem.retrieve_context dbh tnorm 3
             if (len ctx) > 0
-                reply: "Dazu erinnere ich mich an:\n"
-                for c in ctx
-                    reply: reply ++ "• " ++ c ++ "\n"
+                ctx_text: join ctx "\n\n"
+                reply: ""
+                try
+                    reply: ai_chat "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des folgenden Kontexts knapp und faktentreu. Wenn der Kontext nichts Passendes enthaelt, sage ehrlich, dass du es nicht weisst. Gib nur die Antwort aus, kein internes Reasoning." ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx_text)
+                catch
+                    reply: ""
+                if reply == nil || reply == ""
+                    reply: "Dazu erinnere ich mich an:\n"
+                    for c in ctx
+                        reply: reply ++ "• " ++ c ++ "\n"
                 mem.add_message dbh tid cid "assistant" reply
                 tel.tel_send_message token cid reply
             else
-                fallback: "Dazu fällt mir noch nichts ein."
-                mem.add_message dbh tid cid "assistant" fallback
-                tel.tel_send_message token cid fallback
+                tel.tel_send_message token cid "Kein Wissen darüber. Recherchiere..."
+                rr: web.research tnorm
+                ctx2: get rr "context"
+                srcs2: get rr "sources"
+                if ctx2 == nil || ctx2 == ""
+                    fallback: "Ich konnte online nichts Relevantes finden."
+                    mem.add_message dbh tid cid "assistant" fallback
+                    tel.tel_send_message token cid fallback
+                else
+                    answer2: ""
+                    try
+                        answer2: ai_chat "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des recherchierten Kontexts knapp und faktentreu. Gib nur die Antwort aus, kein internes Reasoning." ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx2)
+                    catch
+                        answer2: ctx2
+                    if answer2 == nil || answer2 == ""
+                        answer2: ctx2
+                    mem.add_memory dbh (mem.condense_fact answer2) "fact" 3 "web_research" "web"
+                    mem.add_message dbh tid cid "assistant" answer2
+                    src_text: ""
+                    for u in srcs2
+                        src_text: src_text ++ "\n" ++ u
+                    full: (shorten answer2) ++ "\n— Quellen:" ++ (shorten src_text)
+                    kb: []
+                    row: []
+                    push row (tel.tel_button "💾 Merken" "save")
+                    push row (tel.tel_button "🔍 Vertiefen" "more")
+                    push kb row
+                    row2: []
+                    push row2 (tel.tel_button "👍" "up")
+                    push row2 (tel.tel_button "👎" "down")
+                    push kb row2
+                    tel.tel_send_message_kb token cid (shorten full) kb
         else
             mem.add_message dbh tid cid "assistant" answer
             kb: []
@@ -263,9 +346,41 @@ fn handle_message token cid text dbh
             push row (tel.tel_button "💾 Merken" "save")
             push row (tel.tel_button "🔍 Vertiefen" "more")
             push kb row
+            row2: []
+            push row2 (tel.tel_button "👍" "up")
+            push row2 (tel.tel_button "👎" "down")
+            push kb row2
             tel.tel_send_message_kb token cid (shorten answer) kb
         return nil
     tel.tel_send_message token cid ("Verstanden. (" ++ kind ++ ")")
+
+--! Prüft, ob eine KI-Antwort einen "ich weiß es nicht"-Fallback darstellt,
+--! der nach einer Web-Recherche auffordert.
+fn question_needs_research answer
+    if answer == nil || answer == ""
+        return true
+    low: lower answer
+    if contains low "ich weiß es nicht"
+        return true
+    if contains low "ich weiss es nicht"
+        return true
+    if contains low "weis es nicht"
+        return true
+    if contains low "keine informationen"
+        return true
+    if contains low "keine relevanten informationen"
+        return true
+    if contains low "ich kenne keine"
+        return true
+    if contains low "ich kann dir nicht sagen"
+        return true
+    if contains low "ich weiss nichts"
+        return true
+    if contains low "ich weiß nichts"
+        return true
+    if contains low "konnte keine"
+        return true
+    false
 
 --! Kürzt Text auf Telegram-Grenze (4096 Zeichen).
 fn shorten s
@@ -336,6 +451,13 @@ fn learn_query low tnorm
             return (trim (substring tnorm 7 (len tnorm)))
     ""
 
+--! Erkennt eine /remind-Anfrage und liefert die Erinnerungs-Anweisung (oder "").
+fn remind_query low tnorm
+    if (len low) >= 8
+        if (substring low 0 8) == "/remind "
+            return (trim (substring tnorm 8 (len tnorm)))
+    ""
+
 --! Verarbeitet einen Inline-Button-Druck (callback_query).
 fn handle_callback token dbh cbq
     cbid: get cbq "id"
@@ -347,7 +469,7 @@ fn handle_callback token dbh cbq
     tel.tel_answer_callback token cbid ""
     if data == "save"
         if txt != nil
-            mem.add_memory dbh txt "fact" 3 "telegram" "nutzer"
+            mem.add_memory dbh (mem.condense_fact txt) "fact" 3 "telegram" "nutzer"
             tel.tel_send_message token cid "In der Seele gespeichert."
         return nil
     if data == "more"
@@ -362,16 +484,76 @@ fn handle_callback token dbh cbq
             else
                 tel.tel_send_message token cid "Ich konnte leider nichts vertiefen."
         return nil
+    if data == "up"
+        if txt != nil
+            n: mem.adjust_by_content dbh txt 1
+            if n == 0
+                mem.add_memory dbh (mem.condense_fact txt) "fact" 3 "telegram" "feedback"
+                tel.tel_send_message token cid "Danke! Ich merke mir das."
+            else
+                tel.tel_send_message token cid "Danke! Wichtigkeit erhöht."
+        return nil
+    if data == "down"
+        if txt != nil
+            mem.adjust_by_content dbh txt (-1)
+            tel.tel_send_message token cid "Notiert — ich werte das ab."
+        return nil
     tel.tel_send_message token cid "Unbekannte Aktion."
+
+--! Zerlegt BRIEFING_TIME ("HH:MM") in {hh, mm}. Default 08:00.
+fn parse_briefing_time raw
+    hh: 8
+    mm: 0
+    if raw != nil && raw != ""
+        p: split raw ":"
+        if (len p) >= 2
+            hh: to_num (trim (at p 0))
+            mm: to_num (trim (at p 1))
+    out: {}
+    set out "hh" hh
+    set out "mm" mm
+    out
+
+--! Scheduler-Tick (P4): feuert fällige Erinnerungen/Briefings proaktiv ab —
+--! läuft im Bot-Loop nach jedem Poll, single-threaded (kein Goroutine-/DB-
+--! Konflikt, siehe Plan.md). Briefings werden erst beim Feuern aus der Seele
+--! zusammengestellt (immer aktuell, kein veralteter Snapshot).
+fn sched_tick token
+    hl: mem.open_locked nil
+    dbh: get hl "h"
+    now_sec: now
+    due: sched.due dbh now_sec
+    for item in due
+        kind: get item "kind"
+        cid: get item "chat_id"
+        msg: get item "note"
+        if kind == "briefing"
+            msg: sched.compose_briefing dbh
+        if kind == "goal_tick"
+            resumed: exe.resume_running_plans dbh
+            if resumed > 0
+                tel.tel_send_message token (to_num cid) ("Fortschritt: " ++ (to_str resumed) ++ " unterbrochene Pläne fortgesetzt.")
+            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
+            continue
+        if cid != nil && cid != ""
+            try
+                tel.tel_send_message token (to_num cid) msg
+            catch
+                nil
+        sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
+    mem.close_locked hl
+    nil
 
 --! Ein Polling-Zyklus. Liefert die letzte verarbeitete update_id zurück.
 --! DB-Sperre (mem.open_locked/close_locked) bewusst NICHT um den ganzen
 --! Zyklus, sondern nur um die tatsaechlichen DB-Zugriffe: tel_get_updates
---! wartet per Long-Polling bis zu 25s auf neue Nachrichten — waere die Sperre
---! die ganze Zeit gehalten, koennte das Web-Dashboard waehrenddessen so gut
---! wie nie an die DB. So haelt jeder Kanal die Sperre nur, waehrend er
---! tatsaechlich etwas verarbeitet (siehe Plan.md zur Nebenlaeufigkeit).
-fn poll_once token offset allowed
+--! wartet per Long-Polling bis zu `timeout` Sekunden auf neue Nachrichten —
+--! waere die Sperre die ganze Zeit gehalten, koennte das Web-Dashboard
+--! waehrenddessen so gut wie nie an die DB. So haelt jeder Kanal die Sperre
+--! nur, waehrend er tatsaechlich etwas verarbeitet (siehe Plan.md zur
+--! Nebenlaeufigkeit). timeout (Sekunden) kappt der P4-Scheduler dynamisch
+--! auf "Zeit bis zur naechsten faelligen Aufgabe".
+fn poll_once token offset allowed timeout
     hl: mem.open_locked nil
     dbh: get hl "h"
     if offset == nil
@@ -381,7 +563,7 @@ fn poll_once token offset allowed
     mem.close_locked hl
     updates: []
     try
-        updates: tel.tel_get_updates token offset 25
+        updates: tel.tel_get_updates token offset timeout
     catch
         updates: []
     hl2: mem.open_locked nil
@@ -450,6 +632,11 @@ cfg: load_env ".env"
 deepseek_key: cfg_get cfg "DEEPSEEK_API_KEY"
 dash_bind: cfg_get cfg "DASHBOARD_BIND"
 dash_token: cfg_get cfg "DASHBOARD_TOKEN"
+briefing_time: cfg_get cfg "BRIEFING_TIME"
+tz_offset_raw: cfg_get cfg "MUNINN_TZ_OFFSET"
+tz_offset: 0
+if tz_offset_raw != nil && tz_offset_raw != ""
+    tz_offset: to_num tz_offset_raw
 mcp_servers: mcp.parse_mcp_config (cfg_get cfg "MCP_SERVERS")
 mcp_servers: mcp.resolve_all_env mcp_servers
 
@@ -488,11 +675,21 @@ else
             off: nil
             if once_mode
                 print "once-Modus: ein Zyklus"
-                off: poll_once tok off allowed
+                off: poll_once tok off allowed 25
                 print "once-Zyklus fertig."
             else
                 while true
                     try
-                        off: poll_once tok off allowed
-                    catch
-                        print "Zyklus-Fehler — versuche erneut."
+                        timeout: 25
+                        hl0: mem.open_locked nil
+                        dbh0: get hl0 "h"
+                        nxt: sched.next_due_ms dbh0 (now)
+                        mem.close_locked hl0
+                        if nxt != nil && nxt < 25000
+                            timeout: nxt / 1000
+                            if timeout < 1
+                                timeout: 1
+                        off: poll_once tok off allowed timeout
+                        sched_tick tok
+                    catch e
+                        print ("Zyklus-Fehler — versuche erneut: " ++ (to_str e))

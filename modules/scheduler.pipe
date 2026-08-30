@@ -1,0 +1,202 @@
+--! scheduler.pipe — Proaktivität (Plan.md P4): geplante Erinnerungen + tägliches
+--! Briefing. Kein eigener Scheduler in Pipe (der kommt laut Roadmap erst mit P4) —
+--! der Tick läuft stattdessen im Telegram-Long-Polling-Loop (muninn.pipe), der
+--! seinen Timeout dynamisch auf "Zeit bis zur nächsten fälligen Aufgabe" kappt.
+--! Dadurch bleibt Muninn single-threaded (kein Goroutine-/DB-Konflikt, siehe
+--! Plan.md zur Nebenläufigkeit) und erinnert trotzdem mit Sekunden-Präzision.
+--! Zeit-/Wiederholungslogik ist rein (kein KI/Netz) und deterministisch testbar.
+import "sqlite"
+import "modules/memory.pipe" as mem
+
+--! Legt die scheduled-Tabelle an (idempotent). due_ts ist ein INTEGER mit
+--! Unix-Sekunden (bewusst numerisch statt formatierter String: sortierbar und
+--! für Wiederholungs-Arithmetik trivial).
+export fn init_scheduler h
+    db_exec h "CREATE TABLE IF NOT EXISTS scheduled (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, chat_id TEXT, note TEXT, due_ts INTEGER, repeat TEXT, state TEXT, created TEXT, last_fired TEXT)"
+    nil
+
+--! Reine Hilfsfunktion: erste Ziffernfolge in einem String (0 wenn keine).
+fn leading_int s
+    out: ""
+    started: false
+    i: 0
+    while i < (len s)
+        ch: substring s i (i + 1)
+        if ch >= "0" && ch <= "9"
+            out: out ++ ch
+            started: true
+        else
+            if started
+                break
+        i: i + 1
+    if out == ""
+        return 0
+    to_num out
+
+--! Reine Hilfsfunktion: letzte Ziffernfolge in einem String (0 wenn keine).
+fn trailing_int s
+    out: ""
+    i: (len s) - 1
+    while i >= 0
+        ch: substring s i (i + 1)
+        if ch >= "0" && ch <= "9"
+            out: ch ++ out
+        else
+            if out != ""
+                break
+        i: i - 1
+    if out == ""
+        return 0
+    to_num out
+
+--! Reine Funktion: Unix-Sekunden des nächsten Auftretens einer Uhrzeit HH:MM.
+--! "Lokale" Zeit = UTC + offset_sec (das Environment läuft sonst in UTC, siehe
+--! format_time — es gibt keinen Timezone-Builtin; der Offset kommt aus .env).
+--! Liegt die Zielzeit heute schon in der Vergangenheit, wird morgen geliefert.
+export fn next_hhmm hh mm now_sec offset_sec
+    shifted: now_sec + offset_sec
+    day: shifted - (shifted % 86400)
+    target: day + (hh * 3600) + (mm * 60)
+    if target <= shifted
+        target: target + 86400
+    target - offset_sec
+
+--! Plant eine Aufgabe/Erinnerung ein. kind: "reminder" | "briefing" | "goal_tick".
+--! due_sec: Unix-Sekunden. repeat: "" (einmalig) | "daily" | "weekly". Liefert id.
+export fn schedule h kind chat_id text due_sec repeat
+    init_scheduler h
+    db_exec h ("INSERT INTO scheduled (kind, chat_id, note, due_ts, repeat, state, created) VALUES ('" ++ (mem.sql_escape kind) ++ "', '" ++ (mem.sql_escape (to_str chat_id)) ++ "', '" ++ (mem.sql_escape text) ++ "', " ++ (to_str due_sec) ++ ", '" ++ (mem.sql_escape repeat) ++ "', 'pending', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "')")
+    get (at (db_query h "SELECT max(id) AS mid FROM scheduled") 0) "mid"
+
+--! Alle fälligen, noch offenen Einträge (due_ts <= now_sec), älteste zuerst.
+export fn due h now_sec
+    init_scheduler h
+    db_query h ("SELECT id, kind, chat_id, note, due_ts, repeat FROM scheduled WHERE state = 'pending' AND due_ts <= " ++ (to_str now_sec) ++ " ORDER BY due_ts ASC")
+
+--! Markiert einen Eintrag als erledigt — bzw. schiebt ihn bei daily/weekly auf
+--! den nächsten Termin (+86400/+604800) statt ihn zu schliessen.
+export fn mark_fired h id repeat due_sec
+    if repeat == "daily" || repeat == "weekly"
+        inc: 86400
+        if repeat == "weekly"
+            inc: 604800
+        db_exec h ("UPDATE scheduled SET due_ts = " ++ (to_str (due_sec + inc)) ++ ", last_fired = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
+    else
+        db_exec h ("UPDATE scheduled SET state = 'done', last_fired = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
+    "ok"
+
+--! Millisekunden bis zum nächsten fälligen Eintrag (nil wenn keiner offen) —
+--! für den dynamischen Long-Poll-Timeout des Bot-Loops.
+export fn next_due_ms h now_sec
+    init_scheduler h
+    rows: db_query h "SELECT MIN(due_ts) AS d FROM scheduled WHERE state = 'pending'"
+    if (len rows) == 0
+        return nil
+    d: get (at rows 0) "d"
+    if d == nil
+        return nil
+    ms: (d - now_sec) * 1000
+    if ms < 0
+        ms: 0
+    ms
+
+--! Offene Einträge eines Chats (für /reminders), älteste zuerst.
+export fn list h chat_id
+    init_scheduler h
+    db_query h ("SELECT id, kind, note, due_ts, repeat FROM scheduled WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND state = 'pending' ORDER BY due_ts ASC")
+
+--! Bricht einen Eintrag ab (state = cancelled statt löschen — Auditierbarkeit).
+export fn cancel h id
+    init_scheduler h
+    db_exec h ("UPDATE scheduled SET state = 'cancelled' WHERE id = " ++ (to_str id))
+    "ok"
+
+--! Reiner Fallback-Parser (ohne KI) für Erinnerungs-Anweisungen. Erkennt:
+--!   "in N minuten/stunden/tagen" -> now + N*60/3600/86400
+--!   "um HH:MM"                  -> nächstes Auftreten von HH:MM
+--!   "morgen"                    -> now + 86400
+--!   sonst                       -> now + 3600 (in einer Stunde)
+--! Liefert {due, repeat, text} — due in Unix-Sekunden, repeat "" (einmalig).
+export fn parse_reminder_rule text now_sec offset_sec
+    t: lower (trim text)
+    due: now_sec + 3600
+    rtext: text
+    if contains t "in "
+        n: leading_int t
+        if n > 0
+            if contains t "minut" || contains t "min "
+                due: now_sec + (n * 60)
+            else
+                if contains t "stund" || contains t "std"
+                    due: now_sec + (n * 3600)
+                else
+                    if contains t "tag"
+                        due: now_sec + (n * 86400)
+    else
+        if contains t ":"
+            p: split t ":"
+            if (len p) >= 2
+                hh: trailing_int (at p 0)
+                mm: leading_int (at p 1)
+                if hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59
+                    due: next_hhmm hh mm now_sec offset_sec
+        else
+            if contains t "morgen"
+                due: now_sec + 86400
+    out: {}
+    set out "due" due
+    set out "repeat" ""
+    set out "text" rtext
+    out
+
+--! Erinnerungs-Anweisung zerlegen: bevorzugt per KI (relative Sekunden, damit
+--! Zeitzonen keine Rolle spielen), Fallback deterministisch per Regel. Liefert
+--! {due, repeat, text} — due in Unix-Sekunden.
+export fn parse_reminder text now_sec offset_sec
+    out: {}
+    try
+        j: ai_chat_json ("Du zerlegst eine Erinnerungs-Anweisung. Antworte ausschliesslich als JSON-Objekt mit 'text' (die eigentliche Erinnerung, ohne die Zeitangabe), 'due_in_seconds' (Ganzzahl: wie viele Sekunden ab jetzt, bis erinnert werden soll) und 'repeat' (eines von: once, daily, weekly). Ist keine eindeutige Zeit erkennbar, nimm 3600 und repeat 'once'. Jetzt ist es " ++ (format_time now_sec "2006-01-02 15:04:05") ++ ".") text
+        t: get j "text"
+        d: get j "due_in_seconds"
+        r: get j "repeat"
+        if t != nil && t != ""
+            set out "text" t
+        else
+            set out "text" text
+        if d == nil
+            d: 3600
+        set out "due" (now_sec + d)
+        if r == "daily" || r == "weekly"
+            set out "repeat" r
+        else
+            set out "repeat" ""
+    catch e
+        out: parse_reminder_rule text now_sec offset_sec
+    out
+
+--! Baut den täglichen Briefing-Text deterministisch aus der Seele auf
+--! (wichtigste Erinnerungen + offene Ziele + jüngste Ereignisse). Kein KI-Call
+--! nötig — die Rohdaten sprechen für sich; Muninn kann sie später verfeinern.
+export fn compose_briefing h
+    out: "Guten Morgen! Hier ist dein Muninn-Briefing.\n"
+    top: mem.top_memories h 5
+    if (len top) > 0
+        out: out ++ "\n• Wichtige Erinnerungen:\n"
+        for r in top
+            out: out ++ "  - " ++ (get r "content") ++ "\n"
+    goals: mem.list_goals h 5
+    open: 0
+    for g in goals
+        if (get g "status") != "erledigt"
+            open: open + 1
+    if open > 0
+        out: out ++ "\n• Offene Ziele:\n"
+        for g in goals
+            if (get g "status") != "erledigt"
+                out: out ++ "  - " ++ (get g "goal_text") ++ "\n"
+    ev: mem.recent_events h 3
+    if (len ev) > 0
+        out: out ++ "\n• Zuletzt:\n"
+        for e in ev
+            out: out ++ "  - " ++ (get e "msg") ++ "\n"
+    out

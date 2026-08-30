@@ -18,6 +18,8 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
   die Fakten gegen Gedächtnis **und** Web prüfen.
 - **Lernen aus dem Web** — neue Erkenntnisse werden dauerhaft **mit Quellen-URL** gespeichert und später zitiert.
 - **Autonomer Executor** — Aufgaben werden als Pläne mit Checkpoints und Feedback-Loop ausgeführt.
+- **Proaktivität (P4)** — Scheduler im Bot-Loop: Erinnerungen („Erinnere mich …"),
+  tägliches Morgen-Briefing, automatisches Fortsetzen unterbrochener Pläne, 👍/👎-Feedback-Lernen.
 - **Web-Recherche** — DuckDuckGo + Wikipedia, Seiten-Fetch und Zusammenfassung (kein API-Key nötig).
 - **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, GitHub, ...) per
   Model Context Protocol anbinden; laufen unter einem Sandbox-Profil mit eng gefasster
@@ -35,6 +37,7 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 | M4 — Autonomer Executor | ✅ |
 | Web-Recherche + Lernen + Inline-Buttons | ✅ |
 | P1 — MCP-Tool-Ökosystem + Sandboxing | ✅ |
+| P4 — Proaktivität (Scheduler, Erinnerungen, Briefing) | ✅ |
 | M5 — Discord | ⏳ geplant |
 
 Weitere Schritte: [Plan.md](Plan.md)
@@ -69,6 +72,8 @@ TELEGRAM_BOT_TOKEN=123456:ABC...        # Token von @BotFather (/newbot)
 TELEGRAM_ALLOWED_CHAT_ID=               # deine Chat-ID von @userinfobot (leer = jeder darf)
 DEEPSEEK_API_KEY=sk-...                 # für Klassifikation, Gremium, Zusammenfassung
 MCP_SERVERS=                            # optional: JSON-Liste externer MCP-Server (siehe .env.example)
+BRIEFING_TIME=08:00                     # optional (P4): Uhrzeit des täglichen Briefings
+MUNINN_TZ_OFFSET=0                      # optional (P4): Sekunden-Offset der lokalen Zeitzone
 ```
 
 > Muninn nutzt **DeepSeek** als Provider (kostenlos anmeldbar unter platform.deepseek.com).
@@ -118,6 +123,9 @@ pipe -test
 | `/reset` | Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen) |
 | `/consolidate` | Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen |
 | `/graph <Name>` | Wissensgraph abfragen (Nachbarn einer Entität) |
+| `/remind <Anweisung>` | Erinnerung planen (z.B. `/remind in 10 Minuten an die Pause`) |
+| `/reminders` | offene Erinnerungen/Briefings anzeigen |
+| `/briefing` | tägliches Morgen-Briefing aktivieren (`/briefing stop` zum Abbestellen) |
 | `/learn <URL>` | Dokument lernen (oder direkt eine `.txt`/`.md`-Datei schicken) |
 
 ### Natürliche Sprache
@@ -125,6 +133,7 @@ pipe -test
 | Eingabe | Wirkung |
 |---------|---------|
 | „Merke dir, dass …" | wird dauerhaft gespeichert |
+| „Erinnere mich …" | plant eine Erinnerung (Scheduler, P4) |
 | „Erledige …" / „Mache …" | autonomer Executor führt einen Plan aus |
 | „Mein Ziel ist …" | legt ein Ziel an |
 | „Suche …" / „Recherchiere …" / „Finde …" | Web-Recherche |
@@ -210,6 +219,7 @@ modules/executor.pipe   Autonomer Executor: Plan-Bibliothek, Checkpoints, Feedba
 modules/web.pipe        Recherche: web_lookup, web_search_full, web_fetch, research
 modules/mcp.pipe        MCP-Tool-Ökosystem: Server-Konfig, exec-Whitelist, Verbindungsaufbau
 modules/dashboard.pipe  Web-Dashboard (P3): pipe-web-Routen, HTML/CSS/JS, eigene Chat-Weiche
+modules/scheduler.pipe  Proaktivität (P4): geplante Erinnerungen, Briefing, Plan-Resume-Tick
 muninn_test.pipe        deterministische Tests
 ```
 
@@ -329,6 +339,33 @@ Aufgaben (`task`/`goal`) werden als **Pläne** ausgeführt:
   per Name auf — deterministisch, über den Pipe-Builtin `tool_call`, ohne dass dafür eine
   KI-Tool-Call-Schleife nötig wäre. Damit können auch autonome Pläne (nicht nur das
   Gremium) MCP-Werkzeuge nutzen.
+
+### Proaktivität (`scheduler.pipe`, P4)
+
+Erinnerungen, tägliches Briefing und automatisches Plan-Fortsetzen laufen über
+den Scheduler. **Kein eigener Scheduler-Prozess** (Pipe hat vor P4 keinen, und
+Nebenläufigkeit hält Muninn bewusst pro Prozess): der Tick steckt im
+Telegram-Long-Polling-Loop, der seinen Timeout dynamisch auf „Zeit bis zur
+nächsten fälligen Aufgabe" kappt (`next_due_ms`) — Single-threaded, keine
+DB-Konkurrenz, trotzdem Sekunden-Präzision.
+
+- **`scheduled`-Tabelle** (`kind, chat_id, note, due_ts, repeat, state`),
+  `due_ts` als Unix-Sekunden (sortier-/arithmetisierbar).
+- **Erinnerungen**: „Erinnere mich …" oder `/remind` → `parse_reminder`
+  (KI mit deterministischem Regel-Fallback) → `schedule`. Einmalig, `daily`
+  oder `weekly`.
+- **Briefing**: `/briefing` legt einen `daily`-Eintrag zur `BRIEFING_TIME`
+  an; beim Feuern baut `compose_briefing` den Text deterministisch aus der
+  Seele (wichtigste Erinnerungen + offene Ziele + jüngste Ereignisse).
+- **Plan-Resume**: `exe.resume_plan`/`resume_running_plans` setzen unterbrochene
+  Pläne ab ihrem Checkpoint (`step_idx`) fort — der `goal_tick`-Scheduler-Kind
+  ruft das periodisch auf.
+- **Feedback-Lernen**: 👍/👎-Buttons auf Antworten rufen `adjust_by_content`
+  auf und heben/senken die Importance der (ggf. zuvor gespeicherten) Antwort.
+
+Zeitzonen: Pipe hat keinen Timezone-Builtin (`format_time` arbeitet in UTC);
+`MUNINN_TZ_OFFSET` (Sekunden, z.B. `7200` für UTC+2) verschiebt die lokale
+Briefing-/Erinnerungszeit, siehe `.env.example`.
 
 ### Web-Recherche (`web.pipe`)
 

@@ -236,6 +236,22 @@ export fn set_goal_status h id status
 export fn set_importance h id importance
     db_exec h ("UPDATE memories SET importance = " ++ (to_str importance) ++ " WHERE id = " ++ (to_str id))
 
+--! Passt die Importance ALLER Erinnerungen an, deren content exakt `content`
+--! entspricht (Feedback-Lernen P4: 👍/👎 auf einer gespeicherten Antwort). delta
+--! wird auf 1..5 geclampft. Liefert die Anzahl geänderter Erinnerungen.
+export fn adjust_by_content h content delta
+    rows: db_query h ("SELECT id, importance FROM memories WHERE content = '" ++ (sql_escape content) ++ "'")
+    changed: 0
+    for m in rows
+        imp: (get m "importance") + delta
+        if imp < 1
+            imp: 1
+        if imp > 5
+            imp: 5
+        db_exec h ("UPDATE memories SET importance = " ++ (to_str imp) ++ " WHERE id = " ++ (to_str (get m "id")))
+        changed: changed + 1
+    changed
+
 --! Episodisches Gedaechtnis (P2): ein Thread pro Chat, in "threads" (title = chat_id
 --! als String, state = aktiv/geschlossen) verwaltet — die Tabelle war zuvor angelegt,
 --! aber ungenutzt. Nachrichten liegen chronologisch in "messages".
@@ -366,26 +382,31 @@ export fn consolidate h
 --! Fallback (kein AI): einfache Regel-Klassifikation.
 export fn classify_input text
     try
-        classify text (["permanent", "fleeting", "task", "goal", "question"])
+        classify text (["permanent", "reminder", "fleeting", "task", "goal", "question"])
     catch e
         rule_classify text
 
 --! Regelbasierte Klassifikation (deterministisch, ohne KI) — für Tests und Fallback.
+--! "erinnere" meint eine zeitbasierte Erinnerung (P4); "merke"/"denke an" eine
+--! dauerhafte Erinnerung — die beiden waren zuvor eins ("permanent").
 export fn rule_classify text
     t: lower text
-    if contains t "erinnere" || contains t "merke" || contains t "denke an"
-        "permanent"
+    if contains t "erinnere"
+        "reminder"
     else
-        if contains t "erledige" || contains t "to-do" || contains t "aufgabe" || contains t "mache"
-            "task"
+        if contains t "merke" || contains t "denke an"
+            "permanent"
         else
-            if contains t "ziel" || contains t "erreichen" || contains t "wollen"
-                "goal"
+            if contains t "erledige" || contains t "to-do" || contains t "aufgabe" || contains t "mache"
+                "task"
             else
-                if contains t "?"
-                    "question"
+                if contains t "ziel" || contains t "erreichen" || contains t "wollen"
+                    "goal"
                 else
-                    "fleeting"
+                    if contains t "?"
+                        "question"
+                    else
+                        "fleeting"
 
 --! Verdichtet Text via KI auf eine Kurzform (Fallback: unverändert).
 export fn condense text
@@ -393,6 +414,16 @@ export fn condense text
         summarize text
     catch e
         text
+
+--! Verdichtet eine (Antwort-)Text zu einem kurzen Fakt fürs Merken (Fix: die
+--! "Merken"-Funktion speicherte zuvor rohe, teils mit Gremium-Reasoning
+--! verschmutzte Antworten wörtlich). KI-Kürzung mit deterministischem
+--! Fallback auf die ersten 300 Zeichen (statt des kompletten Texts).
+export fn condense_fact text
+    try
+        summarize text
+    catch e
+        substring text 0 300
 
 --! Stoppwort-Prüfung (Deutsch + Englisch).
 fn is_stop t

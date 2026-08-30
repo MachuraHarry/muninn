@@ -208,10 +208,44 @@ Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung f
 
 ### P4 — Proaktivität & Autonomie
 
-- **Scheduler**: geplante Aufgaben/Erinnerungen (Cron-artig, in SQLite + Loop).
-- **Tägliches Briefing/Digest** („Guten Morgen, hier dein Tag …").
-- **Langlaufende autonome Ziele** mit Checkpoints + Resume.
-- **Lernen aus Feedback**: 👍/👎-Buttons passen Importance/Quellen an.
+- ✅ **Scheduler**: `modules/scheduler.pipe` — `scheduled`-Tabelle
+  (`kind, chat_id, note, due_ts, repeat, state`; `due_ts` als Unix-Sekunden),
+  `schedule`/`due`/`mark_fired`/`next_due_ms`/`list`/`cancel`. **Kein eigener
+  Scheduler-Prozess**: der Tick steckt im Telegram-Long-Polling-Loop
+  (`sched_tick` in `muninn.pipe`), dessen Timeout dynamisch auf „Zeit bis zur
+  nächsten fälligen Aufgabe" gekappt wird (`next_due_ms`) — single-threaded,
+  keine DB-Konkurrenz (siehe Nebenläufigkeits-Notiz), trotzdem
+  Sekunden-Präzision. `mark_fired` schiebt `daily`/`weekly` auf den nächsten
+  Termin (+86400/+604800) statt zu schließen. 12 neue Tests.
+- ✅ **Erinnerungen**: „Erinnere mich …" (neue Klassifikations-Kategorie
+  `reminder`, von `permanent` getrennt — die beiden waren zuvor eins) und
+  `/remind`. `parse_reminder` zerlegt per KI (relative Sekunden, damit
+  Zeitzonen egal sind; jetzt wird als Kontext mitgegeben) mit
+  deterministischem Regel-Fallback (`parse_reminder_rule`: „in N Minuten/
+  Stunden/Tagen", „um HH:MM", „morgen"). Neue Befehle `/reminders` (offene
+  Einträge) — deterministische Teile getestet.
+- ✅ **Tägliches Briefing/Digest**: `/briefing` legt einen `daily`-Eintrag zur
+  `BRIEFING_TIME` (`.env`, Default 08:00) an; beim Feuern baut
+  `compose_briefing` den Text deterministisch aus der Seele (wichtigste
+  Erinnerungen + offene Ziele + jüngste Ereignisse) — kein KI-Call nötig.
+  `/briefing stop` bestellt ab. Da Pipe keinen Timezone-Builtin hat
+  (`format_time` arbeitet in UTC), verschiebt `MUNINN_TZ_OFFSET` (Sekunden,
+  z.B. `7200`) die lokale Uhrzeit.
+- ✅ **Langlaufende Ziele mit Checkpoints + Resume**: `exe.resume_plan`
+  setzt einen laufenden Plan ab `step_idx` fort; `resume_running_plans`
+  setzt alle unterbrochenen Pläne fort. Der Schritt-Loop wurde in
+  `execute_from` extrahiert (run_plan/resume_plan teilen ihn) und
+  checkpointet jetzt **nach** jedem Erfolg (`step_idx` = abgeschlossene
+  Schritte) statt vor dem Schritt — macht Resume idempotent. Der
+  `goal_tick`-Scheduler-Kind ruft `resume_running_plans` periodisch auf.
+- ✅ **Lernen aus Feedback**: 👍/👎-Buttons auf Antworten; `adjust_by_content`
+  hebt/senkt die Importance einer (zuvor per „Merken" gespeicherten) Antwort,
+  👍 ohne Treffer speichert sie positiv als `fact`. 5 neue Tests.
+- ⏳ **Echte „langlaufende" Plan-Vorlagen** (mehrschrittige, über Tage laufende
+  Ziele mit pro Tick einem Schritt) sind bewusst noch offen — der Resume-
+  Mechanismus und der `goal_tick` sind fertig, aber die Template-Bibliothek
+  kennt bislang nur synchrone Ein-Schritt-Pläne (YAGNI, bis ein echter Bedarf
+  besteht).
 
 ### P5 — Intelligenz-Upgrade
 

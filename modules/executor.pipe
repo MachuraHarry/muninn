@@ -211,15 +211,45 @@ fn drop_step steps fail_idx
 export fn run_plan h goal steps
     init_executor h
     pid: create_plan h goal steps
-    i: 0
+    execute_from h pid goal steps 0
+
+--! Setzt einen bereits angelegten, laufenden Plan ab seinem Checkpoint fort
+--! (P4: langlaufende Ziele mit Resume — der Scheduler tickt offene Pläne an).
+--! step_idx zählt abgeschlossene Schritte; dadurch ist ein Resume idempotent.
+export fn resume_plan h pid
+    init_executor h
+    rows: db_query h ("SELECT goal, steps, state, step_idx FROM plans WHERE id = " ++ (to_str pid))
+    if (len rows) == 0
+        f: {}
+        set f "ok" false
+        set f "error" "Plan nicht gefunden"
+        return f
+    p: at rows 0
+    if (get p "state") == "done" || (get p "state") == "failed"
+        f2: {}
+        set f2 "ok" false
+        set f2 "error" "Plan ist bereits abgeschlossen"
+        return f2
+    steps: []
+    try
+        steps: parse_json (get p "steps")
+    catch
+        steps: []
+    execute_from h pid (get p "goal") steps (get p "step_idx")
+
+--! Gemeinsamer Schritt-Loop (run_plan/resume_plan): ab Schritt `start` bis Ende,
+--! mit Checkpoint nach jedem Erfolg und Feedback-Loop bei Fehlern.
+fn execute_from h pid goal steps start
+    i: start
     errs: 0
+    update_plan h pid "running" i ""
     while i < (len steps)
-        update_plan h pid "running" i ""
         s: at steps i
         r: exec_step h s
         if get r "ok"
             i: i + 1
             errs: 0
+            update_plan h pid "running" i ""
         else
             errs: errs + 1
             if errs > 2
@@ -233,12 +263,25 @@ export fn run_plan h goal steps
                     return f
                 steps: revised
                 errs: 0
+                update_plan h pid "running" i ""
     update_plan h pid "done" i ""
     out: {}
     set out "ok" true
     set out "plan_id" pid
     set out "steps_done" i
     out
+
+--! Setzt alle laufenden (unterbrochenen) Pläne fort — der "goal_tick" des
+--! Schedulers ruft das periodisch auf. Liefert die Anzahl fortgesetzter Pläne.
+export fn resume_running_plans h
+    init_executor h
+    rows: db_query h "SELECT id FROM plans WHERE state = 'running'"
+    resumed: 0
+    for r in rows
+        res: resume_plan h (get r "id")
+        if get res "ok"
+            resumed: resumed + 1
+    resumed
 
 --! Haupt-Einstieg: leitet einen Plan ab (Template oder KI) und führt ihn aus.
 export fn execute_task h goal

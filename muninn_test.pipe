@@ -7,11 +7,12 @@ import "modules/swarm.pipe" as grm
 import "modules/executor.pipe" as exe
 import "modules/web.pipe" as web
 import "modules/mcp.pipe" as mcp
+import "modules/scheduler.pipe" as sched
 
 --! Regelklassifikation: Kategorien ohne KI.
 test "rule_classify erkennt 'merke/erinnere' als permanent"
     expect_eq (mem.rule_classify "Merke dir, dass ich Tee mag") "permanent" "merke -> permanent"
-    expect_eq (mem.rule_classify "Erinnere mich an den Zahnarzt") "permanent" "erinnere -> permanent"
+    expect_eq (mem.rule_classify "Erinnere mich an den Zahnarzt") "reminder" "erinnere -> reminder"
 
 test "rule_classify erkennt Aufgaben"
     expect_eq (mem.rule_classify "Erledige bitte das Reporting") "task" "erledige -> task"
@@ -563,3 +564,165 @@ test "parse_ddg extrahiert Titel und URLs"
     expect_eq (get (at r 0) "url") "https://example.com" "erste URL decodiert"
     expect_eq (get (at r 1) "title") "Zweiter Titel" "zweiter Titel"
     expect_eq (get (at r 1) "url") "https://example.org" "zweite URL decodiert"
+
+--! Scheduler (P4): Zeit-/Wiederholungslogik ist rein und deterministisch.
+--! Fester Referenz-Zeitpunkt: 2026-08-30 00:00:00 UTC = 1788048000.
+test "next_hhmm liefert heute 08:00, wenn jetzt noch davor"
+    due: sched.next_hhmm 8 0 1788048000 0
+    expect_eq due 1788076800 "2026-08-30 08:00:00 UTC"
+
+test "next_hhmm springt auf morgen, wenn die Zeit schon vorbei ist"
+    due: sched.next_hhmm 8 0 1788076800 0
+    expect_eq due 1788163200 "2026-08-31 08:00:00 UTC"
+
+test "next_hhmm respektiert einen Zeitzonen-Offset"
+    due: sched.next_hhmm 8 0 1788048000 7200
+    expect_eq due 1788069600 "08:00 lokal (UTC+2) = 06:00 UTC"
+
+test "parse_reminder_rule erkennt 'in N Minuten'"
+    r: sched.parse_reminder_rule "Erinnere mich in 5 Minuten an die Pause" 1000 0
+    expect_eq (get r "due") 1300 "1000 + 5*60"
+    expect_eq (get r "repeat") "" "einmalig"
+
+test "parse_reminder_rule erkennt 'in N Stunden'"
+    r: sched.parse_reminder_rule "Erinnere mich in 2 Stunden ans Meeting" 1000 0
+    expect_eq (get r "due") 8200 "1000 + 2*3600"
+
+test "parse_reminder_rule erkennt 'um HH:MM'"
+    r: sched.parse_reminder_rule "Erinnere mich um 8:30 an den Zahnarzt" 1788048000 0
+    expect_eq (get r "due") 1788078600 "2026-08-30 08:30:00 UTC"
+
+test "parse_reminder_rule erkennt 'morgen'"
+    r: sched.parse_reminder_rule "Erinnere mich morgen an den Bericht" 1000 0
+    expect_eq (get r "due") 87400 "1000 + 86400"
+
+test "parse_reminder_rule faellt auf 'in einer Stunde' zurueck"
+    r: sched.parse_reminder_rule "Erinnere mich an den Bericht" 1000 0
+    expect_eq (get r "due") 4600 "1000 + 3600"
+
+test "schedule/due/mark_fired: einmalige Aufgabe wird erledigt"
+    h: mem.init_db ":memory:"
+    sched.init_scheduler h
+    id: sched.schedule h "reminder" "42" "Test" 1000 ""
+    due: sched.due h 1000
+    expect_eq (len due) 1 "eine fällige Aufgabe"
+    expect_eq (get (at due 0) "kind") "reminder" "kind korrekt"
+    sched.mark_fired h id "" 1000
+    expect_eq (len (sched.due h 2000)) 0 "nach mark_fired nicht mehr fällig"
+    mem.close h
+
+test "schedule/due: erst nach Fälligkeit erscheint die Aufgabe"
+    h: mem.init_db ":memory:"
+    sched.init_scheduler h
+    sched.schedule h "reminder" "42" "Test" 5000 ""
+    expect_eq (len (sched.due h 4000)) 0 "noch nicht fällig"
+    expect_eq (len (sched.due h 5000)) 1 "jetzt fällig"
+    mem.close h
+
+test "mark_fired schiebt daily-Aufgabe auf den nächsten Tag"
+    h: mem.init_db ":memory:"
+    sched.init_scheduler h
+    id: sched.schedule h "briefing" "42" "Daily" 1000 "daily"
+    sched.mark_fired h id "daily" 1000
+    due: sched.due h 1000
+    expect_eq (len due) 0 "heute nicht mehr fällig"
+    due2: sched.due h 87400
+    expect_eq (len due2) 1 "morgen wieder fällig (1000 + 86400)"
+    mem.close h
+
+test "next_due_ms liefert Millisekunden bis zur nächsten Aufgabe (oder nil)"
+    h: mem.init_db ":memory:"
+    sched.init_scheduler h
+    expect_eq (sched.next_due_ms h 1000) nil "ohne Aufgaben nil"
+    sched.schedule h "reminder" "42" "Test" 15000 ""
+    expect_eq (sched.next_due_ms h 1000) 14000000 "14 s in ms"
+    mem.close h
+
+test "list und cancel verwalten offene Aufgaben eines Chats"
+    h: mem.init_db ":memory:"
+    sched.init_scheduler h
+    id1: sched.schedule h "reminder" "42" "A" 1000 ""
+    sched.schedule h "reminder" "43" "B" 1000 ""
+    expect_eq (len (sched.list h "42")) 1 "nur Chat 42"
+    sched.cancel h id1
+    expect_eq (len (sched.list h "42")) 0 "cancelled taucht nicht mehr auf"
+    mem.close h
+
+test "compose_briefing nennt Erinnerungen und offene Ziele"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "Der Nutzer liebt Espresso" "permanent" 4 "test" "x"
+    mem.add_goal h "Pipe lernen"
+    b: sched.compose_briefing h
+    expect_contains b "Guten Morgen" "Begruessung"
+    expect_contains b "Espresso" "wichtigste Erinnerung"
+    expect_contains b "Pipe lernen" "offenes Ziel"
+    mem.close h
+
+--! Executor-Resume (P4): unterbrochene Pläne ab Checkpoint fortsetzen.
+test "resume_plan setzt einen unterbrochenen Plan ab Checkpoint fort"
+    h: mem.init_db ":memory:"
+    exe.init_executor h
+    s0: {action: "store", content: "Schritt 0", kind: "permanent", importance: 2}
+    s1: {action: "store", content: "Schritt 1", kind: "permanent", importance: 2}
+    steps: [s0, s1]
+    db_exec h ("INSERT INTO plans (goal, steps, state, step_idx, result, created, updated) VALUES ('Test', '" ++ (mem.sql_escape (to_json steps)) ++ "', 'running', 1, '', 't', 't')")
+    pid: get (at (db_query h "SELECT max(id) AS mid FROM plans") 0) "mid"
+    r: exe.resume_plan h pid
+    expect_eq (get r "ok") true "resume ok"
+    expect_eq (get r "steps_done") 2 "beide Schritte erledigt"
+    expect_eq (mem.memory_count h) 1 "nur der verbleibende Schritt wurde ausgefuehrt"
+    st: exe.plan_state h pid
+    expect_eq (get st "state") "done" "Plan jetzt done"
+    mem.close h
+
+test "resume_running_plans setzt alle laufenden Pläne fort"
+    h: mem.init_db ":memory:"
+    exe.init_executor h
+    s0: {action: "store", content: "A", kind: "permanent", importance: 2}
+    s1: {action: "store", content: "B", kind: "permanent", importance: 2}
+    steps: [s0, s1]
+    db_exec h ("INSERT INTO plans (goal, steps, state, step_idx, result, created, updated) VALUES ('T', '" ++ (mem.sql_escape (to_json steps)) ++ "', 'running', 1, '', 't', 't')")
+    n: exe.resume_running_plans h
+    expect_eq n 1 "ein Plan fortgesetzt"
+    expect_eq (mem.memory_count h) 1 "ein Schritt ausgefuehrt"
+    mem.close h
+
+test "resume_plan auf abgeschlossenem Plan scheitert sauber"
+    h: mem.init_db ":memory:"
+    steps: exe.plan_template "permanent" "Merke Espresso"
+    r: exe.run_plan h "Merke Espresso" steps
+    res: exe.resume_plan h (get r "plan_id")
+    expect_eq (get res "ok") false "bereits done"
+    mem.close h
+
+--! Feedback-Lernen (P4): 👍/👎 passen die Importance gespeicherter Antworten an.
+test "adjust_by_content erhöht und senkt die Importance passender Erinnerungen"
+    h: mem.init_db ":memory:"
+    id: mem.add_memory h "Testinhalt" "fact" 3 "test" "x"
+    n: mem.adjust_by_content h "Testinhalt" 1
+    expect_eq n 1 "eine Erinnerung angepasst"
+    top: mem.top_memories h 1
+    expect_eq (get (at top 0) "importance") 4 "3 -> 4"
+    neg: -2
+    mem.adjust_by_content h "Testinhalt" neg
+    top2: mem.top_memories h 1
+    expect_eq (get (at top2 0) "importance") 2 "4 -> 2"
+    mem.close h
+
+test "adjust_by_content clampet auf 1..5 und findet keinen Treffer ohne Match"
+    h: mem.init_db ":memory:"
+    id: mem.add_memory h "Wichtig" "fact" 5 "test" "x"
+    mem.adjust_by_content h "Wichtig" 3
+    top: mem.top_memories h 1
+    expect_eq (get (at top 0) "importance") 5 "bleibt bei 5 (Clamp)"
+    expect_eq (mem.adjust_by_content h "nicht vorhanden" 1) 0 "kein Treffer"
+    mem.close h
+
+--! condense_fact (Fix): ohne KI fällt auf 300 Zeichen zurück statt den
+--! kompletten Text zu speichern.
+test "condense_fact kürzt ohne KI auf 300 Zeichen"
+    long: "0123456789012345678901234567890123456789"
+    long: long ++ long ++ long ++ long ++ long ++ long ++ long ++ long
+    expect_eq (len long) 320 "Ausgangstext 320 Zeichen"
+    out: mem.condense_fact long
+    expect_eq (len out) 300 "gekürzt auf 300"
