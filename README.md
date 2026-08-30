@@ -13,21 +13,36 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 ## Features
 
 - **Persistente Seele** — SQLite mit Erinnerungen, Wissensgraph (Entitäten/Relationen), Zielen und Verlauf.
-- **Hybride Suche (RAG)** — TF-IDF-Keyword-Scoring + semantische Embeddings.
-- **Inneres Gremium** — 4 Swarm-Agenten (`planer → faktenwaechter → kritiker → registrator`),
-  die Fakten gegen Gedächtnis **und** Web prüfen.
+- **Hybride Suche (RAG)** — TF-IDF-Keyword-Scoring + semantische Embeddings; faellt bei leerem
+  Ergebnis auf die wichtigsten dauerhaften Fakten zurueck (Fragen wie „Wer bin ich?" bestehen
+  sonst nur aus Stoppwoertern und liefern garantiert 0 Treffer).
+- **Inneres Gremium, EIN Pfad statt Klassifikations-Toepfe** — jede freie Nachricht laeuft durch
+  `planer → faktenwaechter → kritiker → registrator`, mit vollem Gespraechsverlauf und allen
+  Werkzeugen. Nur echte, eindeutige Befehle (`/remind`, `/search`, Slash-Commands) bleiben
+  deterministische Fast-Paths.
+- **P5 — automatische Werkzeug-Spezialisierung** — jeder verbundene MCP-Server bekommt seinen
+  eigenen, fokussierten `werkzeug_<alias>`-Agenten statt eines Alleskönners mit allen
+  Werkzeugen — skaliert von selbst mit jedem neuen Server.
+- **Ehrlichkeits-Regeln** — das Gremium unterscheidet KI-Recherche-Ergebnisse von echten
+  Nutzeraussagen (keine erfundenen „Interessen" aus Recherche-Nebenprodukten), erfindet keine
+  Aktionen bei vagen Anfragen, und beantwortet Fragen zu eigenen Werkzeugen aus der echten,
+  aktuellen Werkzeugliste statt per Websuche.
 - **Lernen aus dem Web** — neue Erkenntnisse werden dauerhaft **mit Quellen-URL** gespeichert und später zitiert.
-- **Autonomer Executor** — Aufgaben werden als Pläne mit Checkpoints und Feedback-Loop ausgeführt.
-- **Proaktivität (P4)** — Scheduler im Bot-Loop: Erinnerungen („Erinnere mich …"),
-  tägliches Morgen-Briefing, automatisches Fortsetzen unterbrochener Pläne, 👍/👎-Feedback-Lernen.
+- **Proaktivität (P4)** — Scheduler im Bot-Loop: Erinnerungen („Erinnere mich …", deterministischer
+  Pfad — keine KI-Bestätigung ohne tatsächliche Terminierung), tägliches Morgen-Briefing,
+  automatisches Fortsetzen unterbrochener Pläne, 👍/👎-Feedback-Lernen.
 - **Web-Recherche** — DuckDuckGo + Wikipedia, Seiten-Fetch und Zusammenfassung (kein API-Key nötig).
-- **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, Browser, Docker, ...) per
-  Model Context Protocol anbinden; laufen unter einem Sandbox-Profil mit eng gefasster
-  exec-Whitelist, jeder Server bekommt automatisch einen eigenen Spezial-Agenten im Gremium.
-- **Autonome MCP-Auswahl** — optional konfigurierte, vertrauenswürdige MCP-Server werden
-  bei passendem Aufgabenbedarf anhand von Keywords automatisch verbunden und dem
-  Executor/Gremium verfügbar gemacht (`MCP_AUTO_SERVERS`).
-- **Telegram-Bot** — Long-Polling, Inline-Buttons, Befehle.
+- **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, Browser, Docker, Wetter,
+  Dokumentations-Lookup, ...) per Model Context Protocol anbinden; laufen unter einem
+  Sandbox-Profil mit eng gefasster exec-Whitelist.
+- **Eingeschränkte Docker-Erweiterung** — Image ziehen + Container anlegen, aber strukturell
+  ohne Volume-Mounts/`--privileged`, Ports standardmäßig nur auf `127.0.0.1` (siehe
+  [Sicherheit](#sicherheit)).
+- **Kosten-Tracking** — KI-Betriebskosten werden pro Session in der Seele protokolliert;
+  `/costs` liefert eine KI-zusammengefasste (aber zahlenmäßig deterministisch berechnete)
+  Übersicht, das Dashboard hat einen eigenen Kosten-Tab.
+- **Telegram-Bot** — Long-Polling, Inline-Buttons, natives Befehlsmenü (`/`-Aufklapp-Menü über
+  `setMyCommands`), Foto-Verständnis (`ai_vision`).
 - **Deterministische Tests** — Kernlogik ohne KI/Netz testbar.
 
 ## Stand der Entwicklung
@@ -41,6 +56,9 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 | Web-Recherche + Lernen + Inline-Buttons | ✅ |
 | P1 — MCP-Tool-Ökosystem + Sandboxing | ✅ |
 | P4 — Proaktivität (Scheduler, Erinnerungen, Briefing) | ✅ |
+| P5 — Automatische Werkzeug-Spezialisierung + Ehrlichkeits-Regeln | ✅ |
+| Kosten-Tracking (`/costs`, Dashboard-Tab) | ✅ |
+| Eingeschränkte Docker-Erweiterung (Image ziehen, Container anlegen) | ✅ |
 | M5 — Discord | ⏳ geplant |
 
 Weitere Schritte: [Plan.md](Plan.md)
@@ -52,8 +70,11 @@ Weitere Schritte: [Plan.md](Plan.md)
 ### Voraussetzungen
 
 - Ein Pipe-Binary mit den Builtins `tool_call` (P1) und `file_lock`/`file_unlock`
-  (P3) — Stand: noch nicht in einem offiziellen Release-Tag, aber committed und
-  nach `origin/master` gepusht im [`pipe`](https://github.com/MachuraHarry/pipe)-Repo.
+  (P3), sowie dem Fix für den `arguments`-`omitempty`-Bug im MCP-Client (behebt
+  Tool-Aufrufe an zod-basierte MCP-Server, die ein leeres `arguments`-Feld statt
+  eines fehlenden erwarten — betraf z.B. `mcp-docker-server`/`time-mcp`) — Stand:
+  noch nicht in einem offiziellen Release-Tag, aber committed und nach
+  `origin/master` gepusht im [`pipe`](https://github.com/MachuraHarry/pipe)-Repo.
 - Die Pipe-Module `sqlite`, `pipe-test` und `pipe-web`:
 
 ```bash
@@ -115,6 +136,10 @@ pipe -test
 
 ## Bedienung (Telegram)
 
+Alle Befehle sind zusätzlich über Telegrams natives `/`-Aufklapp-Menü sichtbar
+(`setMyCommands`, einmalig beim Start registriert) — auch über den Menü-Button
+neben dem Eingabefeld.
+
 ### Befehle
 
 | Befehl | Beschreibung |
@@ -122,6 +147,7 @@ pipe -test
 | `/start` | Begrüßung |
 | `/help` | alle Befehle |
 | `/status` | Zustand (Erinnerungen, Provider, Gremium, Executor) |
+| `/costs` | KI-Betriebskosten zusammengefasst (Sessions, Tokens, $) — KI fasst zusammen, Zahlen kommen deterministisch aus der Seele |
 | `/list` | deine wichtigsten Erinnerungen |
 | `/search <begriff>` | Web-Recherche mit Quellen |
 | `/reset` | Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen) |
@@ -134,14 +160,23 @@ pipe -test
 
 ### Natürliche Sprache
 
+Nur wenige, eindeutige Muster laufen als deterministischer Fast-Path direkt in
+`muninn.pipe` (ohne KI-Entscheidung dazwischen):
+
 | Eingabe | Wirkung |
 |---------|---------|
-| „Merke dir, dass …" | wird dauerhaft gespeichert |
-| „Erinnere mich …" | plant eine Erinnerung (Scheduler, P4) |
-| „Erledige …" / „Mache …" | autonomer Executor führt einen Plan aus |
-| „Mein Ziel ist …" | legt ein Ziel an |
-| „Suche …" / „Recherchiere …" / „Finde …" | Web-Recherche |
-| Frage („…?") | Gremium beantwortet fundiert über Gedächtnis + Web |
+| „Erinnere mich …" | plant eine Erinnerung (deterministisch, wie `/remind` — bewusst nicht dem Gremium überlassen, siehe Architektur → Gremium) |
+| „Suche …" / „Recherchiere …" / „Finde …" | Web-Recherche (wie `/search`) |
+
+**Alles andere** — „Merke dir …", „Erledige …", Fragen, beiläufiger Small Talk,
+Anfragen an angebundene Werkzeuge (Dateisystem, Browser, Docker, …) — läuft
+durch **einen** gemeinsamen Pfad: das Gremium, mit vollem Gesprächsverlauf und
+allen Werkzeugen. Es entscheidet selbst pro Nachricht, ob es merkt, eine
+Erinnerung plant (`erinnerung_planen`-Werkzeug für implizite Fälle wie „Ich
+habe morgen einen Termin …"), recherchiert, ein Werkzeug nutzt oder einfach
+antwortet — statt einer vorab-Klassifikation in feste Töpfe (siehe
+[Architektur → Inneres Gremium](#inneres-gremium-swarmpipe) für die
+Begründung).
 
 Antworten tragen **Inline-Buttons**: `💾 Merken` (in die Seele speichern) und
 `🔍 Vertiefen` (weiter recherchieren).
@@ -173,9 +208,11 @@ System-Schrift statt Google-Fonts, keine Gradient-Text-Überschriften, kein
   Weg zur echten Verifikation statt bloßer CSS-Vermutung.
 
 - **Chat** — dieselben Befehle wie bei Telegram (`/status`, `/graph <Name>`,
-  `/learn <URL>`, `/reset`, `/consolidate`) plus natürliche Sprache. Eigene,
-  bewusst schlanke Kommando-Weiche (`dashboard_reply`) statt Wiederverwendung
-  von Telegrams `handle_message` — siehe Architektur unten.
+  `/learn <URL>`, `/reset`, `/consolidate`) plus natürliche Sprache über
+  denselben Gremium-Pfad wie Telegram. Eigene, bewusst schlanke Kommando-Weiche
+  (`dashboard_reply`) statt Wiederverwendung von Telegrams `handle_message`
+  (Telegram-spezifisches Verhalten wie Inline-Buttons/„typing"-Status würde
+  sonst mit rein) — siehe Architektur unten.
 - **Erinnerungen** — durchsuchen (Stichwort + Art-Filter), Importance direkt
   anpassen (▲/▼), löschen.
 - **Ziele** — Übersicht offener/erledigter Ziele, per Klick umschalten.
@@ -183,6 +220,7 @@ System-Schrift statt Google-Fonts, keine Gradient-Text-Überschriften, kein
 - **Aktivität** — jüngste Ereignisse (klassifizierte Nachrichten) und Executor-Pläne
   mit Status (offen/erledigt/fehlgeschlagen).
 - **Werkzeuge** — alle registrierten (lokalen + per MCP gebrückten) Tools.
+- **Kosten** — dieselbe Zusammenfassung wie `/costs`, als eigener Tab (Gesamt + pro Session).
 - **Status-Leiste** — Erinnerungen, Entitäten/Relationen, Werkzeuge live.
 
 Mit `DEEPSEEK_API_KEY` konfiguriert nutzt der Dashboard-Chat dieselbe KI wie
@@ -224,6 +262,7 @@ modules/web.pipe        Recherche: web_lookup, web_search_full, web_fetch, resea
 modules/mcp.pipe        MCP-Tool-Ökosystem: Server-Konfig, exec-Whitelist, Verbindungsaufbau
 modules/dashboard.pipe  Web-Dashboard (P3): pipe-web-Routen, HTML/CSS/JS, eigene Chat-Weiche
 modules/scheduler.pipe  Proaktivität (P4): geplante Erinnerungen, Briefing, Plan-Resume-Tick
+modules/docker_tools.pipe  Eingeschränkte Docker-Erweiterung: Image ziehen, Container anlegen
 muninn_test.pipe        deterministische Tests
 ```
 
@@ -253,8 +292,10 @@ Kompromiss gegenüber stillem Datenverlust.
 
 Alles Gedächtnis liegt in `muninn.db`. Die Datenbank wird pro Zugriff (Polling-
 Zyklus, Dashboard-Request, Konsolidierungslauf) über `open_locked`/`close_locked`
-geöffnet, verarbeitet und persistiert. Eingehende Nachrichten werden klassifiziert
-(KI mit deterministischem Regel-Fallback) und verdichtet, bevor sie gespeichert werden.
+geöffnet, verarbeitet und persistiert. Was das Gremium als dauerhaft merkenswert
+einstuft, wird über `merken`/`merken_quelle` verdichtet gespeichert (siehe
+Architektur → Inneres Gremium) — es gibt keine separate Vorab-Klassifikation
+mehr, die das für jede Nachricht pauschal entscheidet.
 
 ### Wissen & RAG (`memory.pipe`)
 
@@ -318,31 +359,74 @@ Ein periodischer Aufräum-/Verdichtungsjob, ausführbar per `pipe muninn.pipe co
 
 ### Inneres Gremium (`swarm.pipe`)
 
-Vier Swarm-Agenten (`ai_swarm`) verfeinern eine Antwort per Handoff:
+**Ein Pfad statt Klassifikations-Töpfe.** Ursprünglich klassifizierte Muninn jede
+Nachricht vorab (regelbasiert + ein kontextfreier KI-Aufruf) in
+`permanent`/`reminder`/`task`/`goal`/`fleeting`/`question` und verzweigte in sechs
+isolierte, größtenteils werkzeuglose Handler. Das führte zu widersprüchlichem
+Verhalten bei identischem Text (je nachdem, welchen Topf die Klassifikation traf)
+und einem blind JSON-Schritte erfindenden Task-Executor ohne jeden Kontext. Seit
+dem P5-Umbau läuft **jede freie Nachricht durch das Gremium**, mit vollem
+Gesprächsverlauf und Zugriff auf alle Werkzeuge:
 
 `planer` → `faktenwaechter` → `kritiker` → `registrator`
 
-- **planer** analysiert und delegiert.
-- **faktenwaechter** belegt Aussagen über `erinnerungen_suchen` (RAG), `web_search` und `web_fetch`.
+- **planer** analysiert und delegiert — an `faktenwaechter` (Fakten-/Gedächtnis-/
+  Meta-Fragen), an den passenden `werkzeug_<alias>`-Spezialisten (siehe P5 unten)
+  oder direkt an `kritiker`.
+- **faktenwaechter** belegt Aussagen über `erinnerungen_suchen` (RAG), `web_search`
+  und `web_fetch`.
 - **kritiker** prüft auf Lücken/Widersprüche.
-- **registrator** schreibt Erkenntnisse über `merken` bzw. `merken_quelle` (mit Quellen-URL) zurück.
+- **registrator** schreibt Erkenntnisse über `merken`/`merken_quelle` zurück, plant
+  bei Bedarf eine Erinnerung (`erinnerung_planen`) und verfasst die Endantwort.
 
-Die Tools erhalten den DB-Handle über einen geteilten, mutablen Modul-State.
+Ein deterministischer Backstop in `run_gremium` fängt den Fall ab, dass ein Agent
+sein Handoff-Werkzeug nicht aufruft und der Pfad nicht beim `registrator` endet
+(sonst würden rohe interne Kommentare durchrutschen) — Prompt-Regeln allein
+garantieren das bei einem LLM nicht zuverlässig genug.
+
+**P5 — automatische Werkzeug-Spezialisierung.** `mcp.discovered_tools_by_source`
+gruppiert alle per MCP verbundenen Werkzeuge nach Herkunfts-Server; `init_gremium`
+erzeugt daraus automatisch **einen eigenen Agenten pro Server**
+(`werkzeug_filesystem`, `werkzeug_docker`, `werkzeug_browser`, …) statt eines
+Alleskönners mit einer riesigen, flachen Werkzeugliste — das hält die
+Tool-Auswahl der KI treffsicher und skaliert ohne Code-Änderung mit jedem neuen
+MCP-Server.
+
+**Ehrlichkeits-Regeln** (System-Prompt-Bausteine, in `swarm.pipe` als eigene
+Konstanten):
+
+- `HONESTY_RULE` — bei zu vagen Anfragen ("mach mal irgendwas") nachfragen statt
+  eine Aktion zu erfinden oder zu behaupten, etwas getan zu haben.
+- `MEMORY_HONESTY_RULE` — `erinnerungen_suchen`-Treffer, die keine echten
+  Nutzeraussagen sind (alte Recherchen, Task-Protokolle), werden von
+  `retrieve_context` markiert; das Gremium darf daraus keine Interessen/Meinungen
+  des Nutzers konstruieren.
+- `TOOL_DISCIPLINE_RULE`/`tools_desc` — Fragen zu Muninns eigenen Fähigkeiten
+  werden aus der echten, aktuell verbundenen Werkzeugliste beantwortet, nie per
+  Websuche (das Internet weiß nichts über diese konkrete Instanz).
+
+Die Tools erhalten DB-Handle, Chat-ID und Zeitzone über einen geteilten, mutablen
+Modul-State (`STATE`).
 
 ### Autonomer Executor (`executor.pipe`)
 
-Aufgaben (`task`/`goal`) werden als **Pläne** ausgeführt:
+Plan-Infrastruktur mit Checkpoints — heute primär für **P4s langlaufende,
+unterbrechbare Ziele** genutzt (`resume_plan`/`resume_running_plans`, vom
+`goal_tick`-Scheduler periodisch angestoßen), **nicht mehr** als blinder
+Auto-Handler für casual formulierte "Erledige …"-Nachrichten (das war genau der
+kontextfreie Task-Planer, der im P5-Umbau durch das Gremium ersetzt wurde, siehe
+oben):
 
 - **Plan-Bibliothek** mit deterministischen Templates.
 - **Schritt-Dispatcher** `exec_step` mit validierenden Aktionen
-  (`store`/`graph`/`goal`/`retrieve`/`search`/`fetch`/`research`) — keine rohen Shell-/Datei-Builtins.
+  (`store`/`graph`/`goal`/`retrieve`/`search`/`fetch`/`research`/`mcp_call`) —
+  keine rohen Shell-/Datei-Builtins.
 - **Checkpoints** in SQLite (`plans`-Tabelle), resumefähig.
 - **Feedback-Loop**: bei Fehler wird der Plan revidiert (KI) bzw. der fehlgeschlagene
   Schritt gestrichen (deterministischer Fallback) und erneut versucht.
 - **`mcp_call`-Aktion** (P1): ruft ein per MCP angebundenes (oder lokales) Werkzeug direkt
   per Name auf — deterministisch, über den Pipe-Builtin `tool_call`, ohne dass dafür eine
-  KI-Tool-Call-Schleife nötig wäre. Damit können auch autonome Pläne (nicht nur das
-  Gremium) MCP-Werkzeuge nutzen.
+  KI-Tool-Call-Schleife nötig wäre.
 
 ### Proaktivität (`scheduler.pipe`, P4)
 
@@ -380,9 +464,11 @@ Briefing-/Erinnerungszeit, siehe `.env.example`.
 
 ### MCP-Tool-Ökosystem (`mcp.pipe`)
 
-Externe Werkzeuge (Dateisystem, GitHub, Datenbanken, ...) werden per
+Externe Werkzeuge (Dateisystem, Browser, Docker, ...) werden per
 [Model Context Protocol](https://modelcontextprotocol.io) eingebunden, konfiguriert über
-`MCP_SERVERS` (JSON-Liste in `.env`):
+`MCP_SERVERS` und/oder `MCP_AUTO_SERVERS` (beide JSON-Listen in `.env`, werden
+zusammengeführt und beim Start gemeinsam verbunden — `MCP_AUTO_SERVERS` trägt
+zusätzlich `keywords` für spätere On-Demand-Zuordnung im Executor):
 
 - **`parse_mcp_config`** parst die Konfiguration robust (ungültiges JSON → `[]`, kein Absturz).
 - **`exec_whitelist_for`** extrahiert die Kommando-Basenamen aller `stdio`-Server für die
@@ -397,11 +483,81 @@ Externe Werkzeuge (Dateisystem, GitHub, Datenbanken, ...) werden per
 Ist kein Server konfiguriert, bleibt `exec` im Sandbox-Profil deaktiviert — Muninn läuft
 unverändert wie zuvor.
 
+**Aktuell konfiguriert** (`.env.example`, alle ohne API-Key nutzbar):
+
+| Alias | Server | Bringt |
+|---|---|---|
+| `filesystem` | `@modelcontextprotocol/server-filesystem` | Dateien im `mcp_data`-Ordner |
+| `memory` | `@modelcontextprotocol/server-memory` | Wissensgraph |
+| `denkwerkzeug` | `@modelcontextprotocol/server-sequential-thinking` | strukturiertes Durchdenken komplexer Anfragen |
+| `browser` | `@playwright/mcp` (Microsoft, offiziell) | echte Web-Interaktion — navigieren, klicken, Formulare |
+| `doku` | `@upstash/context7-mcp` | aktuelle Bibliotheks-/Framework-Dokumentation |
+| `wetter` | `@dangahagan/weather-mcp` | Live-Wetterdaten (NOAA/Open-Meteo) |
+| `docker` | `mcp-docker-server` | bestehende Container/Images verwalten (kein Erstellen — siehe unten) |
+| `zeit` | `time-mcp` | Uhrzeit/Zeitzonen-Umrechnung |
+
+### Eingeschränkte Docker-Erweiterung (`docker_tools.pipe`)
+
+Der MCP-Server `docker` verwaltet bewusst nur **bestehende** Container/Images
+(kein `docker pull`/`docker run`). Volle Docker-MCP-Server mit Image-Pull und
+Container-Erstellung existieren, kommen aber mit expliziter Warnung ihrer Autoren:
+„inherently unsafe" — Host-Volume-Mounts in einem Container sind faktisch
+Root-Zugriff auf den Host. `docker_tools.pipe` deckt den konkreten Bedarf
+(„Webserver-Container aufsetzen") ab, ohne diese Fähigkeit:
+
+- **Kein Parameter für Volume-Mounts im Tool-Schema überhaupt** — strukturell
+  nicht anfragbar, nicht nur unerwünscht per Prompt-Bitte.
+- Fester Kommando-Template ohne `--privileged`/`--network=host`, keine frei
+  wählbaren zusätzlichen Docker-Flags.
+- Port-Bindung standardmäßig nur auf `127.0.0.1`, öffentlich nur mit explizitem
+  `public='true'`.
+- Image-/Container-Name und Ports werden gegen strikt verankerte Regex (`^...$`)
+  geprüft, bevor sie in `exec()` eingesetzt werden — verhindert Argument-Injection
+  (z.B. ein „Image-Name" wie `nginx --privileged`, der sonst als zusätzliches
+  Docker-Flag durchgereicht würde). `exec()` selbst tokenisiert über
+  `splitShellWords` und ruft direkt auf (kein `sh -c`), die Regex-Prüfung ist
+  trotzdem nötig für die Argument-Ebene.
+
+Nur der `werkzeug_docker`-Spezial-Agent bekommt diese beiden zusätzlichen
+lokalen Werkzeuge neben den MCP-Werkzeugen aus `docker`.
+
+### Kosten-Tracking (`memory.pipe`, `muninn.pipe`)
+
+`ai_cost`/`ai_tokens` sind reine In-Prozess-Zähler über die Laufzeit — nichts
+davon übersteht einen Neustart oder ist historisch auswertbar. Die `cost_log`-
+Tabelle persistiert periodische Schnappschüsse (nur wenn sich seit dem letzten
+Zyklus etwas geändert hat, kein Log pro leerem Poll-Zyklus) unter einer
+fortlaufenden `session_id` — **ein Prozesslauf = eine Session**, da die Zähler
+selbst bei jedem Neustart wieder bei 0 anfangen. `mem.cost_summary` aggregiert
+in Pipe selbst (bewusst keine SQL-`GROUP BY`/Aggregatfunktionen, siehe
+Sicherheits-/Zuverlässigkeits-Hinweis zum reinen-Pipe-`sqlite`-Modul weiter
+unten): pro Session wird das Maximum genommen (die Werte sind pro Session
+monoton steigende Zähler), über Sessions hinweg summiert.
+
+`/costs` (Telegram) und der „Kosten"-Tab (Dashboard) zeigen dieselbe Übersicht.
+Die Zahlen selbst kommen **deterministisch** aus `cost_summary` — die KI
+bekommt für `/costs` nur die Aufgabe, diese fertigen Zahlen lesbar
+zusammenzufassen, mit expliziter Anweisung, nichts selbst nachzurechnen oder zu
+erfinden (Halluzinationsrisiko bei den Zahlen selbst ausgeschlossen).
+
 ### Telegram (`telegram.pipe`)
 
 Reiner HTTP-Client über `http_request`/`to_json`/`parse_json` — kein WebSocket nötig.
 Der Token wird **nie** im Code oder Repo abgelegt, sondern aus der Umgebung oder der
 gitignorierten `.env` gelesen.
+
+- **Natives Befehlsmenü**: `tel_set_my_commands` (`setMyCommands`) registriert alle
+  Befehle samt Beschreibung einmalig beim Start — Telegram speichert das
+  serverseitig, sichtbar im `/`-Aufklapp-Menü und über den Menü-Button.
+- **Markdown-Normalisierung**: LLM-Ausgaben sind durchgehend CommonMark-Stil
+  (`**fett**`), Telegrams `Markdown`-Parse-Mode kennt aber nur einfache
+  Sternchen. `tg_markdown` normalisiert vor dem Senden; scheitert der Versand
+  trotzdem (z.B. unausgewogene Entities), wird automatisch als Klartext
+  nachgesendet, damit nie eine Antwort wegen eines Formatierungsfehlers
+  verlorengeht.
+- **Fotos**: `ai_vision` beantwortet Bildunterschriften/Standardfragen zu
+  geschickten Fotos; DeepSeeks Standardmodell kann keine Bilder, `handle_photo`
+  schaltet dafür kurz auf ein Vision-Modell um und danach zuverlässig zurück.
 
 ---
 
@@ -414,10 +570,22 @@ gitignorierten `.env` gelesen.
 - **Keine rohen Shell-/Datei-Builtins für die KI** — nur registrierte, validierende
   Werkzeuge (Lehre aus der Sandbox-Audit-Reihe von Pipe, Runde 11).
 - **Sandbox-Profil `muninn`** (aktiviert in `muninn.pipe`): `exec` ist standardmäßig aus
-  und wird nur eingeschaltet, wenn `MCP_SERVERS` mindestens einen `stdio`-Server nennt —
-  dann ausschließlich für dessen Kommandos (`exec_whitelist`). `audit_log` protokolliert
+  und wird nur eingeschaltet, wenn `MCP_SERVERS`/`MCP_AUTO_SERVERS` mindestens einen
+  `stdio`-Server nennt — dann ausschließlich für dessen Kommandos (`exec_whitelist`).
+  `docker` steht zusätzlich fest auf der Whitelist (für `docker_tools.pipe`, siehe MCP-
+  Abschnitt → Eingeschränkte Docker-Erweiterung — dort auch die Argument-Injection-
+  Absicherung per verankerter Regex vor jedem `exec()`-Aufruf). `audit_log` protokolliert
   alle sicherheitsrelevanten Ereignisse (HTTP, KI-Aufrufe, Tool-Calls); `max_tool_calls`
   begrenzt Tool-Ausführungen pro Gremium-Lauf gegen Endlosschleifen.
+- **Das reine-Pipe-`sqlite`-Modul ist kein echtes SQLite** — sein Ausdrucks-Auswerter
+  kennt nur `count`/`sum`/`avg`/`min`/`max` als SQL-Funktionen; andere (`lower()`,
+  `trim()`, `datetime('now')`, ...) werden in `WHERE`-Klauseln und Ausdrücken
+  **stillschweigend ignoriert** (geben ihr Argument unverändert zurück, statt einen
+  Fehler zu werfen). Betraf u.a. die Dedup-Prüfung in `add_memory` (musste auf
+  Pipe-seitige Normalisierung statt SQL umgestellt werden) und ist der Grund, warum
+  `mem.cost_summary` bewusst in Pipe selbst aggregiert statt SQL `GROUP BY`/`MAX` zu
+  vertrauen. Bei neuen `db_query`/`db_exec`-Aufrufen mit SQL-Funktionen: erst gegen eine
+  Testdatenbank verifizieren, nicht blind vertrauen.
 - **Web-Dashboard**: standardmäßig nur an `127.0.0.1` gebunden (`DASHBOARD_BIND`),
   nicht an `0.0.0.0` — es hat keinen echten Auth-Mechanismus, nur ein optionales
   `DASHBOARD_TOKEN` (Query-Param/Header). Für eine Bereitstellung über localhost

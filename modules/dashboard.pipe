@@ -219,6 +219,7 @@ body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px
 <button class="nav-item" data-panel="graph" data-title="Wissensgraph"><span class="ic">◇</span><span>Wissensgraph</span></button>
 <button class="nav-item" data-panel="activity" data-title="Aktivität"><span class="ic">≡</span><span>Aktivität</span></button>
 <button class="nav-item" data-panel="tools" data-title="Werkzeuge"><span class="ic">⚙</span><span>Werkzeuge</span></button>
+<button class="nav-item" data-panel="costs" data-title="Kosten"><span class="ic">$</span><span>Kosten</span></button>
 </nav>
 <div class="sidebar-foot"><span class="dot-live"></span><span>verbunden</span></div>
 </aside>
@@ -282,6 +283,12 @@ body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px
 <div id="tools-list"></div>
 </section>
 
+<section class="panel" id="panel-costs">
+<div id="costs-summary" class="subhead"></div>
+<div class="subhead">Sessions</div>
+<div id="costs-list"></div>
+</section>
+
 </div>
 </div>
 </div>
@@ -325,7 +332,8 @@ var panelLoaders = {
   goals: loadGoals,
   graph: function(){},
   activity: loadActivity,
-  tools: loadTools
+  tools: loadTools,
+  costs: loadCosts
 };
 
 document.getElementById('navlist').addEventListener('click', function(e){
@@ -486,6 +494,28 @@ function loadTools(){
   });
 }
 
+function costItemHtml(s){
+  return '<div class="row-item acc-accent"><div class="row-main">' +
+    '<div class="txt">Session ' + escapeHtml(s.session_id) + ' — $' + escapeHtml(s.cost_usd) + '</div>' +
+    '<div class="row-meta"><span>' + escapeHtml(s.tokens) + ' Tokens · ' + escapeHtml(s.calls) + ' Aufrufe · ' + escapeHtml(s.cache_hits) + ' Cache-Treffer</span>' +
+    '<span>' + escapeHtml(s.first_ts) + ' bis ' + escapeHtml(s.last_ts) + '</span></div>' +
+    '</div></div>';
+}
+function loadCosts(){
+  apiGet('api/costs').then(function(d){
+    var sumEl = document.getElementById('costs-summary');
+    var listEl = document.getElementById('costs-list');
+    var sessions = d.sessions || [];
+    if(sessions.length === 0){
+      sumEl.textContent = 'Noch keine Kosten aufgezeichnet.';
+      listEl.innerHTML = '';
+      return;
+    }
+    sumEl.innerHTML = '<b>$' + escapeHtml(d.total_cost_usd) + '</b> gesamt über ' + escapeHtml(d.session_count) + ' Sessions · ' + escapeHtml(d.total_tokens) + ' Tokens · ' + escapeHtml(d.total_calls) + ' KI-Aufrufe';
+    listEl.innerHTML = sessions.map(costItemHtml).join('');
+  });
+}
+
 loadStatus();
 </script>
 </body>
@@ -591,6 +621,12 @@ fn tools_handler req
     catch e
         tools: []
     no_cache (ok {tools: tools})
+
+fn costs_handler req
+    hl: mem.open_locked nil
+    s: mem.cost_summary (get hl "h")
+    mem.close_locked hl
+    no_cache (ok s)
 
 fn learn_handler req
     body: json_body req
@@ -721,6 +757,7 @@ export fn start bind token
     route_get a "/api/graph" graph_handler
     route_get a "/api/activity" activity_handler
     route_get a "/api/tools" tools_handler
+    route_get a "/api/costs" costs_handler
     post a "/api/learn" learn_handler
     print ("Muninn-Dashboard: http://" ++ bind ++ "/")
     if token != nil && token != ""
