@@ -265,3 +265,8 @@ export fn plan_state h pid
         at rows 0
     else
         nil
+
+--! Die n juengsten Plaene (Web-Dashboard P3).
+export fn recent_plans h limit
+    init_executor h
+    db_query h ("SELECT id, goal, state, step_idx, updated FROM plans ORDER BY id DESC LIMIT " ++ (to_str limit))

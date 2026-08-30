@@ -139,16 +139,28 @@ Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung f
 
 - ✅ **Web-Dashboard** via `pipe-web`: `modules/dashboard.pipe`, aktivierbar per
   `pipe muninn.pipe web` (neuer CLI-Modus, analog zu `once`/`consolidate`).
+  Sidebar-Navigation (Chat/Erinnerungen/Ziele/Wissensgraph/Aktivität/Werkzeuge),
+  eine einzige selbstenthaltene HTML-Seite mit Vanilla-JS (kein Build-Schritt,
+  keine Frontend-Abhaengigkeit). **Design**: NUR die Farbpalette 1:1 von
+  [pipe-lang.com](https://pipe-lang.com) übernommen (dunkles Theme, lila
+  Akzente) — explizit gewünscht; Layout/Komponenten/Typografie bewusst
+  eigenstaendig (Sidebar statt Scroll-Seite, System-Schrift statt der
+  Google-Font-Kombination der Seite, keine Gradient-Text-Ueberschriften, kein
+  "Terminal-Fenster"-Chat mit Ampel-Punkten — das erste Design hatte zu viele
+  dieser Seiten-spezifischen Stilmittel uebernommen, nicht nur die Farben).
   Chat (eigene, bewusst duenne Kommando-Weiche `dashboard_reply` — siehe
-  Modul-Kommentar zur Abgrenzung von Telegrams `handle_message`), Erinnerungen
-  durchsuchen/verwalten (`/api/memories`, Loeschen), Wissensgraph abfragen
-  (`/api/graph`), URL-Ingestion (`/api/learn`), Status (`/api/status`).
-  Design im Stil von [pipe-lang.com](https://pipe-lang.com) (dunkles Theme,
-  lila Akzentfarben, JetBrains Mono/Inter) — als eine einzige selbstenthaltene
-  HTML-Seite mit Vanilla-JS (kein Build-Schritt, keine Frontend-Abhaengigkeit).
-  Standardmaessig nur an `127.0.0.1` gebunden (kein `0.0.0.0`); optional per
-  `DASHBOARD_TOKEN` zusaetzlich abgesichert (Query-Param/Header — kein
-  vollwertiger Auth-Mechanismus, siehe `.env.example`).
+  Modul-Kommentar zur Abgrenzung von Telegrams `handle_message`); Erinnerungen
+  durchsuchen/filtern (Stichwort + Art), Importance anpassen, loeschen; Ziele
+  auflisten und Status umschalten (`mem.list_goals`/`set_goal_status`, neu);
+  Wissensgraph abfragen; Aktivitaet (Ereignisse + Executor-Plaene, neu:
+  `exe.recent_plans`); Werkzeuge (alle registrierten lokalen + MCP-Tools);
+  Status live. Standardmaessig nur an `127.0.0.1` gebunden (kein `0.0.0.0`);
+  optional per `DASHBOARD_TOKEN` zusaetzlich abgesichert (Query-Param/Header —
+  kein vollwertiger Auth-Mechanismus, siehe `.env.example`).
+  **Deployment**: hinter einem bestehenden Apache-Reverse-Proxy unter einem
+  Unterpfad live geschaltet (`https://<domain>/muninn/`) — Frontend nutzt
+  ausschliesslich relative Pfade (`api/...`, kein `/api/...`), damit es unter
+  jedem Unterpfad funktioniert, siehe README → Hinter einem Reverse-Proxy.
   **"Einstellungen"** (aus der urspruenglichen Bullet-Liste) ist bewusst noch
   nicht gebaut — es gibt aktuell keine Laufzeit-Einstellung, die sich lohnen
   wuerde, ohne die bestehende `.env`-Konfiguration zu duplizieren.

@@ -180,11 +180,21 @@ export fn active_thread_count h
 --! wichtigsten. Mit q: einfache LIKE-Stichwortsuche ueber content, neueste
 --! zuerst (kein Embedding-Ranking — fuer eine schnelle Verwaltungsliste reicht
 --! das; fuer inhaltliche Fragen bleibt retrieve_context zustaendig).
-export fn list_memories h q limit
-    if q == nil || q == ""
-        db_query h ("SELECT id, content, kind, importance, ts, tags FROM memories ORDER BY importance DESC, id DESC LIMIT " ++ (to_str limit))
-    else
-        db_query h ("SELECT id, content, kind, importance, ts, tags FROM memories WHERE content LIKE '%" ++ (sql_escape q) ++ "%' ORDER BY id DESC LIMIT " ++ (to_str limit))
+--! q: Stichwortfilter (LIKE ueber content) oder nil/"". kind: exakter kind-Filter
+--! oder nil/"". Beide kombinierbar.
+export fn list_memories h q kind limit
+    conds: []
+    if q != nil && q != ""
+        push conds ("content LIKE '%" ++ (sql_escape q) ++ "%'")
+    if kind != nil && kind != ""
+        push conds ("kind = '" ++ (sql_escape kind) ++ "'")
+    where_sql: ""
+    if (len conds) > 0
+        where_sql: " WHERE " ++ (join conds " AND ")
+    order_sql: " ORDER BY importance DESC, id DESC"
+    if q != nil && q != ""
+        order_sql: " ORDER BY id DESC"
+    db_query h ("SELECT id, content, kind, importance, ts, tags FROM memories" ++ where_sql ++ order_sql ++ " LIMIT " ++ (to_str limit))
 
 --! Loescht eine Erinnerung inkl. ihres Embeddings (Web-Dashboard P3).
 export fn delete_memory h id
@@ -209,6 +219,22 @@ export fn recent_events h n
 export fn add_goal h text
     db_exec h ("INSERT INTO goals (text, status) VALUES ('" ++ (sql_escape text) ++ "', 'offen')")
     get (at (db_query h "SELECT max(id) AS mid FROM goals") 0) "mid"
+
+--! Die n juengsten Ziele (Web-Dashboard P3). "text" ist ein SQL-Typ-Schluesselwort
+--! im reinen-Pipe-sqlite-Modul — ein unqualifizierter SELECT einer Spalte namens
+--! "text" scheitert am Parser (INSERT/CREATE TABLE vertragen den Namen, ein
+--! bloßes "SELECT text" nicht); tabellenqualifiziert ("goals.text") geht.
+export fn list_goals h limit
+    db_query h ("SELECT id, goals.text AS goal_text, status FROM goals ORDER BY id DESC LIMIT " ++ (to_str limit))
+
+--! Setzt den Status eines Ziels (z.B. "offen"/"erledigt", Web-Dashboard P3).
+export fn set_goal_status h id status
+    db_exec h ("UPDATE goals SET status = '" ++ (sql_escape status) ++ "' WHERE id = " ++ (to_str id))
+
+--! Setzt die Importance einer Erinnerung direkt (Web-Dashboard P3, manuelle
+--! Kuratierung neben der automatischen Konsolidierung).
+export fn set_importance h id importance
+    db_exec h ("UPDATE memories SET importance = " ++ (to_str importance) ++ " WHERE id = " ++ (to_str id))
 
 --! Episodisches Gedaechtnis (P2): ein Thread pro Chat, in "threads" (title = chat_id
 --! als String, state = aktiv/geschlossen) verwaltet — die Tabelle war zuvor angelegt,

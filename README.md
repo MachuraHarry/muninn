@@ -142,16 +142,24 @@ pipe muninn.pipe web
 # -> Muninn-Dashboard: http://127.0.0.1:8787/
 ```
 
-Eine einzige, selbstenthaltene Seite (kein Build-Schritt) im Stil von
-[pipe-lang.com](https://pipe-lang.com):
+Eine einzige, selbstenthaltene Seite (kein Build-Schritt). Farbpalette 1:1 von
+[pipe-lang.com](https://pipe-lang.com) übernommen (dunkles Theme, lila
+Akzente); Layout, Komponenten und Typografie sind bewusst **eigenständig**
+(Sidebar-Navigation statt Scroll-Seite, System-Schrift statt Google-Fonts,
+keine Gradient-Text-Überschriften, kein „Terminal-Fenster"-Chat):
 
 - **Chat** — dieselben Befehle wie bei Telegram (`/status`, `/graph <Name>`,
   `/learn <URL>`, `/reset`, `/consolidate`) plus natürliche Sprache. Eigene,
   bewusst schlanke Kommando-Weiche (`dashboard_reply`) statt Wiederverwendung
   von Telegrams `handle_message` — siehe Architektur unten.
-- **Erinnerungen** — durchsuchen (Stichwort) und löschen.
+- **Erinnerungen** — durchsuchen (Stichwort + Art-Filter), Importance direkt
+  anpassen (▲/▼), löschen.
+- **Ziele** — Übersicht offener/erledigter Ziele, per Klick umschalten.
 - **Wissensgraph** — Nachbarn einer Entität abfragen.
-- **Status** — Erinnerungen, Entitäten/Relationen, Werkzeuge, aktive Threads.
+- **Aktivität** — jüngste Ereignisse (klassifizierte Nachrichten) und Executor-Pläne
+  mit Status (offen/erledigt/fehlgeschlagen).
+- **Werkzeuge** — alle registrierten (lokalen + per MCP gebrückten) Tools.
+- **Status-Leiste** — Erinnerungen, Entitäten/Relationen, Werkzeuge live.
 
 Mit `DEEPSEEK_API_KEY` konfiguriert nutzt der Dashboard-Chat dieselbe KI wie
 Telegram (Gremium, Klassifikation, Executor) — beide Kanäle teilen sich

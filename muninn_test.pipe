@@ -46,6 +46,33 @@ test "add_memory und top_memories nach Importance"
     expect_eq (get (at top 0) "content") "Espresso-Vorliebe" "hoechste Importance zuerst"
     mem.close h
 
+test "set_importance aendert die Importance einer Erinnerung"
+    h: mem.init_db ":memory:"
+    id: mem.add_memory h "Notiz" "fact" 2 "test" "x"
+    mem.set_importance h id 5
+    top: mem.top_memories h 1
+    expect_eq (get (at top 0) "importance") 5 "importance aktualisiert"
+    mem.close h
+
+--! Ziele (Web-Dashboard P3).
+test "list_goals liefert die juengsten Ziele mit Status"
+    h: mem.init_db ":memory:"
+    mem.add_goal h "Pipe lernen"
+    mem.add_goal h "Muninn ausbauen"
+    goals: mem.list_goals h 10
+    expect_eq (len goals) 2 "zwei Ziele"
+    expect_eq (get (at goals 0) "goal_text") "Muninn ausbauen" "neuestes zuerst"
+    expect_eq (get (at goals 0) "status") "offen" "Default-Status offen"
+    mem.close h
+
+test "set_goal_status aendert den Status eines Ziels"
+    h: mem.init_db ":memory:"
+    id: mem.add_goal h "Pipe lernen"
+    mem.set_goal_status h id "erledigt"
+    goals: mem.list_goals h 10
+    expect_eq (get (at goals 0) "status") "erledigt" "Status aktualisiert"
+    mem.close h
+
 test "log_event protokolliert Ereignisse"
     h: mem.init_db ":memory:"
     mem.log_event h "42" "Hallo" "fleeting"
@@ -450,6 +477,16 @@ test "run_plan führt einen Plan bis zum Ende aus"
     expect_eq (get r "ok") true "ok"
     st: exe.plan_state h (get r "plan_id")
     expect_eq (get st "state") "done" "state done"
+    mem.close h
+
+test "recent_plans liefert die juengsten Plaene (Web-Dashboard)"
+    h: mem.init_db ":memory:"
+    steps: exe.plan_template "permanent" "Merke Espresso"
+    exe.run_plan h "Merke Espresso" steps
+    plans: exe.recent_plans h 10
+    expect_eq (len plans) 1 "ein Plan"
+    expect_eq (get (at plans 0) "goal") "Merke Espresso" "goal korrekt"
+    expect_eq (get (at plans 0) "state") "done" "state done"
     mem.close h
 
 test "run_plan Feedback-Loop streicht fehlgeschlagenen Schritt"
