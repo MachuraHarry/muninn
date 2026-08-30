@@ -78,16 +78,18 @@ DASHBOARD_HTML: `<!doctype html>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px;-webkit-text-size-adjust:100%}
-/* --vh wird per JS auf window.innerHeight*0.01 gesetzt (siehe Script unten) —
-   auf Mobil-Browsern (v.a. iOS Safari) ist 100vh oft GROESSER als die
-   tatsaechlich sichtbare Hoehe (rechnet die einklappbare Adressleiste mit
-   ein). Kombiniert mit overflow:hidden auf body wuerde das Teile der Seite
-   (z.B. die Navigation) ausserhalb des sichtbaren Bereichs UND unerreichbar
-   machen, da nicht scrollbar. Deshalb: body bleibt scrollbar (Sicherheitsnetz)
-   und die App-Hoehe kommt aus dem per JS korrigierten Wert. */
+/* --vh wird per JS aus window.visualViewport.height gesetzt (siehe Script
+   unten, mit window.innerHeight als Fallback) — auf Mobil-Browsern (v.a. iOS
+   Safari) ist 100vh oft GROESSER als die tatsaechlich sichtbare Hoehe
+   (rechnet die einklappbare Adressleiste mit ein) UND aendert sich live beim
+   Ein-/Ausblenden der Adressleiste; visualViewport bildet das laufend korrekt
+   ab (100dvh bewusst NICHT zusaetzlich genutzt — zwei konkurrierende
+   Mechanismen sind schwerer zu debuggen als einer). overflow:hidden auf body
+   wuerde bei falscher Berechnung Teile der Seite (z.B. die Navigation)
+   ausserhalb des sichtbaren Bereichs UND unerreichbar machen, da nicht
+   scrollbar — deshalb bleibt body als Sicherheitsnetz scrollbar. */
 .app{display:flex;height:100vh;min-height:100vh}
 .app{height:calc(var(--vh, 1vh) * 100)}
-@supports (height:100dvh){.app{height:100dvh}}
 
 .sidebar{width:216px;flex-shrink:0;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column}
 .brand{padding:20px 18px 16px;font-weight:700;font-size:1.05rem;letter-spacing:-.2px;border-bottom:1px solid var(--border);color:var(--fg)}
@@ -270,11 +272,16 @@ body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px
 </div>
 <script>
 function setVhVar(){
-  document.documentElement.style.setProperty('--vh', (window.innerHeight * 0.01) + 'px');
+  var h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+  document.documentElement.style.setProperty('--vh', (h * 0.01) + 'px');
 }
 setVhVar();
 window.addEventListener('resize', setVhVar);
 window.addEventListener('orientationchange', setVhVar);
+if (window.visualViewport){
+  window.visualViewport.addEventListener('resize', setVhVar);
+  window.visualViewport.addEventListener('scroll', setVhVar);
+}
 
 function qtoken(){
   var params = new URLSearchParams(window.location.search);
