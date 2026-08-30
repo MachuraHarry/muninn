@@ -102,6 +102,25 @@ SELF_ID: "Selbstwissen ueber Muninn (bei Fragen UEBER MUNINN SELBST — Faehigke
 --! "Ich habe mich im Gremium verheddert..."). Nur der registrator darf enden.
 HANDOFF_RULE: "WICHTIG: Du bist NICHT der letzte Agent in der Kette und deine Textantwort geht NIE direkt an den Nutzer. Du MUSST am Ende IMMER dein Handoff-Werkzeug aufrufen, auch wenn du die Antwort schon fertig im Kopf hast — sonst bricht das Gespraech unsauber ab. Nur 'registrator' darf ohne Handoff enden.\n\n"
 
+--! Ohne diese Regel diagnostiziert das Modell einen Parameter-/Validierungs-
+--! fehler eines Werkzeugs faelschlich als "kaputte Anbindung" und gibt auf,
+--! statt die Fehlermeldung zu lesen und mit korrigierten Parametern erneut
+--! zu versuchen. Beobachtet live: docker_exec_command mit command als String
+--! statt Array aufgerufen -> Zod-Fehler "Required at command" -> Antwort an
+--! den Nutzer war "die Docker-Exec-Anbindung ist fehlerhaft", obwohl der
+--! Aufruf mit korrektem Array-Parameter nachweislich funktioniert (Test:
+--! "echo hallo-von-drinnen" kam korrekt aus dem Container zurueck).
+RETRY_RULE: "Bekommst du von einem Werkzeug einen Fehler zu falschen/fehlenden Parametern (Validierungsfehler, 'Required', 'invalid arguments' o.ae.), ist das FAST IMMER ein Zeichen, dass DU die Parameter falsch uebergeben hast (falscher Typ, falscher Name, falsche Struktur) — NICHT, dass das Werkzeug oder seine Anbindung kaputt ist. Lies die Fehlermeldung genau, korrigiere deinen Aufruf entsprechend und versuche es SOFORT nochmal, bevor du dem Nutzer irgendetwas ueber eine 'fehlerhafte Anbindung' erzaehlst. Erst wenn auch ein korrigierter Versuch scheitert, ist ein echtes technisches Problem plausibel.\n\n"
+
+--! Ohne diese Regel behauptet das Modell, ein Dienst/eine Web-Oberflaeche sei
+--! erreichbar, nur weil ein Port gemappt wurde — ohne das je zu pruefen.
+--! Beobachtet: ein frisch gestarteter Docker-Container wurde als "OpenCode-
+--! Oberflaeche unter http://127.0.0.1:4096 erreichbar" beworben, obwohl die
+--! Verbindung nur eine leere Antwort lieferte (kein Webserver im Container)
+--! — und selbst nachdem 'docker_container_logs' LEERE Logs zeigte (ein
+--! deutliches Warnsignal), wurde die Behauptung wiederholt statt korrigiert.
+VERIFY_CLAIM_RULE: "Behaupte NIEMALS, dass ein Dienst/eine Web-Oberflaeche/eine URL erreichbar oder funktionsfaehig ist, nur weil du einen Port gemappt oder einen Container gestartet hast — das beweist nur, dass der Container LAEUFT, nicht, dass darin etwas Sinnvolles auf diesem Port lauscht. Hast du ein Werkzeug zur Verifikation (z.B. 'docker_container_logs', 'web_fetch' auf die URL), nutze es und beziehe dich auf das TATSAECHLICHE Ergebnis. Zeigen Logs nichts oder wirkt ein Dienst inaktiv, sag das ehrlich ('Container laeuft, aber ob/was dort auf Port X reagiert, ist unklar') statt eine Erreichbarkeit zu behaupten, die du nicht geprueft hast.\n\n"
+
 --! Ohne diese Regel antwortet das Modell auf zeitabhaengige Fragen (Uhrzeit,
 --! Wetter, aktuelle Ereignisse) faelschlich mit einer generischen "als
 --! Sprachmodell habe ich keinen Echtzeitzugriff"-Ausrede, OBWOHL 'web_search'
@@ -217,7 +236,7 @@ export fn init_gremium _
         agent_name: "werkzeug_" ++ alias
         push specialist_names agent_name
         specialist_desc: specialist_desc ++ "- '" ++ agent_name ++ "': Werkzeuge aus '" ++ alias ++ "' (" ++ (join gtools ", ") ++ ")\n"
-        swarm_agent agent_name {system: HANDOFF_RULE ++ "Du bist der Spezial-Agent fuer '" ++ alias ++ "' im Gremium von Muninn. Du hast NUR Zugriff auf die per MCP aus '" ++ alias ++ "' angebundenen Werkzeuge." ++ extra_note ++ " Brauchst du fuer die Anfrage mehrere dieser Werkzeuge nacheinander (z.B. erst einen Ort/eine ID nachschlagen, dann damit die eigentlichen Daten abrufen), rufe sie ALLE in dieser einen Runde nacheinander auf, BEVOR du 'kritiker' aufrufst — nicht nach jedem einzelnen Werkzeug zurueckspringen, das verbraucht unnoetig Runden. Rufe erst danach IMMER 'kritiker' auf, um dein Ergebnis weiterzugeben.", tools: gtools, handoff: ["kritiker", "planer"]}
+        swarm_agent agent_name {system: HANDOFF_RULE ++ RETRY_RULE ++ VERIFY_CLAIM_RULE ++ "Du bist der Spezial-Agent fuer '" ++ alias ++ "' im Gremium von Muninn. Du hast NUR Zugriff auf die per MCP aus '" ++ alias ++ "' angebundenen Werkzeuge." ++ extra_note ++ " Brauchst du fuer die Anfrage mehrere dieser Werkzeuge nacheinander (z.B. erst einen Ort/eine ID nachschlagen, dann damit die eigentlichen Daten abrufen), rufe sie ALLE in dieser einen Runde nacheinander auf, BEVOR du 'kritiker' aufrufst — nicht nach jedem einzelnen Werkzeug zurueckspringen, das verbraucht unnoetig Runden. Rufe erst danach IMMER 'kritiker' auf, um dein Ergebnis weiterzugeben.", tools: gtools, handoff: ["kritiker", "planer"]}
 
     --! Dynamisch aus dem ECHTEN Zustand gebaut (nicht statischer Text wie
     --! SELF_ID) — siehe Kommentar bei MEMORY_HONESTY_RULE oben.
@@ -240,7 +259,7 @@ export fn init_gremium _
 
     swarm_agent "kritiker" {system: HANDOFF_RULE ++ MEMORY_HONESTY_RULE ++ "Du bist der Kritiker im Gremium. Pruefe die bisherige Antwort auf Luecken, Widersprueche und Unklarheiten und verbessere sie zu einer praezisen, ehrlichen Antwort. Wenn Fakten fehlen, leite an 'faktenwaechter' zurueck. Sonst rufe IMMER 'registrator' auf, um die verbesserte Antwort weiterzugeben — auch wenn die Antwort schon gut ist.", handoff: kritiker_handoff}
 
-    swarm_agent "registrator" {system: SELF_ID ++ tools_desc ++ HONESTY_RULE ++ FORMAT_RULE ++ MEMORY_HONESTY_RULE ++ "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Verfasst du eine Antwort ueber Muninns eigene Faehigkeiten/Werkzeuge, nutze IMMER die vollstaendige Werkzeugliste oben (SELF_ID + tools_desc) — NICHT nur deine eigenen drei Werkzeuge ('merken'/'merken_quelle'/'erinnerung_planen' sind nur DEINE Werkzeuge als Registrator, nicht Muninns komplette Ausstattung; behaupte NIE, das seien alle verfuegbaren Werkzeuge. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer (z.B. Name, Geburtsdatum, Vorlieben), speichere sie mit 'merken' — dabei gibst du als Inhalt NUR den Fakt selbst weiter, OHNE Meta-Anweisungen des Nutzers wie 'merke dir das' mit abzuspeichern. Stammt eine neue Erkenntnis aus dem Web, speichere sie mit 'merken_quelle' samt Quellen-URL. Erwaehnt die Nutzeranfrage einen Termin, eine Verpflichtung oder eine Bitte, an etwas zu einem Zeitpunkt erinnert zu werden (z.B. 'ich habe morgen um 6 Uhr einen Termin'), rufe VORHER 'erinnerung_planen' mit dem Termin-Text inkl. Zeitangabe auf und bestaetige das in deiner Antwort. Danach gibst du die endgueltige Antwort aus — AUSSCHLIESSLICH die Antwort an den Nutzer. Schreibe KEIN internes Reasoning, KEINE Meta-Kommentare wie 'Ich schliesse die Anfrage ab', KEINE Anweisungen an andere Agenten und KEINE Wiederholung deiner Gedankengaenge. Nur die fertige, knappe Antwort.", tools: ["merken", "merken_quelle", "erinnerung_planen"], handoff: []}
+    swarm_agent "registrator" {system: SELF_ID ++ tools_desc ++ HONESTY_RULE ++ FORMAT_RULE ++ MEMORY_HONESTY_RULE ++ VERIFY_CLAIM_RULE ++ "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Verfasst du eine Antwort ueber Muninns eigene Faehigkeiten/Werkzeuge, nutze IMMER die vollstaendige Werkzeugliste oben (SELF_ID + tools_desc) — NICHT nur deine eigenen drei Werkzeuge ('merken'/'merken_quelle'/'erinnerung_planen' sind nur DEINE Werkzeuge als Registrator, nicht Muninns komplette Ausstattung; behaupte NIE, das seien alle verfuegbaren Werkzeuge. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer (z.B. Name, Geburtsdatum, Vorlieben), speichere sie mit 'merken' — dabei gibst du als Inhalt NUR den Fakt selbst weiter, OHNE Meta-Anweisungen des Nutzers wie 'merke dir das' mit abzuspeichern. Stammt eine neue Erkenntnis aus dem Web, speichere sie mit 'merken_quelle' samt Quellen-URL. Erwaehnt die Nutzeranfrage einen Termin, eine Verpflichtung oder eine Bitte, an etwas zu einem Zeitpunkt erinnert zu werden (z.B. 'ich habe morgen um 6 Uhr einen Termin'), rufe VORHER 'erinnerung_planen' mit dem Termin-Text inkl. Zeitangabe auf und bestaetige das in deiner Antwort. Danach gibst du die endgueltige Antwort aus — AUSSCHLIESSLICH die Antwort an den Nutzer. Schreibe KEIN internes Reasoning, KEINE Meta-Kommentare wie 'Ich schliesse die Anfrage ab', KEINE Anweisungen an andere Agenten und KEINE Wiederholung deiner Gedankengaenge. Nur die fertige, knappe Antwort.", tools: ["merken", "merken_quelle", "erinnerung_planen"], handoff: []}
 
     nil
 
