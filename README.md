@@ -157,6 +157,27 @@ Mit `DEEPSEEK_API_KEY` konfiguriert nutzt der Dashboard-Chat dieselbe KI wie
 Telegram (Gremium, Klassifikation, Executor) — beide Kanäle teilen sich
 Gedächtnis, Threads und Wissensgraph vollständig.
 
+### Hinter einem Reverse-Proxy (z.B. unter einem Unterpfad)
+
+`DASHBOARD_BIND` bleibt dabei auf `127.0.0.1:<port>` (kein `0.0.0.0`); TLS und
+öffentlicher Zugriff laufen über den Proxy. Das Frontend nutzt ausschließlich
+relative Pfade (`api/...`, `href="./"`), funktioniert also unter jedem
+Unterpfad, solange die Backend-Requests des Proxys den Pfad entsprechend
+strippen. Beispiel Apache, Dashboard unter `https://host/muninn/`, neben einer
+bestehenden Seite auf der Domain-Root:
+
+```apache
+RewriteEngine On
+RewriteRule ^/muninn$ /muninn/ [R=302,L]
+# ^ WICHTIG: RewriteEngine muss INNERHALB des <VirtualHost>-Blocks stehen —
+#   ausserhalb (Server-Kontext) wird es nicht auf den vHost angewendet.
+
+ProxyPass /muninn/ http://127.0.0.1:8787/
+ProxyPassReverse /muninn/ http://127.0.0.1:8787/
+# ^ Muss VOR einer generischen "ProxyPass / ..."-Regel stehen (spezifischster
+#   Pfad zuerst) — sonst faengt die generische Regel /muninn faelschlich ab.
+```
+
 ---
 
 ## Architektur
