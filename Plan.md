@@ -167,6 +167,18 @@ Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung f
   Puppeteer/Headless-Chrome bei 1400/800/740/390/360px verifiziert (kein
   Browser-Tool in der Session verfuegbar — `libasound2`/`libgbm1` mussten
   fuer den headless Chrome nachinstalliert werden).
+  **Nachgereichter Fix**: `100vh` + `overflow:hidden` auf `body` liess auf
+  Mobil-Browsern (v.a. aeltere iOS Safari ohne `100dvh`-Unterstuetzung, wo
+  `100vh` groesser als der tatsaechlich sichtbare Bereich ist — rechnet die
+  einklappbare Adressleiste mit ein) die untere Tab-Leiste ausserhalb des
+  sichtbaren Bereichs UND unerreichbar landen ("ich sehe nur noch den Chat,
+  kein Menü"). Fix: `--vh` per JS auf `window.innerHeight*0.01` gesetzt
+  (bei Resize/Orientierungswechsel neu), `.app`-Hoehe daraus berechnet;
+  `overflow:hidden` von `body` entfernt (Sicherheitsnetz — falls die
+  Berechnung doch mal daneben liegt, ist alles trotzdem per Scroll
+  erreichbar). Mit Puppeteer reproduziert (dvh-Regel aus dem Stylesheet
+  entfernt, `--vh` bewusst auf einen zu grossen Wert gesetzt) und den Fix
+  am selben Repro verifiziert.
   **"Einstellungen"** (aus der urspruenglichen Bullet-Liste) ist bewusst noch
   nicht gebaut — es gibt aktuell keine Laufzeit-Einstellung, die sich lohnen
   wuerde, ohne die bestehende `.env`-Konfiguration zu duplizieren.

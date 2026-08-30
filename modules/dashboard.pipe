@@ -77,8 +77,16 @@ DASHBOARD_HTML: `<!doctype html>
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
-body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px;overflow:hidden;-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px;-webkit-text-size-adjust:100%}
+/* --vh wird per JS auf window.innerHeight*0.01 gesetzt (siehe Script unten) —
+   auf Mobil-Browsern (v.a. iOS Safari) ist 100vh oft GROESSER als die
+   tatsaechlich sichtbare Hoehe (rechnet die einklappbare Adressleiste mit
+   ein). Kombiniert mit overflow:hidden auf body wuerde das Teile der Seite
+   (z.B. die Navigation) ausserhalb des sichtbaren Bereichs UND unerreichbar
+   machen, da nicht scrollbar. Deshalb: body bleibt scrollbar (Sicherheitsnetz)
+   und die App-Hoehe kommt aus dem per JS korrigierten Wert. */
 .app{display:flex;height:100vh;min-height:100vh}
+.app{height:calc(var(--vh, 1vh) * 100)}
 @supports (height:100dvh){.app{height:100dvh}}
 
 .sidebar{width:216px;flex-shrink:0;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column}
@@ -261,6 +269,13 @@ body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px
 </div>
 </div>
 <script>
+function setVhVar(){
+  document.documentElement.style.setProperty('--vh', (window.innerHeight * 0.01) + 'px');
+}
+setVhVar();
+window.addEventListener('resize', setVhVar);
+window.addEventListener('orientationchange', setVhVar);
+
 function qtoken(){
   var params = new URLSearchParams(window.location.search);
   return params.get('token') || '';
