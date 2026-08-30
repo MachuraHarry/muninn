@@ -142,11 +142,22 @@ pipe muninn.pipe web
 # -> Muninn-Dashboard: http://127.0.0.1:8787/
 ```
 
-Eine einzige, selbstenthaltene Seite (kein Build-Schritt). Farbpalette 1:1 von
-[pipe-lang.com](https://pipe-lang.com) übernommen (dunkles Theme, lila
-Akzente); Layout, Komponenten und Typografie sind bewusst **eigenständig**
-(Sidebar-Navigation statt Scroll-Seite, System-Schrift statt Google-Fonts,
-keine Gradient-Text-Überschriften, kein „Terminal-Fenster"-Chat):
+Eine einzige, selbstenthaltene Seite (kein Build-Schritt), **vollständig
+responsive**. Farbpalette 1:1 von [pipe-lang.com](https://pipe-lang.com)
+übernommen (dunkles Theme, lila Akzente); Layout, Komponenten und Typografie
+sind bewusst **eigenständig** (Sidebar-Navigation statt Scroll-Seite,
+System-Schrift statt Google-Fonts, keine Gradient-Text-Überschriften, kein
+„Terminal-Fenster"-Chat):
+
+- **Desktop** (> 760px): feste Sidebar links.
+- **Mobil** (≤ 760px): die Sidebar wird zu einer unteren Tab-Leiste (etabliertes
+  App-Muster) statt sich nur zu verschmälern; Formularfelder auf 16px Schrift
+  (verhindert das automatische Hineinzoomen von iOS Safari bei Fokus).
+- **Sehr schmale Geräte** (≤ 420px): Tab-Labels weichen reinen Icons, sonst zu
+  eng bei 6 Tabs.
+- Visuell mit Puppeteer/Headless-Chrome bei mehreren Breite geprüft (1400/800/
+  740/390/360px) — kein Browser-Tool in dieser Session verfügbar, daher dieser
+  Weg zur echten Verifikation statt bloßer CSS-Vermutung.
 
 - **Chat** — dieselben Befehle wie bei Telegram (`/status`, `/graph <Name>`,
   `/learn <URL>`, `/reset`, `/consolidate`) plus natürliche Sprache. Eigene,

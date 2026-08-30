@@ -161,6 +161,12 @@ Muninn bekommt **beliebige Werkzeuge** über MCP — die größte Hebelwirkung f
   Unterpfad live geschaltet (`https://<domain>/muninn/`) — Frontend nutzt
   ausschliesslich relative Pfade (`api/...`, kein `/api/...`), damit es unter
   jedem Unterpfad funktioniert, siehe README → Hinter einem Reverse-Proxy.
+  **Responsive**: Desktop-Sidebar wird ab 760px zu einer unteren Tab-Leiste
+  (nicht nur verschmälert — ein eigenes mobiles Layout), ab 420px Icon-only;
+  16px-Formularfelder auf Mobil gegen iOS-Safari-Autozoom. Visuell mit
+  Puppeteer/Headless-Chrome bei 1400/800/740/390/360px verifiziert (kein
+  Browser-Tool in der Session verfuegbar — `libasound2`/`libgbm1` mussten
+  fuer den headless Chrome nachinstalliert werden).
   **"Einstellungen"** (aus der urspruenglichen Bullet-Liste) ist bewusst noch
   nicht gebaut — es gibt aktuell keine Laufzeit-Einstellung, die sich lohnen
   wuerde, ohne die bestehende `.env`-Konfiguration zu duplizieren.
