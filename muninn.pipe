@@ -200,17 +200,28 @@ fn is_mcp_server_question low
         return true
     false
 
---! Verarbeitet ein hochgeladenes Dokument (Telegram "document"-Nachricht, P2).
---! Nur reiner Text wird unterstützt — siehe ingest_document-Kommentar in
---! memory.pipe zur bewussten PDF-Einschränkung.
+--! Nur der Dateiname-Teil, ohne Pfad-Traversal — Telegrams file_name kommt
+--! vom Nutzer/Absender und darf niemals ungeprueft in einen Speicherpfad.
+fn safe_filename fname
+    base: fname
+    parts: split fname "/"
+    if (len parts) > 0
+        base: at parts ((len parts) - 1)
+    base: replace_all base ".." ""
+    if base == nil || base == ""
+        base: "datei"
+    base
+
+--! Verarbeitet ein hochgeladenes Dokument (Telegram "document"-Nachricht).
+--! JEDE Datei wird roh im mcp_data-Ordner gespeichert (fuer werkzeug_
+--! filesystem lesbar/bearbeitbar); reine Textdateien werden zusaetzlich ins
+--! Gedaechtnis gelernt (ingest_document, siehe dortigen Kommentar zur
+--! bewussten PDF-Einschraenkung dafuer — das Lernen, nicht das Speichern).
 fn handle_document token cid dbh doc
     fname: get doc "file_name"
     if fname == nil
-        fname: "Dokument"
+        fname: "dokument"
     mime: get doc "mime_type"
-    if !(is_text_doc fname mime)
-        tel.tel_send_message token cid ("'" ++ fname ++ "' wird nicht unterstützt — aktuell nur reine Textdateien (.txt, .md). Für PDFs/Binärformate bräuchte es einen angebundenen MCP-Server mit Extraktion.")
-        return nil
     tel.tel_send_chat_action token cid "typing"
     fpath: tel.tel_get_file token (get doc "file_id")
     if fpath == nil
@@ -220,8 +231,14 @@ fn handle_document token cid dbh doc
     if content == nil || content == ""
         tel.tel_send_message token cid "Datei war leer oder nicht lesbar."
         return nil
-    res: mem.ingest_document dbh content ("telegram-datei:" ++ fname) fname 20
-    tel.tel_send_message token cid ("Gelernt aus '" ++ fname ++ "': " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten gespeichert.")
+    safe_name: safe_filename fname
+    save_path: "/root/muninn/mcp_data/" ++ safe_name
+    write_file save_path content
+    out: "Gespeichert: " ++ safe_name ++ " (" ++ (to_str (len content)) ++ " Bytes)."
+    if is_text_doc fname mime
+        res: mem.ingest_document dbh content ("telegram-datei:" ++ fname) fname 20
+        out: out ++ "\nZusaetzlich als Wissen gelernt: " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten."
+    tel.tel_send_message token cid out
 
 --! Verarbeitet ein hochgeladenes Foto (Telegram "photo"-Nachricht) per ai_vision.
 --! "photo" ist eine Liste von Groessen aufsteigend sortiert — das letzte Element
