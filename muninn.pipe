@@ -509,11 +509,61 @@ fn handle_message token cid text dbh
         push kb row2
         tel_finalize token cid message_id (shorten answer) kb
 
+--! Kappt einen Status-Schnipsel auf n Zeichen (fuer die Live-Statuszeile —
+--! anders als shorten (4000 Zeichen, fuer Telegram-Nachrichten) hier bewusst
+--! kurz, damit eine einzelne Werkzeug-Zeile nicht die ganze Statusnachricht sprengt.
+fn truncate_status s n
+    if s == nil
+        return ""
+    if (len s) > n
+        (substring s 0 n) ++ "…"
+    else
+        s
+
+--! Zieht aus den rohen JSON-Argumenten eines Werkzeugaufrufs einen kurzen,
+--! menschenlesbaren Schnipsel (die echte Suchanfrage/URL/o.ae., nicht nur der
+--! Werkzeugname) — fuer bekannte lokale Werkzeuge (siehe ai_tool-Registrierung
+--! in swarm.pipe) gezielt nach dem passenden Feld, sonst best-effort das erste
+--! String-Feld in den Argumenten (deckt MCP-Werkzeuge mit unbekanntem Schema ab).
+fn tool_arg_summary tool_name args_json
+    if args_json == nil || args_json == ""
+        return ""
+    a: nil
+    try
+        a: parse_json args_json
+    catch
+        a: nil
+    if a == nil || (type_of a) != "MAP"
+        return ""
+    field: nil
+    if tool_name == "web_search" || tool_name == "erinnerungen_suchen"
+        field: get a "query"
+    else if tool_name == "web_fetch"
+        field: get a "url"
+    else if tool_name == "erinnerung_planen"
+        field: get a "text"
+    else if tool_name == "merken" || tool_name == "merken_quelle"
+        field: get a "content"
+    else if tool_name == "docker_pull_image"
+        field: get a "image"
+    else if tool_name == "docker_create_container"
+        field: get a "name"
+    else if tool_name == "bild_senden" || tool_name == "datei_senden"
+        field: get a "path"
+    if field == nil
+        for k in (keys a)
+            v: get a k
+            if field == nil && (type_of v) == "STRING" && v != ""
+                field: v
+    if field == nil || field == ""
+        return ""
+    truncate_status (to_str field) 70
+
 --! Uebersetzt einen Gremium-Fortschritts-Schritt (siehe ai_swarm_stream/
 --! run_gremium_stream) in eine kurze Statuszeile fuers Live-Editieren der
 --! Telegram-Platzhalternachricht. "handoff"/"final" werden vom Aufrufer schon
 --! rausgefiltert (der naechste "start" zeigt den neuen Agenten ohnehin an).
-fn swarm_status_text agent event detail
+fn swarm_status_text agent event detail args_json
     label: "🧠 " ++ agent ++ " denkt nach..."
     if agent == "planer"
         label: "🧭 Plane die Antwort..."
@@ -527,6 +577,9 @@ fn swarm_status_text agent event detail
         label: "🔧 Nutze " ++ (substring agent 9 (len agent)) ++ "..."
     if event == "tool" && detail != nil && detail != ""
         label: label ++ "\n→ ruft " ++ detail ++ " auf"
+        arg_hint: tool_arg_summary detail args_json
+        if arg_hint != ""
+            label: label ++ " (" ++ arg_hint ++ ")"
     label
 
 --! Baut die on_update-Closure fuer run_gremium_stream: uebersetzt jeden
@@ -536,10 +589,10 @@ fn swarm_status_text agent event detail
 --! fehlgeschlagen) — dann ist die Closure ein No-op.
 fn make_swarm_updater token cid message_id
     stream_state: {last_text: "", last_ms: 0}
-    fn on_update agent event detail
+    fn on_update agent event detail args_json
         if event == "handoff" || event == "final"
             return nil
-        text: swarm_status_text agent event detail
+        text: swarm_status_text agent event detail args_json
         if text == (get stream_state "last_text")
             return nil
         ms: time_ms

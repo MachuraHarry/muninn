@@ -358,10 +358,11 @@ export fn run_gremium dbh cid task
     apply_registrator_backstop res
 
 --! Wie run_gremium, aber mit Live-Fortschritt: on_update wird als
---! on_update(agent, event, detail) bei jedem Schwarm-Schritt aufgerufen
---! (event: "start"|"tool"|"handoff"|"final", siehe ai_swarm_stream). Bleibt
---! UI-neutral — Telegram-spezifisches Formatieren/Editieren passiert beim
---! Aufrufer (muninn.pipe), nicht hier.
+--! on_update(agent, event, detail, args_json) bei jedem Schwarm-Schritt
+--! aufgerufen (event: "start"|"tool"|"handoff"|"final", args_json nur bei
+--! "tool" gefuellt — die rohen JSON-Argumente des Aufrufs, siehe
+--! ai_swarm_stream). Bleibt UI-neutral — Telegram-spezifisches
+--! Formatieren/Editieren passiert beim Aufrufer (muninn.pipe), nicht hier.
 export fn run_gremium_stream dbh cid task on_update
     set STATE "dbh" dbh
     set STATE "cid" cid
