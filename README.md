@@ -51,6 +51,9 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
   nicht nur Docker) mehr Zeit braucht, stellt sie zurück und arbeitet automatisch mit
   frischem Rundenbudget weiter, bis sie wirklich fertig ist — kein Pipe-Hintergrundprozess,
   laeuft ueber den bestehenden Scheduler.
+- **Sprachnachrichten verstehen** — transkribiert eingehende Telegram-Sprachnachrichten
+  lokal (whisper-transcribe-mcp, kein API-Key) und verarbeitet den Text genauso wie eine
+  getippte Nachricht — Befehle, Erinnerungen und Gremium funktionieren identisch per Sprache.
 - **Proaktive Kalender-Erinnerungen** — meldet sich von sich aus vor bevorstehenden
   Terminen, reichert das tägliche Briefing um echte Kalenderdaten an.
 - **Präsentationen & Dokumente** — erstellt echte PowerPoint-/Word-Dateien (inkl.
@@ -625,6 +628,7 @@ unverändert wie zuvor.
 | `google` | `taylorwilsdon/google_workspace_mcp` | Gmail/Drive/Kalender — braucht eigenes OAuth-Setup, siehe unten |
 | `praesentation` | `office-powerpoint-mcp-server` | PowerPoint-Präsentationen erstellen (.pptx) |
 | `dokument` | `office-word-mcp-server` | Word-Dokumente erstellen, inkl. PDF-Export (.docx/.pdf) |
+| `whisper` | `whisper-transcribe-mcp[local]` | Audio/Sprachnachrichten lokal transkribieren, kein API-Key |
 
 ### Eingeschränkte Docker-Erweiterung (`docker_tools.pipe`)
 
@@ -834,6 +838,29 @@ Scheduler (kein Pipe-Hintergrundprozess, siehe Architekturhinweis unten).
   mehr selbst, sondern nutzt `mem.raw_exec`/`mem.raw_query` (dünne
   Durchreichen in `memory.pipe`, das `sqlite` bereits unproblematisch bare
   importiert).
+
+### Sprachnachrichten verstehen (`whisper`, `handle_voice`)
+
+Schickt der Nutzer eine Telegram-Sprachnachricht, lädt Muninn die OGG/Opus-
+Datei herunter, transkribiert sie lokal und reicht den erkannten Text
+GENAUSO durch `handle_message` wie eine getippte Nachricht — Befehle,
+Erinnerungen und das Gremium funktionieren also identisch per Sprache wie
+per Text (das Gegenstück zu den bestehenden Sprachnachrichten, die Muninn
+selbst verschicken kann).
+
+- **`whisper-transcribe-mcp`** (PyPI, MIT) im `[local]`-Modus —
+  `faster-whisper`, komplett lokal, kein API-Key. Live end-to-end getestet:
+  ein per Piper synthetisierter Satz wurde 1:1 korrekt zurücktranskribiert
+  (deutsche Spracherkennung, `language_probability: 1.0`, Modell `base`).
+- Modell lädt beim ersten Gebrauch automatisch von HuggingFace (~74 MB für
+  `base`) und wird danach gecacht — kein manueller Download nötig.
+- Ist der `whisper`-Server nicht konfiguriert (optionaler
+  `MCP_AUTO_SERVERS`-Eintrag, siehe `.env.example`), fällt `handle_voice`
+  ehrlich auf die Bitte zurück, stattdessen zu tippen — kein Vortäuschen
+  einer nicht verfügbaren Fähigkeit.
+- Da der Server ganz normal in `MCP_AUTO_SERVERS` steht, kann auch das
+  Gremium selbst (`werkzeug_whisper`) bei Bedarf eine Audiodatei
+  transkribieren, nicht nur der deterministische Sprachnachrichten-Pfad.
 
 ### Kosten-Tracking (`memory.pipe`, `muninn.pipe`)
 
