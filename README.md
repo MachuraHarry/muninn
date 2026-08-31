@@ -40,6 +40,9 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
   Nachrichtenblöcke oder Schweigens bis zur Endantwort.
 - **Google Workspace** — Gmail (inkl. Versand), Drive und Kalender per OAuth 2.0 angebunden
   (`taylorwilsdon/google_workspace_mcp`), Tokens bewusst außerhalb des Filesystem-MCP-Bereichs.
+- **Sprachnachrichten** — der Registrator entscheidet pro Antwort selbst, ob eine echte
+  Telegram-Sprachnachricht (statt Text) passender ist; lokale Synthese per Piper + ffmpeg,
+  kein Cloud-Dienst/API-Key.
 - **Eingeschränkte Docker-Erweiterung** — Image ziehen + Container anlegen, aber strukturell
   ohne Volume-Mounts/`--privileged`, Ports standardmäßig nur auf `127.0.0.1` (siehe
   [Sicherheit](#sicherheit)).
@@ -65,6 +68,7 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 | Kosten-Tracking (`/costs`, Dashboard-Tab) | ✅ |
 | Eingeschränkte Docker-Erweiterung (Image ziehen, Container anlegen) | ✅ |
 | Google Workspace (Gmail, Drive, Kalender) via MCP | ✅ |
+| Sprachnachrichten (Piper-TTS, KI entscheidet selbst) | ✅ |
 | Live-Status-Stream im Telegram-Chat (`ai_swarm_stream`) | ✅ |
 | M5 — Discord | ⏳ geplant |
 
@@ -587,6 +591,28 @@ Browser-Freigabe pro Google-Konto. Details:
 Einmalige Einrichtung (aus der Ferne): SSH-Port-Forward auf den OAuth-Callback
 (`ssh -L 8000:localhost:8000 user@server`), dann in Telegram „Verbinde mein
 Google-Konto" schreiben und den zurückgegebenen Link im eigenen Browser öffnen.
+
+### Sprachnachrichten (`tts_synth.sh`)
+
+Der Registrator entscheidet pro Antwort selbst, ob eine echte Telegram-
+Sprachnachricht (`sendVoice`) passender ist als Text — kurze/lockere
+Antworten oder eine explizite Bitte des Nutzers eher als Sprache, lange/
+inhaltsreiche Antworten, Listen, Links oder Code bleiben Text (klingt als
+Sprache nicht sinnvoll). Wie jede Prompt-Regel nicht hundertprozentig
+zuverlässig, aber bei expliziter Bitte ("sag mir das als Sprachnachricht")
+verlässlich getestet.
+
+- **Rein lokal, kein API-Key**: [Piper](https://github.com/rhasspy/piper)
+  (neuronale TTS, hier die deutsche `thorsten-high`-Stimme) synthetisiert
+  Text zu WAV, `ffmpeg` konvertiert nach Opus/OGG — Telegrams einziges
+  Format für eine "echte" Sprachnachrichten-Blase (`sendAudio`/Datei-Anhang
+  würde stattdessen als normaler Audio-Player angezeigt).
+- **Fester Zwei-Schritt-Kommandotemplate** in `tts_synth.sh`, aufgerufen per
+  `exec()` (kein MCP-Server dafür) — Stimme/Modell/Encoding sind im Skript
+  hart codiert, nicht AI-wählbar, gleiches Sicherheitsmuster wie bei der
+  [Docker-Erweiterung](#eingeschränkte-docker-erweiterung-docker_toolspipe).
+- Zwischendateien (`tts_tmp/`, gitignored) werden nach jedem Versand sofort
+  wieder gelöscht.
 
 ### Kosten-Tracking (`memory.pipe`, `muninn.pipe`)
 

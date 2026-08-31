@@ -63,6 +63,11 @@ fn setup_sandbox servers
     --! Sicherheits-Kommentar in docker_tools.pipe — strikt validierte
     --! Argumente, kein Volume-Mount, kein --privileged.
     push wl "docker"
+    --! "tts_synth.sh" zusaetzlich zur Whitelist: swarm.pipe (tts_synthesize)
+    --! ruft die feste Piper->ffmpeg-Sprachsynthese-Pipeline direkt per exec()
+    --! auf (kein MCP-Server dafuer). Fester Skriptpfad, keine AI-kontrollierbaren
+    --! Flags — nur die beiden Dateipfade werden uebergeben.
+    push wl "tts_synth.sh"
     allow_exec: (len wl) > 0
     sandbox_profile "muninn" {fs: "full", network: true, exec: allow_exec, exec_whitelist: wl, ai: true, max_tool_calls: 40, audit_log: true}
     set_sandbox "muninn"

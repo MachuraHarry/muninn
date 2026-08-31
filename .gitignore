@@ -19,6 +19,9 @@ mcp_data/
 # Google-OAuth-Tokens (bewusst AUSSERHALB von mcp_data, siehe google_creds/README)
 google_creds/
 
+# TTS-Zwischendateien (Sprachnachrichten-Synthese, siehe tts_synth.sh)
+tts_tmp/
+
 # Pipe-Caches / Bytecode
 ~/.pipe
 *.pipec

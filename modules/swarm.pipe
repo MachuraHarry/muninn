@@ -251,6 +251,51 @@ fn tool_datei_senden path caption
         return "Senden fehlgeschlagen: " ++ (to_str (get res))
     "Datei gesendet: " ++ full_path
 
+--! Maximale Zeichenzahl fuer eine Sprachnachricht — Vorlesen ist fuer kurze,
+--! lockere Antworten gedacht, nicht fuer lange/inhaltsreiche Texte (siehe
+--! FORMAT_RULE-Ergaenzung unten).
+TTS_MAX_CHARS: 600
+
+--! Fuehrt die feste Piper->ffmpeg-Pipeline (tts_synth.sh) aus. Kein Parameter
+--! davon ist AI-kontrollierbar ausser dem Text selbst (Stimme/Encoding sind
+--! im Skript fest verdrahtet) — analog zum docker_tools.pipe-Muster mit
+--! festem Kommando-Template statt frei waehlbarer Flags.
+fn tts_synthesize text
+    dir: "/root/muninn/tts_tmp"
+    id: (to_str now) ++ "_" ++ (to_str (random_range 100000 999999))
+    txt_path: dir ++ "/" ++ id ++ ".txt"
+    ogg_path: dir ++ "/" ++ id ++ ".ogg"
+    write_file txt_path text
+    r: exec ("/root/muninn/tts_synth.sh " ++ txt_path ++ " " ++ ogg_path)
+    file_delete txt_path
+    if (get r "status") != 0
+        return {ok: false, ogg_path: nil, error: (get r "output")}
+    if !(file_exists ogg_path)
+        return {ok: false, ogg_path: nil, error: "Keine Ausgabedatei erzeugt."}
+    {ok: true, ogg_path: ogg_path, error: nil}
+
+--! Tool: Text als echte Sprachnachricht (statt Textnachricht) an den Nutzer
+--! senden — lokale Piper-Synthese, kein Cloud-Dienst/API-Key noetig.
+fn tool_sprachnachricht_senden text
+    tok: get STATE "token"
+    cid: get STATE "cid"
+    if tok == nil || cid == nil
+        return "Kein Telegram-Kontext verfuegbar, kann keine Sprachnachricht senden."
+    if text == nil || (trim text) == ""
+        return "Kein Text zum Vorlesen angegeben."
+    spoken: text
+    if (len spoken) > TTS_MAX_CHARS
+        spoken: (substring spoken 0 TTS_MAX_CHARS) ++ "…"
+    synth: tts_synthesize spoken
+    if !(get synth "ok")
+        return "Sprachsynthese fehlgeschlagen: " ++ (to_str (get synth "error"))
+    ogg: get synth "ogg_path"
+    res: tel.tel_send_voice tok cid ogg nil
+    file_delete ogg
+    if (get res "ok") == false
+        return "Senden der Sprachnachricht fehlgeschlagen: " ++ (to_str res)
+    "Sprachnachricht gesendet."
+
 --! Registriert Tools und Gremium-Agenten (einmalig beim Start).
 --! Bindet zusaetzlich alle bereits per mcp.connect_servers verbundenen MCP-Tools
 --! (Dateisystem, GitHub, ...) an einen eigenen "werkzeugmeister"-Agenten (P1).
@@ -272,6 +317,7 @@ export fn init_gremium _
     --! reden, sie aber nicht tatsaechlich verschicken.
     ai_tool "bild_senden" "Ein Bild (Screenshot o.ae.) aus einer lokalen Datei an den Nutzer in Telegram senden (zeigt inline im Chat)." {path: "Pfad zur Bilddatei (relativ zu /root/muninn oder absolut)", caption: "Optionale Bildunterschrift"} tool_bild_senden
     ai_tool "datei_senden" "Eine beliebige lokale Datei an den Nutzer in Telegram senden (als Datei-Anhang, Originalformat)." {path: "Pfad zur Datei (relativ zu /root/muninn oder absolut)", caption: "Optionale Beschreibung"} tool_datei_senden
+    ai_tool "sprachnachricht_senden" "Text als gesprochene Sprachnachricht (statt Textnachricht) an den Nutzer senden — lokale Sprachsynthese, kein Cloud-Dienst." {text: "Der zu sprechende Text (kurz halten, max. ca. 600 Zeichen — keine Links/Listen/Code, die klingen als Sprache nicht sinnvoll)"} tool_sprachnachricht_senden
 
     local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen", "docker_pull_image", "docker_create_container", "bild_senden", "datei_senden"]
     --! P5: EIN fokussierter Spezial-Agent PRO angebundenem MCP-Server statt
@@ -328,7 +374,7 @@ export fn init_gremium _
 
     swarm_agent "kritiker" {system: HANDOFF_RULE ++ MEMORY_HONESTY_RULE ++ "Du bist der Kritiker im Gremium. Pruefe die bisherige Antwort auf Luecken, Widersprueche und Unklarheiten und verbessere sie zu einer praezisen, ehrlichen Antwort. Wenn Fakten fehlen, leite an 'faktenwaechter' zurueck. Sonst rufe IMMER 'registrator' auf, um die verbesserte Antwort weiterzugeben — auch wenn die Antwort schon gut ist.", handoff: kritiker_handoff}
 
-    swarm_agent "registrator" {system: SELF_ID ++ tools_desc ++ HONESTY_RULE ++ FORMAT_RULE ++ MEMORY_HONESTY_RULE ++ VERIFY_CLAIM_RULE ++ "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Verfasst du eine Antwort ueber Muninns eigene Faehigkeiten/Werkzeuge, nutze IMMER die vollstaendige Werkzeugliste oben (SELF_ID + tools_desc) — NICHT nur deine eigenen drei Werkzeuge ('merken'/'merken_quelle'/'erinnerung_planen' sind nur DEINE Werkzeuge als Registrator, nicht Muninns komplette Ausstattung; behaupte NIE, das seien alle verfuegbaren Werkzeuge. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer (z.B. Name, Geburtsdatum, Vorlieben), speichere sie mit 'merken' — dabei gibst du als Inhalt NUR den Fakt selbst weiter, OHNE Meta-Anweisungen des Nutzers wie 'merke dir das' mit abzuspeichern. Stammt eine neue Erkenntnis aus dem Web, speichere sie mit 'merken_quelle' samt Quellen-URL. Erwaehnt die Nutzeranfrage einen Termin, eine Verpflichtung oder eine Bitte, an etwas zu einem Zeitpunkt erinnert zu werden (z.B. 'ich habe morgen um 6 Uhr einen Termin'), rufe VORHER 'erinnerung_planen' mit dem Termin-Text inkl. Zeitangabe auf und bestaetige das in deiner Antwort. Hat ein anderer Agent in der Konversation einen Datei-/Bildpfad erwaehnt (z.B. einen Screenshot-Pfad von werkzeug_browser oder eine per Filesystem-Werkzeug erzeugte Datei) UND wollte der Nutzer das sehen/haben, rufe VORHER 'bild_senden' bzw. 'datei_senden' mit diesem Pfad auf, ANSTATT nur zu behaupten, du koenntest die Datei nicht schicken — das kannst du. Danach gibst du die endgueltige Antwort aus — AUSSCHLIESSLICH die Antwort an den Nutzer. Schreibe KEIN internes Reasoning, KEINE Meta-Kommentare wie 'Ich schliesse die Anfrage ab', KEINE Anweisungen an andere Agenten und KEINE Wiederholung deiner Gedankengaenge. Nur die fertige, knappe Antwort.", tools: ["merken", "merken_quelle", "erinnerung_planen", "bild_senden", "datei_senden"], handoff: []}
+    swarm_agent "registrator" {system: SELF_ID ++ tools_desc ++ HONESTY_RULE ++ FORMAT_RULE ++ MEMORY_HONESTY_RULE ++ VERIFY_CLAIM_RULE ++ "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Verfasst du eine Antwort ueber Muninns eigene Faehigkeiten/Werkzeuge, nutze IMMER die vollstaendige Werkzeugliste oben (SELF_ID + tools_desc) — NICHT nur deine eigenen drei Werkzeuge ('merken'/'merken_quelle'/'erinnerung_planen' sind nur DEINE Werkzeuge als Registrator, nicht Muninns komplette Ausstattung; behaupte NIE, das seien alle verfuegbaren Werkzeuge. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer (z.B. Name, Geburtsdatum, Vorlieben), speichere sie mit 'merken' — dabei gibst du als Inhalt NUR den Fakt selbst weiter, OHNE Meta-Anweisungen des Nutzers wie 'merke dir das' mit abzuspeichern. Stammt eine neue Erkenntnis aus dem Web, speichere sie mit 'merken_quelle' samt Quellen-URL. Erwaehnt die Nutzeranfrage einen Termin, eine Verpflichtung oder eine Bitte, an etwas zu einem Zeitpunkt erinnert zu werden (z.B. 'ich habe morgen um 6 Uhr einen Termin'), rufe VORHER 'erinnerung_planen' mit dem Termin-Text inkl. Zeitangabe auf und bestaetige das in deiner Antwort. Hat ein anderer Agent in der Konversation einen Datei-/Bildpfad erwaehnt (z.B. einen Screenshot-Pfad von werkzeug_browser oder eine per Filesystem-Werkzeug erzeugte Datei) UND wollte der Nutzer das sehen/haben, rufe VORHER 'bild_senden' bzw. 'datei_senden' mit diesem Pfad auf, ANSTATT nur zu behaupten, du koenntest die Datei nicht schicken — das kannst du. Entscheide bei JEDER Antwort selbst, ob eine Sprachnachricht statt Text passender ist: bei kurzen, lockeren, alltagssprachlichen Antworten (Small Talk, kurze Bestaetigungen, einfache Fakten) ODER wenn der Nutzer explizit eine Sprachnachricht/Audio wuenscht, rufe 'sprachnachricht_senden' mit dem gesprochenen Text auf; bei langen/inhaltsreichen Antworten, Listen, Links, Code oder Zahlen/Tabellen bleib bei Text — sowas klingt als Sprache nicht sinnvoll. Hast du 'sprachnachricht_senden' aufgerufen, halte deine eigene finale Textantwort SEHR kurz (z.B. nur '🎙️ Sprachnachricht gesendet.') statt den gesprochenen Text nochmal komplett als Text zu wiederholen. Danach gibst du die endgueltige Antwort aus — AUSSCHLIESSLICH die Antwort an den Nutzer. Schreibe KEIN internes Reasoning, KEINE Meta-Kommentare wie 'Ich schliesse die Anfrage ab', KEINE Anweisungen an andere Agenten und KEINE Wiederholung deiner Gedankengaenge. Nur die fertige, knappe Antwort.", tools: ["merken", "merken_quelle", "erinnerung_planen", "bild_senden", "datei_senden", "sprachnachricht_senden"], handoff: []}
 
     nil
 

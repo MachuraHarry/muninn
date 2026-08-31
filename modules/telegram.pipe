@@ -176,6 +176,11 @@ export fn tel_send_photo token chat_id file_path caption
 export fn tel_send_document token chat_id file_path caption
     tel_upload token "sendDocument" "document" chat_id file_path caption
 
+--! Sendet eine echte Sprachnachrichten-Blase (nicht als Datei-Anhang). file_path
+--! MUSS Opus-in-OGG sein — Telegrams einziges Format fuer sendVoice.
+export fn tel_send_voice token chat_id file_path caption
+    tel_upload token "sendVoice" "voice" chat_id file_path caption
+
 --! Bearbeite eine gesendete Nachricht (mit Markdown, gleiches
 --! Fallback-Verhalten wie tel_send_message — siehe tel_post_with_markdown).
 export fn tel_edit_message_text token chat_id message_id text
