@@ -48,6 +48,17 @@ test "add_memory und top_memories nach Importance"
     expect_eq (get (at top 0) "content") "Espresso-Vorliebe" "hoechste Importance zuerst"
     mem.close h
 
+test "recipes liefert nur Rezepte, wichtigste zuerst"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "REZEPT: BTC-Kurs — btc-echo.de abrufen, zusammenfassen" "rezept" 4 "test" "rezept"
+    mem.add_memory h "Ganz normale Erinnerung" "permanent" 5 "test" "x"
+    mem.add_memory h "REZEPT: Wetterbericht — wetter.com abrufen, kurz vorlesen" "rezept" 2 "test" "rezept"
+    rs: mem.recipes h
+    expect_eq (len rs) 2 "nur die zwei Rezepte"
+    expect_eq (at rs 0) "REZEPT: BTC-Kurs — btc-echo.de abrufen, zusammenfassen" "wichtigstes Rezept zuerst"
+    expect_eq (at rs 1) "REZEPT: Wetterbericht — wetter.com abrufen, kurz vorlesen" "zweites Rezept danach"
+    mem.close h
+
 test "set_importance aendert die Importance einer Erinnerung"
     h: mem.init_db ":memory:"
     id: mem.add_memory h "Notiz" "fact" 2 "test" "x"

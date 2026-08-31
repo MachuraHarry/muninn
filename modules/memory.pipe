@@ -677,6 +677,16 @@ export fn retrieve_context h query k
             push out (get r "content")
     out
 
+--! Alle gespeicherten Workflow-Rezepte (kind "rezept"), wichtigste zuerst.
+--! Bewusst ohne Embedding-Suche: Rezepte sind selten und kurz — die KI soll
+--! aus der kleinen Liste selbst das passende waehlen.
+export fn recipes h
+    rows: db_query h "SELECT content FROM memories WHERE kind = 'rezept' ORDER BY importance DESC, id DESC LIMIT 10"
+    out: []
+    for r in rows
+        push out (get r "content")
+    out
+
 --! Reine Stichwort-Suche (deterministisch, ohne Embedding).
 export fn keyword_retrieve h query k
     terms: tokenize query

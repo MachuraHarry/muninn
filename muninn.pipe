@@ -516,10 +516,10 @@ fn handle_message token cid text dbh
     ensure_mcp_for_task tnorm
     tel.tel_send_chat_action token cid "typing"
     tid: mem.active_thread dbh cid
-    hist: mem.thread_history dbh tid 6
+    hist: mem.thread_history dbh tid 12
     task: tnorm
     if (len hist) > 0
-        task: "Bisheriger Gespraechsverlauf (aeltester zuerst):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
+        task: "Bisheriger Gespraechsverlauf (aeltester zuerst, ungekuerzt):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
     mem.log_event dbh (to_str cid) tnorm "chat"
     --! Live-Status: EINE Platzhalter-Nachricht senden und per editMessageText
     --! immer wieder aktualisieren, statt neuer Nachrichtenbloecke oder
@@ -1093,6 +1093,19 @@ fn sched_tick token
             tel.tel_send_message token (to_num cid) (get res2 "content")
             sched.cancel dbh (get item "id")
             continue
+        if kind == "proaktiv"
+            --! Proaktiver Eigenimpuls (P4): Muninn wurde NICHT angesprochen —
+            --! das Gremium entscheidet selbst, ob sich eine Nachricht lohnt.
+            --! Schweigen ist hier ein vollwertiges Ergebnis ("NICHTS"), sonst
+            --! spammt der taegliche Tick den Nutzer mit Leermeldungen zu.
+            setup_sandbox all_mcp_servers
+            prompt_proaktiv: "PROAKTIVER IMPULS (du wurdest NICHT angesprochen — entscheide selbst, ob sich eine Nachricht an den Nutzer lohnt): Sieh mit 'erinnerungen_suchen' in dein Gedaechtnis: gibt es offene/angefangene Aufgaben, unterbrochene Arbeiten, bald faellige Termine oder wichtige Entwicklungen zu Themen, die den Nutzer beschaeftigen — etwas, das der Nutzer selbst ansprechen wuerde? Gibt es etwas WICHTIGES: schreibe die kurze, konkrete Nachricht an den Nutzer; findest du eine Aufgabe, die du zu einem bestimmten Zeitpunkt wieder aufgreifen solltest, plane das selbst mit 'erinnerung_planen' bzw. 'hintergrund_fortsetzen'. Gibt es NICHTS Nennenswertes: antworte AUSSCHLIESSLICH mit dem einzelnen Wort NICHTS, ohne weitere Zeichen."
+            res_proaktiv: grm.run_gremium dbh (to_num cid) prompt_proaktiv
+            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
+            content_proaktiv: get res_proaktiv "content"
+            if content_proaktiv != nil && (lower (trim content_proaktiv)) != "nichts" && (trim content_proaktiv) != ""
+                tel.tel_send_message token (to_num cid) (shorten (trim content_proaktiv))
+            continue
         if cid != nil && cid != ""
             try
                 tel.tel_send_message token (to_num cid) msg
@@ -1311,6 +1324,26 @@ else
                     sched.schedule dbhc "calendar_check" allowed "" (now + 60) "15min"
                     print "Proaktive Kalender-Erinnerungen aktiviert."
                 mem.close_locked hlc
+            --! Taeglicher proaktiver Eigenimpuls (siehe sched_tick, kind
+            --! "proaktiv"): Muninn schaut einmal taeglich von sich aus ins
+            --! Gedaechtnis (offene Aufgaben, angefangene Arbeiten, Themen)
+            --! und meldet sich NUR, wenn es etwas Wichtiges gibt — sonst
+            --! Schweigen. Braucht eine feste TELEGRAM_ALLOWED_CHAT_ID als
+            --! Zieladresse (wie calendar_check oben). Idempotent: nur EIN
+            --! "proaktiv"-Eintrag pro Chat, sonst haeufen sich bei jedem
+            --! Neustart Doppel-Ticks.
+            if allowed != nil && allowed != ""
+                hlp: mem.open_locked nil
+                dbhp: get hlp "h"
+                has_proaktiv: false
+                for e in (sched.list dbhp allowed)
+                    if (get e "kind") == "proaktiv"
+                        has_proaktiv: true
+                if !has_proaktiv
+                    proaktiv_due: sched.next_hhmm 12 0 now tz_offset
+                    sched.schedule dbhp "proaktiv" allowed "" proaktiv_due "daily"
+                    print "Taeglicher proaktiver Eigenimpuls aktiviert."
+                mem.close_locked hlp
             try
                 cmds: []
                 push cmds {command: "start", description: "Begrüßung"}

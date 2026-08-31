@@ -33,6 +33,16 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
   echten Kalenderterminen angereichert), automatische Kalender-Erinnerungen (meldet sich von sich
   aus vor bevorstehenden Terminen), automatisches Fortsetzen unterbrochener Pläne,
   👍/👎-Feedback-Lernen.
+- **Proaktiver Eigenimpuls** — täglicher Selbst-Check (12:00): Muninn schaut von sich aus ins
+  Gedächtnis (offene Aufgaben, angefangene Arbeiten, wichtige Entwicklungen), meldet sich aber
+  nur, wenn es wirklich etwas gibt — sonst bewusst Schweigen. Kann dabei selbst Termine fürs
+  Wiederaufgreifen planen (`erinnerung_planen`/`hintergrund_fortsetzen`).
+- **Selbstreflexion & Rezepte** — nach Aufgaben speichert der Registrator wiederverwendbare
+  Lern-Erfahrungen („Was hat funktioniert, was nicht") als Erkenntnis und bewährte mehrschrittige
+  Arbeitsabläufe als **Rezepte** (`rezept_speichern`/`rezepte_suchen`); der Planer schlägt
+  Rezepte vor der Arbeit nach und zerlegt komplexe Aufgaben in Teilschritte.
+- **Längerer Gesprächskontext** — der Gremium-Lauf sieht jetzt den doppelten
+  Kurzzeit-Verlauf (12 statt 6 Nachrichten), Langzeitgedächtnis deckt den Rest ab.
 - **Web-Recherche** — DuckDuckGo + Wikipedia, Seiten-Fetch und Zusammenfassung (kein API-Key nötig).
 - **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, Browser, Docker,
   Dokumentations-Lookup, Google Workspace, Präsentationen/Dokumente, ...) per Model Context
@@ -839,6 +849,37 @@ Scheduler (kein Pipe-Hintergrundprozess, siehe Architekturhinweis unten).
   mehr selbst, sondern nutzt `mem.raw_exec`/`mem.raw_query` (dünne
   Durchreichen in `memory.pipe`, das `sqlite` bereits unproblematisch bare
   importiert).
+
+### Proaktiver Eigenimpuls, Selbstreflexion & Rezepte
+
+Drei zusammenhängende Ausbauten für mehr Autonomie („vom reinen
+Tool-Bediener zum selbstorganisierenden Agenten"):
+
+- **Proaktiver Eigenimpuls (`proaktiv`-Scheduler-Tick)**: einmal täglich
+  (12:00, idempotent beim Start registriert) bekommt das Gremium einen
+  Eigenimpuls, obwohl der Nutzer NICHT geschrieben hat. Es schaut per
+  `erinnerungen_suchen` ins Gedächtnis (offene Aufgaben, angefangene
+  Arbeiten, bald fällige Termine, wichtige Entwicklungen) und entscheidet
+  selbst: Gibt es etwas Wichtiges, schreibt es eine kurze, konkrete
+  Nachricht und kann sich per `erinnerung_planen`/`hintergrund_fortsetzen`
+  gleich den nächsten Wiedervorlage-Termin setzen. Gibt es nichts, antwortet
+  es AUSSCHLIESSLICH mit dem Wort „NICHTS" — und `sched_tick` sendet dann
+  bewusst nichts (Schweigen ist ein vollwertiges Ergebnis, kein
+  Leermeldungs-Spam).
+- **Selbstreflexion**: der Registrator speichert nach einem Lauf — nur wenn
+  es wirklich etwas Nennenswertes gab — eine wiederverwendbare
+  Lern-Erfahrung („Was hat funktioniert, was nicht, warum") als knappe
+  Erkenntnis mit dem bestehenden `merken`-Tool. Kein zusätzlicher KI-Call,
+  keine Kosten.
+- **Rezepte**: bewährte mehrschrittige Arbeitsabläufe werden als
+  Erinnerungen vom Kind `rezept` gespeichert (`rezept_speichern`,
+  Registrator) und vor der Arbeit nachgeschlagen (`rezepte_suchen`,
+  Planer) — der Planer folgt bei komplexen Aufgaben erst dem Rezept, bevor
+  er frei zerlegt. `mem.recipes` listet deterministisch die wichtigsten
+  Rezepte (bewusst ohne Embedding-Suche: Rezepte sind selten und kurz).
+- **Längerer Kontext**: `handle_message` übergibt dem Gremium jetzt die
+  letzten 12 statt 6 Nachrichten des Threads — Langzeitgedächtnis
+  (`retrieve_context`) deckt alles Ältere ab.
 
 ### Sprachnachrichten verstehen (`whisper`, `handle_voice`)
 
