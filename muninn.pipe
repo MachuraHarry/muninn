@@ -342,15 +342,41 @@ fn handle_voice token cid dbh msg
     if raw == nil || raw == ""
         tel.tel_send_message token cid "Sprachnachricht war leer oder nicht lesbar."
         return nil
+    --! Frisches Tool-Budget fuer die Transkription: tool_call laeuft unter dem
+    --! AKTUELL aktiven Sandbox-Profil und verbraucht dessen max_tool_calls-
+    --! Kontingent. Ueber den normalen Nachrichtenfluss wurden diese Profile nur
+    --! vor Gremium-Laefen zurueckgesetzt (setup_sandbox), NIE auf dem Sprachweg
+    --! — dadurch schlug der whisper-Aufruf bei einer spaeten Sprachnachricht
+    --! mit "E_SANDBOX: max tool calls exceeded" fehl, waerend die erste noch
+    --! funktionierte (frisches Profil). Wie bei den Gremium-Aufrufstellen hier
+    --! ein frisches Budget setzen, bevor transkribiert wird.
+    setup_sandbox all_mcp_servers
     text: nil
+    last_err: nil
     try
         b64: base64_encode raw
         res: tool_call "whisper_transcribe_base64" {audio_base64: b64, extension: "ogg", language: "de"}
-        j: parse_json res
-        text: get j "text"
+        --! tool_call liefert bei einem MCP-Fehler einen Rohtext (kein JSON, z.B.
+        --! "mcp call transcribe_base64: ..."). Erst als JSON-Objekt verstehen, wenn
+        --! es wirklich mit "{" beginnt; sonst den Rohtext als Fehlergrund notieren.
+        if (trim res) != nil && (len (trim res)) > 0 && (substring (trim res) 0 1) == "{"
+            try
+                j: parse_json res
+                text: get j "text"
+                if (get j "error") != nil
+                    last_err: to_str (get j "error")
+            catch e2
+                last_err: to_str e2
+        else
+            last_err: to_str res
     catch e
-        text: nil
+        last_err: to_str e
     if text == nil || (trim text) == ""
+        --! Echten Grund ins Journal loggen statt ihn still zu schlucken (der
+        --! alte leere catch lieferte KEINEN Hinweis, warum die Transkription
+        --! fehlschlug). Dem Nutzer ehrlich mitteilen, dass es fehlgeschlagen ist.
+        if last_err != nil
+            print ("whisper_transcribe_base64 fehlgeschlagen: " ++ last_err)
         tel.tel_send_message token cid "Sprachnachrichten verstehe ich gerade nicht (Transkription nicht verfuegbar oder fehlgeschlagen). Bitte tippe es."
         return nil
     handle_message token cid (trim text) dbh
