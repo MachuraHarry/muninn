@@ -33,8 +33,13 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
   automatisches Fortsetzen unterbrochener Pläne, 👍/👎-Feedback-Lernen.
 - **Web-Recherche** — DuckDuckGo + Wikipedia, Seiten-Fetch und Zusammenfassung (kein API-Key nötig).
 - **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, Browser, Docker, Wetter,
-  Dokumentations-Lookup, ...) per Model Context Protocol anbinden; laufen unter einem
-  Sandbox-Profil mit eng gefasster exec-Whitelist.
+  Dokumentations-Lookup, Google Workspace, ...) per Model Context Protocol anbinden; laufen unter
+  einem Sandbox-Profil mit eng gefasster exec-Whitelist.
+- **Live-Status-Stream** — während das Gremium arbeitet, editiert Muninn EINE Telegram-Nachricht
+  laufend weiter (welcher Agent aktiv ist, welches Werkzeug er aufruft), statt neuer
+  Nachrichtenblöcke oder Schweigens bis zur Endantwort.
+- **Google Workspace** — Gmail (inkl. Versand), Drive und Kalender per OAuth 2.0 angebunden
+  (`taylorwilsdon/google_workspace_mcp`), Tokens bewusst außerhalb des Filesystem-MCP-Bereichs.
 - **Eingeschränkte Docker-Erweiterung** — Image ziehen + Container anlegen, aber strukturell
   ohne Volume-Mounts/`--privileged`, Ports standardmäßig nur auf `127.0.0.1` (siehe
   [Sicherheit](#sicherheit)).
@@ -59,6 +64,8 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 | P5 — Automatische Werkzeug-Spezialisierung + Ehrlichkeits-Regeln | ✅ |
 | Kosten-Tracking (`/costs`, Dashboard-Tab) | ✅ |
 | Eingeschränkte Docker-Erweiterung (Image ziehen, Container anlegen) | ✅ |
+| Google Workspace (Gmail, Drive, Kalender) via MCP | ✅ |
+| Live-Status-Stream im Telegram-Chat (`ai_swarm_stream`) | ✅ |
 | M5 — Discord | ⏳ geplant |
 
 Weitere Schritte: [Plan.md](Plan.md)
@@ -181,6 +188,13 @@ habe morgen einen Termin …"), recherchiert, ein Werkzeug nutzt oder einfach
 antwortet — statt einer vorab-Klassifikation in feste Töpfe (siehe
 [Architektur → Inneres Gremium](#inneres-gremium-swarmpipe) für die
 Begründung).
+
+**Live-Status statt Stille.** Während das Gremium arbeitet, sendet Muninn eine
+Platzhalternachricht und bearbeitet sie laufend per `editMessageText`
+(„🧭 Plane die Antwort...", „🔧 Nutze wetter... → ruft get_forecast auf", …),
+gedrosselt auf ca. 1 Edit/Sekunde — statt neuer Nachrichtenblöcke oder
+kompletten Schweigens bis zur Endantwort. Details:
+[Architektur → Inneres Gremium](#inneres-gremium-swarmpipe).
 
 Antworten tragen **Inline-Buttons**: `💾 Merken` (in die Seele speichern) und
 `🔍 Vertiefen` (weiter recherchieren).
@@ -388,6 +402,18 @@ sein Handoff-Werkzeug nicht aufruft und der Pfad nicht beim `registrator` endet
 (sonst würden rohe interne Kommentare durchrutschen) — Prompt-Regeln allein
 garantieren das bei einem LLM nicht zuverlässig genug.
 
+**Live-Status-Stream.** `ai_swarm_trace` (der Pipe-Builtin hinter dem Gremium)
+lief bisher komplett synchron durch und lieferte erst am Ende ein Ergebnis —
+kein Zwischenstand für den Nutzer. Der Pipe-Interpreter selbst (`~/pipe`,
+`pkg/ai/swarm.go`) bekam dafür einen optionalen Fortschritts-Callback
+(`SwarmProgressFunc`), der nach jedem Runden-Start, Werkzeugaufruf, Handoff und
+der Endantwort feuert; als neuer Builtin `ai_swarm_stream` (task, entry_agent,
+max_rounds, on_progress) nimmt er dafür eine Pipe-Closure entgegen. `swarm.pipe`
+exportiert **`run_gremium_stream`** als UI-neutrales Gegenstück zu
+`run_gremium` — dieselbe Logik (inkl. Backstop), nur mit `on_update`-Callback.
+Das Telegram-spezifische Formatieren/Editieren (`swarm_status_text`,
+`tel_finalize`, `make_swarm_updater`) lebt bewusst in `muninn.pipe`, nicht hier.
+
 **P5 — automatische Werkzeug-Spezialisierung.** `mcp.discovered_tools_by_source`
 gruppiert alle per MCP verbundenen Werkzeuge nach Herkunfts-Server; `init_gremium`
 erzeugt daraus automatisch **einen eigenen Agenten pro Server**
@@ -499,6 +525,7 @@ unverändert wie zuvor.
 | `wetter` | `@dangahagan/weather-mcp` | Live-Wetterdaten (NOAA/Open-Meteo) |
 | `docker` | `mcp-docker-server` | bestehende Container/Images verwalten (kein Erstellen — siehe unten) |
 | `zeit` | `time-mcp` | Uhrzeit/Zeitzonen-Umrechnung |
+| `google` | `taylorwilsdon/google_workspace_mcp` | Gmail/Drive/Kalender — braucht eigenes OAuth-Setup, siehe unten |
 
 ### Eingeschränkte Docker-Erweiterung (`docker_tools.pipe`)
 
@@ -524,6 +551,42 @@ Root-Zugriff auf den Host. `docker_tools.pipe` deckt den konkreten Bedarf
 
 Nur der `werkzeug_docker`-Spezial-Agent bekommt diese beiden zusätzlichen
 lokalen Werkzeuge neben den MCP-Werkzeugen aus `docker`.
+
+### Google Workspace (`google_creds/`)
+
+Anders als die übrigen MCP-Server braucht Gmail/Drive/Kalender echtes OAuth 2.0
+statt eines einfachen API-Keys — Einrichtung in der Google Cloud Console
+(API-Aktivierung, OAuth-Consent-Screen, Client-ID/Secret), einmalige
+Browser-Freigabe pro Google-Konto. Details:
+
+- **Consent-Screen bleibt auf „Testing"**, mit dem eigenen Account als
+  Test-User — „In production" stellen würde für die genutzten sensiblen
+  Scopes (`gmail.send`, volles Drive/Calendar) eine echte App-Überprüfung
+  durch Google verlangen. Einziger Nachteil: das OAuth-Token läuft alle 7 Tage
+  ab und muss neu bestätigt werden (dauert ca. 2 Minuten).
+- **`--single-user`-Modus**: keine Multi-User-Session-Zuordnung, Zugangsdaten
+  werden aus dem konfigurierten `WORKSPACE_MCP_CREDENTIALS_DIR` gelesen.
+- **Tokens liegen in `google_creds/`** (gitignored, `chmod 700`) —
+  **bewusst außerhalb von `mcp_data`**, das der Filesystem-MCP-Server offenlegt.
+- **`BROWSER=/bin/true`** im Server-Environment ist Absicht: Der Server ruft bei
+  jeder Auth-Anfrage `webbrowser.open()` auf. Auf einem Server ohne GUI fällt
+  Python dabei auf `xdg-open` → `www-browser` zurück, einen Terminal-Textbrowser,
+  der volle ANSI-Steuercodes auf **stdout** schreibt — genau den Kanal, den
+  MCP-stdio für JSON braucht. Das zerstört den Protokoll-Stream und lässt den
+  Aufruf hängen. `/bin/true` macht `webbrowser.open()` zu einem sauberen No-op
+  (die Login-URL steht trotzdem in der Werkzeug-Antwort).
+- **`WORKSPACE_MCP_PERMISSIONS=gmail:send drive:full calendar:full`** — bewusste
+  Entscheidung für vollen Gmail-Versand statt nur Entwürfe (Nutzerentscheidung,
+  siehe Git-Historie); Drive/Kalender sind ohnehin jederzeit rückgängig zu
+  machen.
+- Der `werkzeug_google`-Spezial-Agent bekommt eine eigene Anleitung: bei
+  fehlender Autorisierung selbstständig `start_google_auth` aufrufen und die
+  zurückgegebene Freigabe-URL an den Nutzer weiterreichen, statt zu behaupten,
+  das Verbinden ginge nicht.
+
+Einmalige Einrichtung (aus der Ferne): SSH-Port-Forward auf den OAuth-Callback
+(`ssh -L 8000:localhost:8000 user@server`), dann in Telegram „Verbinde mein
+Google-Konto" schreiben und den zurückgegebenen Link im eigenen Browser öffnen.
 
 ### Kosten-Tracking (`memory.pipe`, `muninn.pipe`)
 
