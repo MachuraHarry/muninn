@@ -166,12 +166,15 @@ RESULT_HONESTY_RULE: "Behaupte NIEMALS pauschal, 'web_search'/'web_fetch' seien 
 --! Kontext und echte Werkzeuge hat).
 HONESTY_RULE: "Ist eine Nutzeranfrage zu vage oder unspezifisch, um eine konkrete, sinnvolle Aktion daraus abzuleiten (z.B. 'mach mal irgendwas'), erfinde NIEMALS eine Aktion und behaupte NIEMALS, etwas getan zu haben, das nicht wirklich stattgefunden hat. Frage stattdessen freundlich und konkret nach, was genau gewuenscht ist.\n\n"
 
---! Telegram rendert nur sein eigenes, sehr einfaches Markdown (einfache
---! Sternchen fuer fett, kein Markdown-Standard) — die tg_markdown-Normalisierung
---! in telegram.pipe wandelt **fett** zwar in *fett* um, aber Ueberschriften/
---! Tabellen/verschachtelte Listen bleiben trotzdem kaputt bzw. wirken in einem
---! Chat overdressed. Diese Regel haelt die Ausgabe von vornherein einfach.
-FORMAT_RULE: "Formatiere deine Antwort fuer einen Telegram-Chat, nicht fuer ein Dokument: keine Markdown-Ueberschriften (#), keine Tabellen, keine verschachtelten Listen. Fettung sparsam mit *einfachen* Sternchen. Kurze Absaetze statt langer Bloecke.\n\n"
+--! tg_html (telegram.pipe) wandelt **fett**/*kursiv*/`code`/[text](url)
+--! zuverlaessig in Telegrams HTML-Parse-Mode um (robuster als Telegrams
+--! eigenes strenges "Markdown", das bei unausgewogenen Entities still auf
+--! Klartext zurueckfiel) — diese Grundformatierung darf die KI also normal
+--! per CommonMark-Syntax nutzen. Was aber NIE gut rendert, egal welcher
+--! Modus: Markdown-Ueberschriften (#), Tabellen, verschachtelte Listen —
+--! die gibt es in Telegram-Chats schlicht nicht, diese Regel haelt die
+--! Ausgabe deshalb strukturell einfach.
+FORMAT_RULE: "Formatiere deine Antwort fuer einen Telegram-Chat, nicht fuer ein Dokument: keine Markdown-Ueberschriften (#), keine Tabellen, keine verschachtelten Listen. **Fettung**/*Kursiv*/`Code`/[Links](url) darfst du normal per CommonMark-Syntax nutzen, das wird zuverlaessig dargestellt. Kurze Absaetze statt langer Bloecke.\n\n"
 
 --! Ohne diese Regel behauptet das Modell bei Fragen zu Muninns eigenen
 --! Werkzeugen faelschlich Dinge wie "ich habe keinen Zugriff auf Werkzeuge" —

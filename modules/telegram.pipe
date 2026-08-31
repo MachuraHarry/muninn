@@ -94,28 +94,40 @@ export fn tel_get_updates token offset timeout
     else
         []
 
---! Normalisiert vom LLM erzeugtes Markdown auf Telegrams "Markdown"-Parse-Mode
---! (V1): **fett**/__fett__ -> *fett* (V1 kennt nur einfache Sternchen/
---! Unterstriche fuer fett/kursiv, KEINE doppelten). LLMs schreiben aber
---! durchgehend CommonMark-Stil (**fett**) — ohne diese Normalisierung wuerden
---! Nutzer entweder woertliche Sternchen sehen (kein parse_mode) oder Telegram
---! lehnt die Nachricht als kaputte Entity ab.
-fn tg_markdown text
-    t: replace_all text "**" "*"
-    t: replace_all t "__" "_"
+--! Wandelt CommonMark-Stil (wie das LLM ihn natuerlich erzeugt: **fett**,
+--! *kursiv*, `code`, [text](url)) in Telegrams HTML-Parse-Mode um.
+--! BEWUSST HTML statt Telegrams eigenem "Markdown"-Modus: dessen Parser ist
+--! sehr streng bei unausgewogenen/verschachtelten Entities und scheiterte in
+--! der Praxis haeufig, wonach die Antwort STILLSCHWEIGEND auf reinen
+--! Klartext zurueckfiel (Nutzer sah dann nie Formatierung, ohne dass ein
+--! Fehler sichtbar wurde) — HTML braucht nur 3 escapte Zeichen (&, <, >)
+--! und ist viel nachsichtiger. Einzelnes Unterstrich-Kursiv (_wort_) wird
+--! ABSICHTLICH NICHT umgewandelt: kollidiert zu haeufig mit technischen
+--! Begriffen wie snake_case-Variablennamen, die im Bot-Kontext oft vorkommen.
+--! Reihenfolge wichtig: erst escapen, DANACH eigene Tags einfuegen — sonst
+--! wuerden die eigenen Tags mit-escaped.
+fn tg_html text
+    t: regex_replace "&" "&amp;" text
+    t: regex_replace "<" "&lt;" t
+    t: regex_replace ">" "&gt;" t
+    t: regex_replace "\\*\\*(.+?)\\*\\*" "<b>$1</b>" t
+    t: regex_replace "__(.+?)__" "<b>$1</b>" t
+    t: regex_replace "\\*(.+?)\\*" "<i>$1</i>" t
+    t: regex_replace "`([^`]+)`" "<code>$1</code>" t
+    t: regex_replace "\\[([^\\]]+)\\]\\(([^)]+)\\)" "<a href=\"$2\">$1</a>" t
     t
 
---! Sendet mit parse_mode "Markdown"; scheitert das (z.B. unausgewogene
---! Entities, die die Normalisierung oben nicht abdeckt), wird als Klartext
---! nachgesendet — so geht nie eine Antwort wegen eines Formatierungsfehlers
---! verloren, nur die Formatierung faellt in dem Fall weg.
+--! Sendet mit parse_mode "HTML" (siehe tg_html); scheitert das trotzdem
+--! (z.B. durch eine von der Normalisierung nicht abgedeckte Kante), wird als
+--! Klartext nachgesendet — so geht nie eine Antwort wegen eines
+--! Formatierungsfehlers verloren, nur die Formatierung faellt in dem Fall weg.
 fn tel_post_with_markdown token method m
     orig_text: get m "text"
     md: {}
     for k in (keys m)
         set md k (get m k)
-    set md "text" (tg_markdown orig_text)
-    set md "parse_mode" "Markdown"
+    set md "text" (tg_html orig_text)
+    set md "parse_mode" "HTML"
     res: tel_post token method md
     if (get res "ok") == false
         res: tel_post token method m
