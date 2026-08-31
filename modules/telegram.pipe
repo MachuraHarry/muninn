@@ -176,13 +176,27 @@ export fn tel_send_photo token chat_id file_path caption
 export fn tel_send_document token chat_id file_path caption
     tel_upload token "sendDocument" "document" chat_id file_path caption
 
---! Bearbeite eine gesendete Nachricht.
+--! Bearbeite eine gesendete Nachricht (mit Markdown, gleiches
+--! Fallback-Verhalten wie tel_send_message — siehe tel_post_with_markdown).
 export fn tel_edit_message_text token chat_id message_id text
     m: {}
     set m "chat_id" chat_id
     set m "message_id" message_id
     set m "text" text
-    tel_post token "editMessageText" m
+    tel_post_with_markdown token "editMessageText" m
+
+--! Wie tel_edit_message_text, aber mit Inline-Tastatur (kb = Liste von
+--! Button-Reihen, siehe tel_send_message_kb).
+export fn tel_edit_message_text_kb token chat_id message_id text kb
+    m: {}
+    set m "chat_id" chat_id
+    set m "message_id" message_id
+    set m "text" text
+    if kb != nil
+        rm: {}
+        set rm "inline_keyboard" kb
+        set m "reply_markup" rm
+    tel_post_with_markdown token "editMessageText" m
 
 --! Lösche eine Nachricht.
 export fn tel_delete_message token chat_id message_id

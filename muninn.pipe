@@ -428,15 +428,24 @@ fn handle_message token cid text dbh
     if (len hist) > 0
         task: "Bisheriger Gespraechsverlauf (aeltester zuerst):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
     mem.log_event dbh (to_str cid) tnorm "chat"
+    --! Live-Status: EINE Platzhalter-Nachricht senden und per editMessageText
+    --! immer wieder aktualisieren, statt neuer Nachrichtenbloecke oder
+    --! komplettem Schweigen waehrend das Gremium arbeitet (siehe
+    --! swarm_status_text/tel_finalize unten, run_gremium_stream in swarm.pipe).
+    message_id: nil
+    ph: tel.tel_send_message token cid "🧠 Denke nach..."
+    if (get ph "ok") == true
+        message_id: get (get ph "result") "message_id"
+    on_update: make_swarm_updater token cid message_id
     answer: ""
     try
-        res: grm.run_gremium dbh cid task
+        res: grm.run_gremium_stream dbh cid task on_update
         answer: get res "content"
     catch
         answer: ""
     mem.add_message dbh tid cid "user" tnorm
     if question_needs_research answer
-        tel.tel_send_message token cid "Kein Wissen darüber. Recherchiere..."
+        tel_finalize token cid message_id "Kein Wissen darüber. Recherchiere..." nil
         do_search token cid dbh tnorm
         return nil
     if answer == nil || answer == ""
@@ -453,16 +462,16 @@ fn handle_message token cid text dbh
                 for c in ctx
                     reply: reply ++ "• " ++ c ++ "\n"
             mem.add_message dbh tid cid "assistant" reply
-            tel.tel_send_message token cid reply
+            tel_finalize token cid message_id reply nil
         else
-            tel.tel_send_message token cid "Kein Wissen darüber. Recherchiere..."
+            tel_finalize token cid message_id "Kein Wissen darüber. Recherchiere..." nil
             rr: web.research tnorm
             ctx2: get rr "context"
             srcs2: get rr "sources"
             if ctx2 == nil || ctx2 == ""
                 fallback: "Ich konnte online nichts Relevantes finden."
                 mem.add_message dbh tid cid "assistant" fallback
-                tel.tel_send_message token cid fallback
+                tel_finalize token cid message_id fallback nil
             else
                 answer2: ""
                 try
@@ -486,7 +495,7 @@ fn handle_message token cid text dbh
                 push row2 (tel.tel_button "👍" "up")
                 push row2 (tel.tel_button "👎" "down")
                 push kb row2
-                tel.tel_send_message_kb token cid (shorten full) kb
+                tel_finalize token cid message_id (shorten full) kb
     else
         mem.add_message dbh tid cid "assistant" answer
         kb: []
@@ -498,7 +507,72 @@ fn handle_message token cid text dbh
         push row2 (tel.tel_button "👍" "up")
         push row2 (tel.tel_button "👎" "down")
         push kb row2
-        tel.tel_send_message_kb token cid (shorten answer) kb
+        tel_finalize token cid message_id (shorten answer) kb
+
+--! Uebersetzt einen Gremium-Fortschritts-Schritt (siehe ai_swarm_stream/
+--! run_gremium_stream) in eine kurze Statuszeile fuers Live-Editieren der
+--! Telegram-Platzhalternachricht. "handoff"/"final" werden vom Aufrufer schon
+--! rausgefiltert (der naechste "start" zeigt den neuen Agenten ohnehin an).
+fn swarm_status_text agent event detail
+    label: "🧠 " ++ agent ++ " denkt nach..."
+    if agent == "planer"
+        label: "🧭 Plane die Antwort..."
+    else if agent == "faktenwaechter"
+        label: "🔍 Prüfe Fakten und Gedächtnis..."
+    else if agent == "kritiker"
+        label: "🧐 Prüfe die Antwort..."
+    else if agent == "registrator"
+        label: "✍️ Schreibe die Antwort..."
+    else if (len agent) > 9 && (substring agent 0 9) == "werkzeug_"
+        label: "🔧 Nutze " ++ (substring agent 9 (len agent)) ++ "..."
+    if event == "tool" && detail != nil && detail != ""
+        label: label ++ "\n→ ruft " ++ detail ++ " auf"
+    label
+
+--! Baut die on_update-Closure fuer run_gremium_stream: uebersetzt jeden
+--! Fortschritts-Schritt in eine Statuszeile und editiert damit (gedrosselt
+--! auf ca. 1x/Sekunde, keine Wiederholungen) die per message_id referenzierte
+--! Platzhalternachricht. message_id darf nil sein (Platzhalter-Versand
+--! fehlgeschlagen) — dann ist die Closure ein No-op.
+fn make_swarm_updater token cid message_id
+    stream_state: {last_text: "", last_ms: 0}
+    fn on_update agent event detail
+        if event == "handoff" || event == "final"
+            return nil
+        text: swarm_status_text agent event detail
+        if text == (get stream_state "last_text")
+            return nil
+        ms: time_ms
+        if (ms - (get stream_state "last_ms")) < 1000
+            return nil
+        set stream_state "last_text" text
+        set stream_state "last_ms" ms
+        if message_id != nil
+            tel.tel_edit_message_text token cid message_id text
+    on_update
+
+--! Schliesst eine Live-Status-Nachricht mit dem Endergebnis ab: editiert die
+--! per message_id referenzierte Platzhalternachricht (optional mit Tastatur
+--! kb), faellt aber auf eine neue Nachricht zurueck, wenn message_id fehlt
+--! (Platzhalter konnte nicht gesendet werden) oder der Edit selbst scheitert
+--! (z.B. Nutzer hat die Nachricht geloescht) — so geht nie eine fertige
+--! Antwort verloren.
+fn tel_finalize token cid message_id text kb
+    if message_id == nil
+        if kb == nil
+            return (tel.tel_send_message token cid text)
+        return (tel.tel_send_message_kb token cid text kb)
+    r: nil
+    if kb == nil
+        r: tel.tel_edit_message_text token cid message_id text
+    else
+        r: tel.tel_edit_message_text_kb token cid message_id text kb
+    if (get r "ok") == false
+        if kb == nil
+            r: tel.tel_send_message token cid text
+        else
+            r: tel.tel_send_message_kb token cid text kb
+    r
 
 --! Prüft, ob eine KI-Antwort einen "ich weiß es nicht"-Fallback darstellt,
 --! der nach einer Web-Recherche auffordert.
@@ -658,14 +732,19 @@ fn handle_callback token dbh cbq
     if data == "more"
         if txt != nil
             tel.tel_send_chat_action token cid "typing"
-            res: grm.run_gremium dbh cid ("Vertiefe bitte diesen Sachverhalt: " ++ txt)
+            message_id: nil
+            ph: tel.tel_send_message token cid "🧠 Vertiefe..."
+            if (get ph "ok") == true
+                message_id: get (get ph "result") "message_id"
+            on_update: make_swarm_updater token cid message_id
+            res: grm.run_gremium_stream dbh cid ("Vertiefe bitte diesen Sachverhalt: " ++ txt) on_update
             a: get res "content"
             if a != nil && a != ""
                 tid: mem.active_thread dbh cid
                 mem.add_message dbh tid cid "assistant" a
-                tel.tel_send_message token cid (shorten a)
+                tel_finalize token cid message_id (shorten a) nil
             else
-                tel.tel_send_message token cid "Ich konnte leider nichts vertiefen."
+                tel_finalize token cid message_id "Ich konnte leider nichts vertiefen." nil
         return nil
     if data == "up"
         if txt != nil

@@ -320,20 +320,15 @@ export fn init_gremium _
 
     nil
 
---! Fuehrt das Gremium aus. Liefert {content, path, rounds}. cid: Chat-Kontext
---! fuer tool_erinnerung_planen (siehe STATE-Kommentar oben).
-export fn run_gremium dbh cid task
-    set STATE "dbh" dbh
-    set STATE "cid" cid
-    res: ai_swarm_trace task "planer" 18
+--! Backstop: die HANDOFF_RULE reduziert vorzeitige Enden (Agent gibt Text aus
+--! statt sein Handoff-Werkzeug aufzurufen), aber garantiert es nicht —
+--! beobachtet bei "Wer bin ich?": Pfad endete bei faktenwaechter statt
+--! registrator, samt rohem "an den Kritiker weitergeleitet"-Kommentar. Statt
+--! uns allein auf Prompt-Befolgung zu verlassen, hier ein deterministischer
+--! Nachputz-Schritt. Von run_gremium UND run_gremium_stream geteilt.
+fn apply_registrator_backstop res
     path: get res "path"
     if (len path) > 0 && (at path ((len path) - 1)) != "registrator"
-        --! Backstop: die HANDOFF_RULE reduziert vorzeitige Enden (Agent gibt
-        --! Text aus statt sein Handoff-Werkzeug aufzurufen), aber garantiert es
-        --! nicht — beobachtet bei "Wer bin ich?": Pfad endete bei faktenwaechter
-        --! statt registrator, samt rohem "an den Kritiker weitergeleitet"-
-        --! Kommentar. Statt uns allein auf Prompt-Befolgung zu verlassen, hier
-        --! ein deterministischer Nachputz-Schritt.
         cleaned: get res "content"
         try
             cleaned: ai_chat "Formuliere die folgende interne Notiz eines KI-Agenten als knappe, direkte Antwort an den Nutzer um. Entferne jeden Meta-Kommentar ueber das Gremium selbst (z.B. 'ich leite weiter', 'an den Kritiker uebergeben', Erwaehnung von Agentennamen wie Planer/Faktenwaechter/Kritiker/Registrator). Gib NUR die bereinigte Antwort aus, kein Meta-Kommentar darueber." (get res "content")
@@ -341,3 +336,22 @@ export fn run_gremium dbh cid task
             cleaned: get res "content"
         set res "content" cleaned
     res
+
+--! Fuehrt das Gremium aus. Liefert {content, path, rounds}. cid: Chat-Kontext
+--! fuer tool_erinnerung_planen (siehe STATE-Kommentar oben).
+export fn run_gremium dbh cid task
+    set STATE "dbh" dbh
+    set STATE "cid" cid
+    res: ai_swarm_trace task "planer" 18
+    apply_registrator_backstop res
+
+--! Wie run_gremium, aber mit Live-Fortschritt: on_update wird als
+--! on_update(agent, event, detail) bei jedem Schwarm-Schritt aufgerufen
+--! (event: "start"|"tool"|"handoff"|"final", siehe ai_swarm_stream). Bleibt
+--! UI-neutral — Telegram-spezifisches Formatieren/Editieren passiert beim
+--! Aufrufer (muninn.pipe), nicht hier.
+export fn run_gremium_stream dbh cid task on_update
+    set STATE "dbh" dbh
+    set STATE "cid" cid
+    res: ai_swarm_stream task "planer" 18 on_update
+    apply_registrator_backstop res
