@@ -91,7 +91,14 @@ fn setup_sandbox servers
     allow_exec: (len wl) > 0
     set SANDBOX_STATE "gen" ((get SANDBOX_STATE "gen") + 1)
     name: "muninn-" ++ (to_str (get SANDBOX_STATE "gen"))
-    sandbox_profile name {fs: "full", network: true, exec: allow_exec, exec_whitelist: wl, ai: true, max_tool_calls: 40, audit_log: true}
+    --! max_tool_calls gilt fuer die GESAMTE Gremiums-Anfrage (Recherche +
+    --! evtl. Dokument-Erstellung zusammen), seit obigem Fix pro Nachricht neu.
+    --! 40 war dafuer zu knapp: live beobachtet, dass allein die Recherche zu
+    --! einem schwer im Web dokumentierten Thema schon 40+ Tool-Aufrufe braucht
+    --! (viele Fehlversuche/Praezisierungen), WOVOR ueberhaupt ein Kapitel ins
+    --! Dokument geschrieben wurde — das Limit schlug dann mitten in der
+    --! Dokument-Erstellung zu, das Dokument blieb nur teilweise befuellt.
+    sandbox_profile name {fs: "full", network: true, exec: allow_exec, exec_whitelist: wl, ai: true, max_tool_calls: 150, audit_log: true}
     set_sandbox name
     nil
 
