@@ -288,6 +288,8 @@ export fn init_gremium _
             push gtools "docker_pull_image"
             push gtools "docker_create_container"
             extra_note: " Zusaetzlich hast du 'docker_pull_image' und 'docker_create_container' fuer neue Container/Images — dabei gibt es KEINE Volume-Mounts und KEIN --privileged, das ist Absicht (Sicherheit), nicht ein fehlendes Feature; biete das dem Nutzer nicht als moeglich an. Neue Container sind standardmaessig nur auf localhost erreichbar, ausser der Nutzer will es ausdruecklich oeffentlich (dann public='true')."
+        if alias == "google"
+            extra_note: " Das Google-Konto des Nutzers ist harrymachura6@gmail.com — gib dieses 'user_google_email' bei JEDEM Gmail/Drive/Kalender-Werkzeugaufruf mit, es wird nie automatisch ergaenzt. Meldet ein Werkzeug, es fehle die Anmeldung/Autorisierung, rufe SOFORT 'start_google_auth' auf (service_name z.B. 'gmail') und gib die zurueckgegebene Google-Freigabe-URL WOERTLICH an den Nutzer weiter, damit er sie im Browser oeffnen kann — behaupte NIE, das Verbinden des Google-Kontos ginge nicht. Der Nutzer hat vollen Gmail-Versand sowie vollen Lese-/Schreibzugriff auf Drive und Kalender bewusst freigegeben."
         agent_name: "werkzeug_" ++ alias
         push specialist_names agent_name
         specialist_desc: specialist_desc ++ "- '" ++ agent_name ++ "': Werkzeuge aus '" ++ alias ++ "' (" ++ (join gtools ", ") ++ ")\n"

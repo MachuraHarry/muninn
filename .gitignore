@@ -16,6 +16,9 @@
 mcp_data/
 .playwright-mcp/
 
+# Google-OAuth-Tokens (bewusst AUSSERHALB von mcp_data, siehe google_creds/README)
+google_creds/
+
 # Pipe-Caches / Bytecode
 ~/.pipe
 *.pipec
