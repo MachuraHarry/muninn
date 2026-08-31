@@ -381,6 +381,34 @@ Ein periodischer Aufräum-/Verdichtungsjob, ausführbar per `pipe muninn.pipe co
 
 ### Inneres Gremium (`swarm.pipe`)
 
+**Warum ein KI-Schwarm statt eines einzelnen KI-Aufrufs?** Das Gremium ist
+technisch ein KI-Schwarm (Pipe-Builtin `ai_swarm`/`ai_swarm_trace`/
+`ai_swarm_stream`) — mehrere spezialisierte Agenten mit je eigenem
+System-Prompt und eigenem Werkzeugsatz, die die Konversation per Handoff
+untereinander weiterreichen, statt ein einzelnes KI-Modell alles auf einmal
+entscheiden zu lassen. Vorteile gegenüber einem einzelnen Alleskönner-Aufruf:
+
+- **Spezialisierung statt Überforderung** — ein Agent mit drei klar
+  umrissenen Werkzeugen (z.B. `faktenwaechter`: Gedächtnis + Web) trifft
+  zuverlässiger die richtige Werkzeugwahl als ein Agent, der aus Dutzenden
+  Werkzeugen aller Domänen gleichzeitig wählen müsste (siehe P5 unten).
+- **Eingebaute Selbstkorrektur** — der `kritiker`-Schritt prüft jede Antwort
+  auf Lücken/Widersprüche, bevor sie den Nutzer erreicht, und kann bei Bedarf
+  zurück an `faktenwaechter`/den zuständigen Spezialisten schicken, statt
+  einen einzigen unüberprüften Versuch auszuliefern.
+- **Trennung von Recherche und Formulierung** — `registrator` schließt bewusst
+  als einziger Agent ab (Speichern, Erinnerungen planen, Antwortformat), damit
+  nicht jeder Zwischenschritt eigene, ggf. widersprüchliche Nutzeraussagen
+  formuliert.
+- **Skaliert ohne Umbau** — neue Fähigkeiten (ein neuer MCP-Server, siehe P5)
+  bekommen automatisch einen eigenen Agenten, statt den Prompt eines
+  monolithischen Alleskönners immer weiter aufzublähen.
+
+Kehrseite: mehr Agenten-Runden bedeuten mehr Latenz und Kosten pro Antwort
+als ein einzelner KI-Aufruf — abgefedert durch den Live-Status-Stream weiter
+unten in diesem Abschnitt, der während der Wartezeit zeigt, welcher Agent
+gerade was tut.
+
 **Ein Pfad statt Klassifikations-Töpfe.** Ursprünglich klassifizierte Muninn jede
 Nachricht vorab (regelbasiert + ein kontextfreier KI-Aufruf) in
 `permanent`/`reminder`/`task`/`goal`/`fleeting`/`question` und verzweigte in sechs
