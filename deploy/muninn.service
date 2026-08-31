@@ -1,0 +1,32 @@
+[Unit]
+Description=Muninn — persoenlicher KI-Agent (Telegram-Bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/muninn
+Environment=PATH=/root/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/pipe muninn.pipe
+
+# Sauberes Herunterfahren: der Pipe-Interpreter faengt SIGTERM/SIGINT selbst
+# ab, schliesst alle MCP-Subprozesse geordnet und beendet sich danach mit
+# Exit-Code 143/130 (konventionell 128+Signalnummer) — kein echter Fehler,
+# aber systemd wertet jeden Nicht-Null-Code sonst als "failed". Zusaetzlich
+# raeumt systemds eigenes cgroup-basiertes Kill-Verhalten (Standard:
+# KillMode=control-group) beim Stoppen ohnehin ALLE Prozesse der Unit auf
+# (inkl. MCP-Enkel-Prozesse), auch falls der interpreterseitige Shutdown
+# je einen Fall uebersehen sollte.
+SuccessExitStatus=143 130
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+# Loggt automatisch in den systemd-Journal (journalctl -u muninn -f) statt
+# in eine manuell verwaltete Datei wie beim bisherigen nohup-Start.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
