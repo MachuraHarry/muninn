@@ -98,7 +98,7 @@ cp .env.example .env
 ```bash
 TELEGRAM_BOT_TOKEN=123456:ABC...        # Token von @BotFather (/newbot)
 TELEGRAM_ALLOWED_CHAT_ID=               # deine Chat-ID von @userinfobot (leer = jeder darf)
-DEEPSEEK_API_KEY=sk-...                 # für Klassifikation, Gremium, Zusammenfassung
+DEEPSEEK_API_KEY=sk-...                 # erforderlich: DeepSeek-Key für Klassifikation, Gremium, Zusammenfassung
 MCP_SERVERS=                            # optional: JSON-Liste externer MCP-Server (siehe .env.example)
 MCP_AUTO_SERVERS=                       # optional: vertrauenswürdige Server mit Keywords für Bedarfsladen
 BRIEFING_TIME=08:00                     # optional (P4): Uhrzeit des täglichen Briefings
@@ -106,8 +106,8 @@ MUNINN_TZ_OFFSET=0                      # optional (P4): Sekunden-Offset der lok
 ```
 
 > Muninn nutzt **DeepSeek** als Provider (kostenlos anmeldbar unter platform.deepseek.com).
-> Für *echte* semantische Embeddings (statt des lexikalischen DeepSeek-Fallbacks)
-> kann alternativ OpenAI/Ollama konfiguriert werden.
+> Die Implementierung setzt derzeit bewusst auf DeepSeek fest; `MUNINN_PROVIDER`
+> wird nur als Hinweis gelesen, aber nicht als alternativer Provider aktiviert.
 
 > **MCP-Server (optional):** `MCP_SERVERS` bindet externe Werkzeuge per Model Context
 > Protocol ein (siehe `.env.example` für das Format). Leer = deaktiviert, kein `exec`

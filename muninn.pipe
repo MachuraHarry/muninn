@@ -38,10 +38,11 @@ fn cfg_get cfg key
         return v
     get cfg key
 
---! Richtet den AI-Provider ein (DeepSeek; KI-Klassifikation, Kondensation, Embeddings).
---! Nimmt den Key direkt entgegen (nicht cfg+cfg_get): sobald die Sandbox aktiv ist,
---! blockiert `env()` sicherheitshalber jeden Namen, der wie ein Secret aussieht
---! (*KEY*/*TOKEN*/*SECRET*) — DEEPSEEK_API_KEY muss also VOR set_sandbox gelesen sein.
+--! Richtet den AI-Provider ein (DeepSeek). Muninn soll nur DeepSeek nutzen;
+--! andere Provider-Varianten sind hier bewusst nicht erlaubt. Sobald die
+--! Sandbox aktiv ist, blockiert `env()` sicherheitshalber jeden Namen, der
+--! wie ein Secret aussieht (*KEY*/*TOKEN*/*SECRET*) — DEEPSEEK_API_KEY muss
+--! also VOR set_sandbox gelesen sein.
 fn setup_ai key
     ai_provider "deepseek" {thinking: false}
     if key != nil && key != ""
@@ -844,7 +845,12 @@ if (len avgs) > 0
 --! setup_ai/setup_sandbox): einmal von vertrauenswürdigem Startup-Code eingesammelt,
 --! danach nur noch als Wert weitergereicht — nie erneut per env() nachgefragt.
 cfg: load_env ".env"
+configured_provider: lower (trim (cfg_get cfg "MUNINN_PROVIDER"))
+if configured_provider != nil && configured_provider != "" && configured_provider != "deepseek"
+    print ("Muninn nutzt nur DeepSeek; MUNINN_PROVIDER='" ++ configured_provider ++ "' wird ignoriert.")
 deepseek_key: cfg_get cfg "DEEPSEEK_API_KEY"
+if deepseek_key == nil || deepseek_key == ""
+    print "WARNUNG: DEEPSEEK_API_KEY fehlt — Muninn nutzt nur DeepSeek und kann keine KI-Antworten generieren."
 dash_bind: cfg_get cfg "DASHBOARD_BIND"
 dash_token: cfg_get cfg "DASHBOARD_TOKEN"
 briefing_time: cfg_get cfg "BRIEFING_TIME"
