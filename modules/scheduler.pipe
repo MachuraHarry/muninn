@@ -61,8 +61,10 @@ export fn next_hhmm hh mm now_sec offset_sec
         target: target + 86400
     target - offset_sec
 
---! Plant eine Aufgabe/Erinnerung ein. kind: "reminder" | "briefing" | "goal_tick".
---! due_sec: Unix-Sekunden. repeat: "" (einmalig) | "daily" | "weekly". Liefert id.
+--! Plant eine Aufgabe/Erinnerung ein. kind: "reminder" | "briefing" | "goal_tick"
+--! | "calendar_check". due_sec: Unix-Sekunden. repeat: "" (einmalig) | "daily"
+--! | "weekly" | "15min" (Kalender-Check-Takt, siehe muninn.pipe sched_tick).
+--! Liefert id.
 export fn schedule h kind chat_id text due_sec repeat
     init_scheduler h
     db_exec h ("INSERT INTO scheduled (kind, chat_id, note, due_ts, repeat, state, created) VALUES ('" ++ (mem.sql_escape kind) ++ "', '" ++ (mem.sql_escape (to_str chat_id)) ++ "', '" ++ (mem.sql_escape text) ++ "', " ++ (to_str due_sec) ++ ", '" ++ (mem.sql_escape repeat) ++ "', 'pending', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "')")
@@ -73,13 +75,15 @@ export fn due h now_sec
     init_scheduler h
     db_query h ("SELECT id, kind, chat_id, note, due_ts, repeat FROM scheduled WHERE state = 'pending' AND due_ts <= " ++ (to_str now_sec) ++ " ORDER BY due_ts ASC")
 
---! Markiert einen Eintrag als erledigt — bzw. schiebt ihn bei daily/weekly auf
---! den nächsten Termin (+86400/+604800) statt ihn zu schliessen.
+--! Markiert einen Eintrag als erledigt — bzw. schiebt ihn bei daily/weekly/15min
+--! auf den naechsten Termin (+86400/+604800/+900) statt ihn zu schliessen.
 export fn mark_fired h id repeat due_sec
-    if repeat == "daily" || repeat == "weekly"
+    if repeat == "daily" || repeat == "weekly" || repeat == "15min"
         inc: 86400
         if repeat == "weekly"
             inc: 604800
+        if repeat == "15min"
+            inc: 900
         db_exec h ("UPDATE scheduled SET due_ts = " ++ (to_str (due_sec + inc)) ++ ", last_fired = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
     else
         db_exec h ("UPDATE scheduled SET state = 'done', last_fired = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))

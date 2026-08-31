@@ -133,6 +133,10 @@ export fn connect_servers servers
         i: i + 1
     out
 
+--! Ob ein Server per Alias aktuell erfolgreich verbunden ist.
+export fn is_connected alias
+    (get CONNECTED alias) == true
+
 --! Waehlt MCP-Server aus einer vertrauenswuerdigen Auto-Registry. Ein Eintrag
 --! braucht `keywords` und die normale Server-Konfiguration.
 export fn auto_servers_for_task servers task

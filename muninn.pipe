@@ -834,6 +834,101 @@ fn parse_briefing_time raw
     set out "mm" mm
     out
 
+--! Unix-Sekunden von "morgen 00:00" in der konfigurierten Zeitzone (fuer
+--! "Termine bis Ende des heutigen Tages" in der Briefing-Anreicherung unten
+--! — gleiche Tagesgrenzen-Logik wie next_hhmm in scheduler.pipe).
+fn day_end_sec now_sec offset_sec
+    shifted: now_sec + offset_sec
+    day_start: shifted - (shifted % 86400)
+    (day_start + 86400) - offset_sec
+
+--! Ruft das Google-Calendar-MCP-Werkzeug fuer Termine im Zeitfenster ab.
+--! Liefert den vom Werkzeug formatierten Text (kein rohes JSON verfuegbar)
+--! oder nil bei jedem Fehler (Google nicht verbunden, Token abgelaufen —
+--! Testing-Mode-Refresh-Token laeuft nach 7 Tagen ab, siehe README). Rein
+--! best-effort: eine fehlgeschlagene proaktive Kalenderpruefung darf nie den
+--! Scheduler-Tick oder eine andere Nachricht stoeren.
+fn calendar_events_text email time_min_sec time_max_sec
+    if email == nil || email == ""
+        return nil
+    t_min: format_time time_min_sec "2006-01-02T15:04:05Z"
+    t_max: format_time time_max_sec "2006-01-02T15:04:05Z"
+    try
+        return (tool_call "google_get_events" {user_google_email: email, calendar_id: "primary", time_min: t_min, time_max: t_max})
+    catch e
+        return nil
+
+--! Parst eine get_events-Antwort in [{id, line}, ...]. Kein rohes JSON
+--! verfuegbar (nur formatierter Text: '- "Titel" (Starts: ...) ID: <id> |
+--! Link: ...' pro Zeile) — daher zeilenweise nach 'ID: ' gesucht. Zerbrechlich
+--! gegenueber Formatwechseln des MCP-Servers, aber praktikabler als die
+--! Alternative (kein strukturiertes Ergebnis verfuegbar).
+fn parse_calendar_events text
+    out: []
+    if text == nil || text == ""
+        return out
+    lines: split text "\n"
+    for line in lines
+        idx: index_of line "ID: "
+        if idx >= 0
+            rest: substring line (idx + 4) (len line)
+            endidx: index_of rest " | Link"
+            id: rest
+            if endidx >= 0
+                id: substring rest 0 endidx
+            push out {id: (trim id), line: line}
+    out
+
+--! Meta-Schluessel fuer die Dedup-Liste bereits gemeldeter Kalendertermine
+--! (Format: "<id>:<unix_ts>,<id>:<unix_ts>,..."). Titel+Startzeit waeren als
+--! Dedup-Schluessel auch gegangen, aber get_events liefert eine echte
+--! Event-ID im Text mit — zuverlaessiger als Freitext-Abgleich.
+NOTIFIED_CAL_KEY: "notified_calendar_events"
+
+--! Laedt die Dedup-Liste, entfernt Eintraege aelter als 24h (damit die Liste
+--! bei taeglich wiederkehrenden Terminen nicht unbegrenzt waechst).
+fn load_notified_ids dbh
+    raw: mem.meta_get dbh NOTIFIED_CAL_KEY
+    out: {}
+    if raw != nil && raw != ""
+        cutoff: now - 86400
+        for p in (split raw ",")
+            kv: split p ":"
+            if (len kv) == 2
+                ts: to_num (at kv 1)
+                if ts > cutoff
+                    set out (at kv 0) ts
+    out
+
+fn save_notified_ids dbh idmap
+    parts: []
+    for id in (keys idmap)
+        push parts (id ++ ":" ++ (to_str (get idmap id)))
+    mem.meta_set dbh NOTIFIED_CAL_KEY (join parts ",")
+
+--! Proaktive Kalender-Erinnerung: prueft anstehende Termine im konfigurierten
+--! Vorlauf-Fenster (calendar_reminder_minutes) und meldet neue (noch nicht
+--! gemeldete) Termine einmalig per Telegram — Dedup ueber load_notified_ids/
+--! save_notified_ids verhindert Wiederholungen bei jedem 15-Minuten-Takt.
+fn calendar_notify_new token dbh cid email window_minutes
+    text: calendar_events_text email now (now + window_minutes * 60)
+    events: parse_calendar_events text
+    if (len events) == 0
+        return nil
+    notified: load_notified_ids dbh
+    changed: false
+    for ev in events
+        id: get ev "id"
+        if (get notified id) == nil
+            try
+                tel.tel_send_message token (to_num cid) ("📅 Bald: " ++ (get ev "line"))
+            catch
+                nil
+            set notified id now
+            changed: true
+    if changed
+        save_notified_ids dbh notified
+
 --! Scheduler-Tick (P4): feuert fällige Erinnerungen/Briefings proaktiv ab —
 --! läuft im Bot-Loop nach jedem Poll, single-threaded (kein Goroutine-/DB-
 --! Konflikt, siehe Plan.md). Briefings werden erst beim Feuern aus der Seele
@@ -849,6 +944,14 @@ fn sched_tick token
         msg: get item "note"
         if kind == "briefing"
             msg: sched.compose_briefing dbh
+            if mcp.is_connected "google" && user_google_email != nil && user_google_email != ""
+                evt: calendar_events_text user_google_email now_sec (day_end_sec now_sec tz_offset)
+                if (len (parse_calendar_events evt)) > 0
+                    msg: msg ++ "\n\n📅 Termine heute:\n" ++ evt
+        if kind == "calendar_check"
+            calendar_notify_new token dbh cid user_google_email calendar_reminder_minutes
+            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
+            continue
         if kind == "goal_tick"
             resumed: exe.resume_running_plans dbh
             if resumed > 0
@@ -995,6 +1098,14 @@ tz_offset_raw: cfg_get cfg "MUNINN_TZ_OFFSET"
 tz_offset: 0
 if tz_offset_raw != nil && tz_offset_raw != ""
     tz_offset: to_num tz_offset_raw
+--! Fuer proaktive Kalender-Erinnerungen (siehe calendar_notify_new/sched_tick
+--! unten). Kein eigener .env-Schluessel noetig/keine Duplizierung — die
+--! Adresse steckt bereits im "google"-Eintrag von MCP_AUTO_SERVERS (siehe
+--! .env.example), von dort direkt uebernommen (einzige Quelle der Wahrheit).
+calendar_reminder_minutes_raw: cfg_get cfg "CALENDAR_REMINDER_MINUTES"
+calendar_reminder_minutes: 30
+if calendar_reminder_minutes_raw != nil && calendar_reminder_minutes_raw != ""
+    calendar_reminder_minutes: to_num calendar_reminder_minutes_raw
 mcp_servers: mcp.parse_mcp_config (cfg_get cfg "MCP_SERVERS")
 mcp_servers: mcp.resolve_all_env mcp_servers
 mcp_auto_servers: mcp.parse_mcp_config (cfg_get cfg "MCP_AUTO_SERVERS")
@@ -1004,6 +1115,12 @@ for configured_server in mcp_servers
     push all_mcp_servers configured_server
 for auto_server in mcp_auto_servers
     push all_mcp_servers auto_server
+user_google_email: nil
+for s in all_mcp_servers
+    if (get s "alias") == "google"
+        genv: get s "env"
+        if genv != nil
+            user_google_email: get genv "USER_GOOGLE_EMAIL"
 
 --! consolidate-Modus (P2, "Traum"): einmaliger Aufraeum-/Verdichtungslauf,
 --! z.B. per externem Cron: `pipe muninn.pipe consolidate`. Kein Scheduler in
@@ -1040,6 +1157,25 @@ else
             print "TELEGRAM_BOT_TOKEN fehlt (Env oder .env). Abbruch."
         else
             print "Muninn gestartet."
+            --! Proaktive Kalender-Erinnerungen (siehe calendar_notify_new oben):
+            --! automatisch aktiv, sobald Google verbunden UND eine feste
+            --! TELEGRAM_ALLOWED_CHAT_ID konfiguriert ist — ohne konfigurierten
+            --! Empfaenger gaebe es keine eindeutige Zieladresse fuer eine
+            --! unaufgeforderte Nachricht, daher bewusst kein Rateversuch.
+            --! Idempotent: registriert nur, wenn noch kein "calendar_check"
+            --! fuer diesen Chat existiert (sonst haeufen sich bei jedem
+            --! Neustart doppelte Scheduler-Eintraege).
+            if mcp.is_connected "google" && allowed != nil && allowed != ""
+                hlc: mem.open_locked nil
+                dbhc: get hlc "h"
+                has_check: false
+                for e in (sched.list dbhc allowed)
+                    if (get e "kind") == "calendar_check"
+                        has_check: true
+                if !has_check
+                    sched.schedule dbhc "calendar_check" allowed "" (now + 60) "15min"
+                    print "Proaktive Kalender-Erinnerungen aktiviert."
+                mem.close_locked hlc
             try
                 cmds: []
                 push cmds {command: "start", description: "Begrüßung"}

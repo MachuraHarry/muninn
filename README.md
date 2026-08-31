@@ -29,8 +29,10 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
   aktuellen Werkzeugliste statt per Websuche.
 - **Lernen aus dem Web** — neue Erkenntnisse werden dauerhaft **mit Quellen-URL** gespeichert und später zitiert.
 - **Proaktivität (P4)** — Scheduler im Bot-Loop: Erinnerungen („Erinnere mich …", deterministischer
-  Pfad — keine KI-Bestätigung ohne tatsächliche Terminierung), tägliches Morgen-Briefing,
-  automatisches Fortsetzen unterbrochener Pläne, 👍/👎-Feedback-Lernen.
+  Pfad — keine KI-Bestätigung ohne tatsächliche Terminierung), tägliches Morgen-Briefing (jetzt mit
+  echten Kalenderterminen angereichert), automatische Kalender-Erinnerungen (meldet sich von sich
+  aus vor bevorstehenden Terminen), automatisches Fortsetzen unterbrochener Pläne,
+  👍/👎-Feedback-Lernen.
 - **Web-Recherche** — DuckDuckGo + Wikipedia, Seiten-Fetch und Zusammenfassung (kein API-Key nötig).
 - **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, Browser, Docker, Wetter,
   Dokumentations-Lookup, Google Workspace, ...) per Model Context Protocol anbinden; laufen unter
@@ -69,6 +71,7 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 | Eingeschränkte Docker-Erweiterung (Image ziehen, Container anlegen) | ✅ |
 | Google Workspace (Gmail, Drive, Kalender) via MCP | ✅ |
 | Sprachnachrichten (Piper-TTS, KI entscheidet selbst) | ✅ |
+| Proaktive Kalender-Erinnerungen + Briefing-Anreicherung | ✅ |
 | Live-Status-Stream im Telegram-Chat (`ai_swarm_stream`) | ✅ |
 | M5 — Discord | ⏳ geplant |
 
@@ -641,6 +644,31 @@ verlässlich getestet.
   [Docker-Erweiterung](#eingeschränkte-docker-erweiterung-docker_toolspipe).
 - Zwischendateien (`tts_tmp/`, gitignored) werden nach jedem Versand sofort
   wieder gelöscht.
+
+### Proaktive Kalender-Erinnerungen (`muninn.pipe`)
+
+Bisher nutzte kein proaktiver Mechanismus die Google-Kalender-Anbindung —
+das tägliche Briefing baute sich rein aus Muninns eigener Seele auf (Erinnerungen,
+Ziele, jüngste Ereignisse), ganz ohne externe Datenquelle. Jetzt:
+
+- **Automatisch aktiv**, sobald der `google`-MCP-Server verbunden UND
+  `TELEGRAM_ALLOWED_CHAT_ID` gesetzt ist (ohne feste Chat-ID gäbe es kein
+  eindeutiges Ziel für eine unaufgeforderte Nachricht — kein Rateversuch).
+  Registriert sich beim Start selbst idempotent im Scheduler (`kind:
+  "calendar_check"`, neuer Wiederholungstyp `"15min"` in `scheduler.pipe`).
+- Prüft alle 15 Minuten den **`primary`-Kalender** (bewusst nicht den
+  öffentlichen Feiertagskalender oder weitere Kalender — vermeidet
+  Fehlalarme) auf Termine innerhalb der nächsten `CALENDAR_REMINDER_MINUTES`
+  (Standard 30, `.env`-konfigurierbar) und meldet neue per Telegram.
+- **Dedup über echte Event-IDs**: `get_events` liefert nur formatierten Text
+  (kein rohes JSON), aber mit einer echten Google-Event-ID pro Zeile — die
+  wird als Schlüssel in `meta` (`mem.meta_set`/`meta_get`) gespeichert, damit
+  derselbe Termin nicht bei jedem 15-Minuten-Takt erneut gemeldet wird
+  (Einträge älter als 24h werden beim Schreiben automatisch aussortiert).
+- Rein best-effort: jeder Fehler (Google nicht verbunden, Token abgelaufen —
+  siehe [Google Workspace](#google-workspace-google_creds) zum
+  7-Tage-Testing-Mode-Ablauf) lässt die Prüfung einfach ausfallen, ohne den
+  Scheduler-Tick oder andere Nachrichten zu stören.
 
 ### Kosten-Tracking (`memory.pipe`, `muninn.pipe`)
 
