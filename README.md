@@ -983,6 +983,24 @@ gitignorierten `.env` gelesen.
   Pipe-Builtin) sichern jeden `muninn.db`-Zugriff prozessübergreifend ab, damit
   Telegram-Bot und Dashboard gleichzeitig laufen können, ohne sich gegenseitig
   Schreibvorgänge zu überschreiben (siehe Architektur → Nebenläufigkeit).
+- **Security-Ehrlichkeits-Regel (`SECURITY_HONESTY_RULE`)**: Sicherheits- und
+  Systembefunde (Kernel-Versionen, Sandbox-/Container-Eigenschaften, Exploits,
+  Seccomp/UID-Mapping/Egress-Gates …) dürfen von der KI nur als Fakt ausgegeben
+  werden, wenn sie in DIESEM Lauf selbst per Werkzeug geprüft wurden (mit konkreter
+  Quelle); Gedächtnis-Audits werden als „aus früheren Audits, aktuell nicht erneut
+  geprüft" zitiert, reines Modell-Vorwissen wird nie als Befund über das eigene
+  System verkauft — nicht verifizierte Punkte werden explizit als „ungeprüft"
+  markiert. Verhindert plausibel klingende, aber erfundene Security-Reports.
+- **Verifizierter Systemstatus (Stand der letzten Prüfung)**: Host-Kernel 5.2.0 —
+  sehr alt, zahlreiche bekannte CVEs (u.a. älter als jeder Dirty-Pipe-Fix);
+  Docker-Daemon ohne User-Namespace-Remapping (`docker info` zeigt nur
+  `seccomp=builtin`), Container laufen daher als UID 0 ≡ Host-Root. Beides liegt
+  auf VPS-/Daemon-Ebene und ist nicht aus Muninn heraus änderbar — als
+  Härtungs-Empfehlung: Kernel aktualisieren (Host-Provider) und `userns-remap`
+  in `/etc/docker/daemon.json` aktivieren (Achtung: bricht bestehende
+  Container-Namespaces, vorher Migration prüfen). Muninns eigene Schicht ist
+  unabhängig davon eng: `exec` nur mit Whitelist (`docker`, `tts_synth.sh` +
+  stdio-MCP-Kommandos), `audit_log` aktiv, `max_tool_calls` begrenzt.
 
 ---
 
