@@ -49,6 +49,15 @@ fn setup_ai key
     if key != nil && key != ""
         ai_set_key "deepseek" key
     ai_model "deepseek-chat"
+    --! Hartes Zeitlimit PRO EINZELNEM KI-Aufruf: haengt der Provider (langsamer
+    --! oder stehen gebliebener Stream/Verbindung), blockierte der Aufruf vorher
+    --! UNBEGRENZT — und damit den gesamten single-threaded Bot-Loop (Muninn
+    --! wirkte dann lebendig, antwortete aber auf nichts mehr; ein Restart war
+    --! der einzige Ausweg). Mit Timeout wirft der Aufruf stattdessen einen
+    --! Fehler, den die bestehenden try/catch-Pfade abfangen und ehrlich
+    --! beantworten. 120s ist grosszuegig genug fuer lange Kontext-/Swarm-
+    --! Aufrufe, verhindert aber das ewige Haengen.
+    ai_timeout 120
 
 --! Sandbox-Profile sind unveraenderlich und ihr Name ist einmalig vergeben
 --! (ein zweiter sandbox_profile-Aufruf mit demselben Namen scheitert mit
