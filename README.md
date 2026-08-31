@@ -34,9 +34,9 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
   aus vor bevorstehenden Terminen), automatisches Fortsetzen unterbrochener Pläne,
   👍/👎-Feedback-Lernen.
 - **Web-Recherche** — DuckDuckGo + Wikipedia, Seiten-Fetch und Zusammenfassung (kein API-Key nötig).
-- **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, Browser, Docker, Wetter,
-  Dokumentations-Lookup, Google Workspace, ...) per Model Context Protocol anbinden; laufen unter
-  einem Sandbox-Profil mit eng gefasster exec-Whitelist.
+- **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, Browser, Docker,
+  Dokumentations-Lookup, Google Workspace, Präsentationen/Dokumente, ...) per Model Context
+  Protocol anbinden; laufen unter einem Sandbox-Profil mit eng gefasster exec-Whitelist.
 - **Live-Status-Stream** — während das Gremium arbeitet, editiert Muninn EINE Telegram-Nachricht
   laufend weiter (welcher Agent aktiv ist, welches Werkzeug er aufruft), statt neuer
   Nachrichtenblöcke oder Schweigens bis zur Endantwort.
@@ -157,6 +157,58 @@ pipe -test
 
 ---
 
+## Produktionsbetrieb
+
+Für einen dauerhaften Server-Betrieb (statt manuellem `nohup pipe muninn.pipe &`)
+gibt es ein Install-Skript und einen systemd-Dienst unter `deploy/`.
+
+### Installation (`deploy/install.sh`)
+
+Richtet einen frischen Ubuntu-22.04-Server komplett ein: Go (Ubuntus eigenes
+apt-Paket ist zu alt für `pipe`s `go.mod`), Node.js 20.x (für die npx-basierten
+MCP-Server), Docker Engine, `uv`/`uvx` (für die Python-basierten MCP-Server:
+Google Workspace, Präsentationen, Dokumente), Piper TTS + deutsche Stimme
+(Sprachnachrichten), baut den `pipe`-Interpreter aus dem Quellcode und legt
+eine leere `.env` aus der Vorlage an. **Idempotent** — jeder Schritt prüft
+erst, ob er nötig ist; mehrfaches Ausführen (z.B. nach einem Update) ist
+sicher.
+
+```bash
+sudo bash deploy/install.sh
+```
+
+Was danach noch **von Hand** passieren muss (kann kein Skript automatisieren):
+
+1. `.env` ausfüllen — mindestens `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_ID`,
+   `DEEPSEEK_API_KEY`. Optional weitere MCP-Server in `MCP_AUTO_SERVERS`
+   aktivieren (siehe Kommentare in `.env.example`).
+2. Für Google Workspace: eigenes OAuth-Setup in der Google Cloud Console +
+   einmalige Browser-Freigabe (siehe [Google Workspace](#google-workspace-google_creds)).
+3. `systemctl enable --now muninn`
+
+### systemd-Dienst (`deploy/muninn.service`)
+
+- **Automatischer Neustart** bei Absturz (`Restart=on-failure`), **Start nach
+  Reboot** (`enable`).
+- **Sauberes Stoppen**: der Pipe-Interpreter fängt SIGTERM/SIGINT selbst ab
+  und schließt alle MCP-Subprozesse geordnet (siehe
+  [MCP-Tool-Ökosystem](#mcp-tool-ökosystem-mcppipe)); zusätzlich räumt
+  systemds eigenes cgroup-basiertes Kill-Verhalten beim Stoppen ohnehin ALLE
+  Prozesse der Unit auf, auch Enkel-Prozesse, die der interpreterseitige
+  Shutdown übersehen könnte (live verifiziert: ein per `kill -9` simulierter
+  Absturz hinterließ keine Waisenprozesse und löste den automatischen
+  Neustart korrekt aus).
+- Logs über den systemd-Journal statt einer manuell verwalteten Datei:
+
+```bash
+systemctl status muninn
+journalctl -u muninn -f
+systemctl stop muninn      # sauber beenden
+systemctl restart muninn   # z.B. nach .env-Aenderungen
+```
+
+---
+
 ## Bedienung (Telegram)
 
 Alle Befehle sind zusätzlich über Telegrams natives `/`-Aufklapp-Menü sichtbar
@@ -203,7 +255,7 @@ Begründung).
 
 **Live-Status statt Stille.** Während das Gremium arbeitet, sendet Muninn eine
 Platzhalternachricht und bearbeitet sie laufend per `editMessageText`
-(„🧭 Plane die Antwort...", „🔧 Nutze wetter... → ruft get_forecast auf", …),
+(„🧭 Plane die Antwort...", „🔧 Nutze praesentation... → ruft save_presentation auf", …),
 gedrosselt auf ca. 1 Edit/Sekunde — statt neuer Nachrichtenblöcke oder
 kompletten Schweigens bis zur Endantwort. Details:
 [Architektur → Inneres Gremium](#inneres-gremium-swarmpipe).
@@ -562,7 +614,6 @@ unverändert wie zuvor.
 | `denkwerkzeug` | `@modelcontextprotocol/server-sequential-thinking` | strukturiertes Durchdenken komplexer Anfragen |
 | `browser` | `@playwright/mcp` (Microsoft, offiziell) | echte Web-Interaktion — navigieren, klicken, Formulare |
 | `doku` | `@upstash/context7-mcp` | aktuelle Bibliotheks-/Framework-Dokumentation |
-| `wetter` | `@dangahagan/weather-mcp` | Live-Wetterdaten (NOAA/Open-Meteo) |
 | `docker` | `mcp-docker-server` | bestehende Container/Images verwalten (kein Erstellen — siehe unten) |
 | `zeit` | `time-mcp` | Uhrzeit/Zeitzonen-Umrechnung |
 | `google` | `taylorwilsdon/google_workspace_mcp` | Gmail/Drive/Kalender — braucht eigenes OAuth-Setup, siehe unten |
