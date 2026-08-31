@@ -412,7 +412,7 @@ fn apply_registrator_backstop res
 export fn run_gremium dbh cid task
     set STATE "dbh" dbh
     set STATE "cid" cid
-    res: ai_swarm_trace task "planer" 18
+    res: ai_swarm_trace task "planer" 50
     apply_registrator_backstop res
 
 --! Wie run_gremium, aber mit Live-Fortschritt: on_update wird als
@@ -424,5 +424,5 @@ export fn run_gremium dbh cid task
 export fn run_gremium_stream dbh cid task on_update
     set STATE "dbh" dbh
     set STATE "cid" cid
-    res: ai_swarm_stream task "planer" 18 on_update
+    res: ai_swarm_stream task "planer" 50 on_update
     apply_registrator_backstop res
