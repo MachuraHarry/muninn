@@ -333,6 +333,17 @@ export fn init_gremium _
     mcp_names: []
     specialist_names: []
     specialist_desc: ""
+    --! Zweipass-Aufbau: im ersten Durchlauf ist specialist_names erst
+    --! TEILWEISE gefuellt (waechst mit jeder Iteration) — ein Spezialist,
+    --! der frueh in mcp_groups steht, wuerde beim direkten Registrieren also
+    --! NICHT an spaeter registrierte Spezialisten weiterleiten koennen. Erst
+    --! Metadaten sammeln, DANACH im zweiten Durchlauf mit der vollstaendigen
+    --! Liste registrieren — sonst kann z.B. 'werkzeug_google' (Gmail-Suche)
+    --! nach getaner Arbeit nicht direkt an 'werkzeug_dokument' (Bericht
+    --! schreiben) uebergeben, wenn 'dokument' erst SPAETER in mcp_groups
+    --! auftaucht (beobachtet live: "Suche Rechnungen aus E-Mails und
+    --! schreib dazu einen Bericht" scheiterte genau daran).
+    specialist_meta: []
     for grp in mcp_groups
         alias: get grp "alias"
         if (len alias) > 0 && (substring alias ((len alias) - 1) (len alias)) == "_"
@@ -366,7 +377,21 @@ export fn init_gremium _
         agent_name: "werkzeug_" ++ alias
         push specialist_names agent_name
         specialist_desc: specialist_desc ++ "- '" ++ agent_name ++ "': Werkzeuge aus '" ++ alias ++ "' (" ++ (join gtools ", ") ++ ")\n"
-        swarm_agent agent_name {system: SELF_ID ++ HANDOFF_RULE ++ RETRY_RULE ++ VERIFY_CLAIM_RULE ++ RESULT_HONESTY_RULE ++ "Du bist der Spezial-Agent fuer '" ++ alias ++ "' im Gremium von Muninn. Du hast NUR Zugriff auf die per MCP aus '" ++ alias ++ "' angebundenen Werkzeuge." ++ extra_note ++ " WICHTIG: Nutze das Selbstwissen oben aktiv, bevor du eine Anfrage bearbeitest — geht es z.B. um 'Pipe', ist damit hoechstwahrscheinlich Muninns EIGENE Skriptsprache gemeint (siehe Selbstwissen), NICHT Unix-Pipes/das Shell-Symbol '|', auch wenn Letzteres dein allgemeines Sprachmodell-Vorwissen naheliegender erscheinen laesst. Ist bei einem Begriff aus der Nutzeranfrage unklar, ob Muninn selbst oder etwas Allgemeines gemeint ist, bevorzuge den Bezug zu Muninn selbst oder frage im Zweifel kurz nach — erfinde NIE einfach die allgemeinere, thematisch nahliegendere Bedeutung. Brauchst du fuer die Anfrage mehrere dieser Werkzeuge nacheinander (z.B. erst einen Ort/eine ID nachschlagen, dann damit die eigentlichen Daten abrufen), rufe sie ALLE in dieser einen Runde nacheinander auf, BEVOR du 'kritiker' aufrufst — nicht nach jedem einzelnen Werkzeug zurueckspringen, das verbraucht unnoetig Runden. Rufe erst danach IMMER 'kritiker' auf, um dein Ergebnis weiterzugeben.", tools: gtools, handoff: ["kritiker", "planer"]}
+        push specialist_meta {agent_name: agent_name, alias: alias, gtools: gtools, extra_note: extra_note}
+
+    --! Zweiter Durchlauf: specialist_names ist jetzt vollstaendig, jeder
+    --! Spezialist kann also an JEDEN anderen Spezialisten weiterleiten
+    --! (ausser an sich selbst) — nicht nur an kritiker/planer.
+    for meta in specialist_meta
+        agent_name: get meta "agent_name"
+        alias: get meta "alias"
+        gtools: get meta "gtools"
+        extra_note: get meta "extra_note"
+        peer_handoff: ["kritiker", "planer"]
+        for sn in specialist_names
+            if sn != agent_name
+                push peer_handoff sn
+        swarm_agent agent_name {system: SELF_ID ++ HANDOFF_RULE ++ RETRY_RULE ++ VERIFY_CLAIM_RULE ++ RESULT_HONESTY_RULE ++ "Du bist der Spezial-Agent fuer '" ++ alias ++ "' im Gremium von Muninn. Du hast NUR Zugriff auf die per MCP aus '" ++ alias ++ "' angebundenen Werkzeuge." ++ extra_note ++ " WICHTIG: Nutze das Selbstwissen oben aktiv, bevor du eine Anfrage bearbeitest — geht es z.B. um 'Pipe', ist damit hoechstwahrscheinlich Muninns EIGENE Skriptsprache gemeint (siehe Selbstwissen), NICHT Unix-Pipes/das Shell-Symbol '|', auch wenn Letzteres dein allgemeines Sprachmodell-Vorwissen naheliegender erscheinen laesst. Ist bei einem Begriff aus der Nutzeranfrage unklar, ob Muninn selbst oder etwas Allgemeines gemeint ist, bevorzuge den Bezug zu Muninn selbst oder frage im Zweifel kurz nach — erfinde NIE einfach die allgemeinere, thematisch nahliegendere Bedeutung. Brauchst du fuer die Anfrage mehrere dieser Werkzeuge nacheinander (z.B. erst einen Ort/eine ID nachschlagen, dann damit die eigentlichen Daten abrufen), rufe sie ALLE in dieser einen Runde nacheinander auf, BEVOR du weiterleitest — nicht nach jedem einzelnen Werkzeug zurueckspringen, das verbraucht unnoetig Runden. Braucht die Anfrage NACH deiner Arbeit noch eine ANDERE Faehigkeit (z.B. hast du recherchiert/Daten geholt, aber die sollen jetzt in ein Dokument/eine Praesentation), leite DIREKT an den passenden anderen werkzeug_<alias>-Spezialisten weiter (siehe Spezialisten-Liste oben) statt nur an 'kritiker' — der kann selbst keine Dokumente/Praesentationen erzeugen oder andere Werkzeuge bedienen. Ist deine Arbeit fertig und wird nichts Weiteres gebraucht, rufe 'kritiker' auf, um dein Ergebnis weiterzugeben.", tools: gtools, handoff: peer_handoff}
 
     --! Dynamisch aus dem ECHTEN Zustand gebaut (nicht statischer Text wie
     --! SELF_ID) — siehe Kommentar bei MEMORY_HONESTY_RULE oben.
