@@ -8,6 +8,7 @@ import "modules/executor.pipe" as exe
 import "modules/web.pipe" as web
 import "modules/mcp.pipe" as mcp
 import "modules/scheduler.pipe" as sched
+import "modules/docker_tools.pipe" as dt
 
 --! Regelklassifikation: Kategorien ohne KI.
 test "rule_classify erkennt 'merke/erinnere' als permanent"
@@ -628,6 +629,38 @@ test "mark_fired schiebt daily-Aufgabe auf den nächsten Tag"
     expect_eq (len due) 0 "heute nicht mehr fällig"
     due2: sched.due h 87400
     expect_eq (len due2) 1 "morgen wieder fällig (1000 + 86400)"
+    mem.close h
+
+test "mark_fired schiebt 5min-Aufgabe auf den naechsten Takt (Hintergrund-Job-Check)"
+    h: mem.init_db ":memory:"
+    sched.init_scheduler h
+    id: sched.schedule h "job_check" "42" "1" 1000 "5min"
+    sched.mark_fired h id "5min" 1000
+    due: sched.due h 1000
+    expect_eq (len due) 0 "gleich nicht mehr faellig"
+    due2: sched.due h 1300
+    expect_eq (len due2) 1 "in 5 Minuten wieder faellig (1000 + 300)"
+    mem.close h
+
+test "docker_tools: create_job/get_job/update_job-Rundlauf"
+    h: mem.init_db ":memory:"
+    jid: dt.create_job h "42" "test-container" "Testbeschreibung"
+    j: dt.get_job h jid
+    expect_eq (get j "status") "running" "neuer Job startet als 'running'"
+    dt.update_job h jid "done" "fertig, alles gut"
+    j2: dt.get_job h jid
+    expect_eq (get j2 "status") "done" "Status nach update_job"
+    expect_eq (get j2 "result") "fertig, alles gut" "Ergebnis nach update_job"
+    expect_eq (dt.get_job h 99999) nil "unbekannte id liefert nil"
+    mem.close h
+
+test "scheduler: create_background_task/get_background_task-Rundlauf"
+    h: mem.init_db ":memory:"
+    tid: sched.create_background_task h "42" "Beispielaufgabe" "Schritt 1 erledigt, Schritt 2 fehlt"
+    t: sched.get_background_task h tid
+    expect_eq (get t "task") "Beispielaufgabe" "Aufgabe wird korrekt gespeichert"
+    expect_eq (get t "progress") "Schritt 1 erledigt, Schritt 2 fehlt" "Fortschritt wird korrekt gespeichert"
+    expect_eq (sched.get_background_task h 99999) nil "unbekannte id liefert nil"
     mem.close h
 
 test "next_due_ms liefert Millisekunden bis zur nächsten Aufgabe (oder nil)"

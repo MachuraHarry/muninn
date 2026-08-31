@@ -47,6 +47,10 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
   kein Cloud-Dienst/API-Key.
 - **Bildgenerierung** — erstellt auf Anfrage neue Bilder aus einer Textbeschreibung und
   schickt sie direkt per Telegram; Pollinations.ai's offene HTTP-API, kein API-Key/Account.
+- **Hintergrund-Aufgaben** — das Gremium erkennt selbst, wenn eine Aufgabe (jede Art,
+  nicht nur Docker) mehr Zeit braucht, stellt sie zurück und arbeitet automatisch mit
+  frischem Rundenbudget weiter, bis sie wirklich fertig ist — kein Pipe-Hintergrundprozess,
+  laeuft ueber den bestehenden Scheduler.
 - **Proaktive Kalender-Erinnerungen** — meldet sich von sich aus vor bevorstehenden
   Terminen, reichert das tägliche Briefing um echte Kalenderdaten an.
 - **Präsentationen & Dokumente** — erstellt echte PowerPoint-/Word-Dateien (inkl.
@@ -780,6 +784,56 @@ KI das nicht als zwei separate Schritte falsch verketten kann.
   Agenten hin und her, bevor sie zufällig beim richtigen Agenten landete.
 - `http_request` statt `http_get` (30s statt 10s Timeout) — ein frischer,
   noch nie generierter Prompt braucht live beobachtet bis zu ~6s.
+
+### Hintergrund-Aufgaben (`hintergrund_fortsetzen`, `docker_hintergrund_setup`)
+
+Manche Aufgaben brauchen erkennbar mehr Zeit/Runden, als in einem einzigen
+Gremiums-Lauf möglich ist (tiefe Recherche zu einem sehr breiten Thema,
+eine Docker-Einrichtung mit Paketinstallation, ...). Statt entweder die
+Antwort lange zu blockieren oder eine unvollständige Antwort zu erzwingen,
+kann sich das Gremium selbst dafür entscheiden, die Aufgabe
+zurückzustellen — Muninn antwortet sofort kurz ("ich arbeite weiter") und
+meldet sich automatisch, sobald es fertig ist, über den bestehenden
+Scheduler (kein Pipe-Hintergrundprozess, siehe Architekturhinweis unten).
+
+- **Generisch (`hintergrund_fortsetzen`, nur Registrator)**: für JEDE Art
+  von Aufgabe, nicht nur Docker. Legt einen Fortschritts-Checkpoint an
+  (Zusammenfassung + was bisher erledigt ist / fehlt) und plant einen
+  `task_check`-Scheduler-Tick (2 Minuten später) ein. Bei diesem Tick
+  bekommt das Gremium ein FRISCHES Rundenbudget und arbeitet mit dem
+  gespeicherten Fortschritt weiter — ist es dann fertig, antwortet es
+  normal; ist es weiterhin nicht fertig, ruft es das Werkzeug erneut auf
+  (beliebig oft verkettbar). Live end-to-end getestet: eine bewusst riesige
+  Aufgabe ("vollständige Geschichte des Römischen Reiches, sehr
+  ausführlich") wurde über zwei Fortsetzungsrunden hinweg korrekt
+  weiterbearbeitet, mit jeweils ehrlichem, kurzem Zwischenstatus statt
+  einer vorgetäuscht fertigen Antwort.
+- **Spezifisch (`docker_hintergrund_setup`, nur Docker-Spezialist)**: für
+  Docker-Setups, die länger dauern (z.B. Paketinstallation) — nutzt aus,
+  dass `docker run -d` sofort zurückkehrt, sobald der Container gestartet
+  ist, während die eigentliche Einrichtung beim Docker-Daemon
+  weiterläuft (übersteht sogar einen `systemctl restart muninn`). Ein
+  eigener `job_check`-Scheduler-Takt (5 Minuten) prüft GÜNSTIG per
+  Container-Status nach, ohne dafür jedes Mal einen vollen
+  Gremiums-Durchlauf zu brauchen — nur bei tatsächlichem Abschluss meldet
+  sich Muninn.
+- **Architekturentscheidung — kein Pipe-Hintergrundprozess**: ein
+  `spawn`/`go`-Goroutine-Ansatz wurde geprüft und bewusst verworfen. Die
+  Sandbox (`ActiveProfile`) ist ein einziger globaler Zeiger für den
+  GESAMTEN Prozess — ein Hintergrund-Goroutine mit eigenem aktivem
+  Sandbox-Profil würde sich mit dem `setup_sandbox`-Aufruf des nächsten,
+  gleichzeitig verarbeiteten Nachrichten-Durchlaufs in die Quere kommen
+  (Race). Die Scheduler-Tick-Lösung braucht keine Pipe-Nebenläufigkeit und
+  passt zu Muninns bewusst single-threaded Design.
+- **Interpreter-Falle beim Bauen entdeckt und dokumentiert**: das
+  `sqlite`-Modul exportiert selbst eine Funktion `exec(handle, sql)`, die
+  den globalen `exec()`-Builtin (Prozessausführung) STILLSCHWEIGEND
+  überschreibt, sobald `import "sqlite"` (egal ob bare oder mit `as`) im
+  selben Dateiscope wie ein `exec()`-Aufruf steht — `docker_tools.pipe`
+  ruft `exec()` intensiv auf und importiert `sqlite` daher bewusst NICHT
+  mehr selbst, sondern nutzt `mem.raw_exec`/`mem.raw_query` (dünne
+  Durchreichen in `memory.pipe`, das `sqlite` bereits unproblematisch bare
+  importiert).
 
 ### Kosten-Tracking (`memory.pipe`, `muninn.pipe`)
 

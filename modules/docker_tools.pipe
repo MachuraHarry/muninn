@@ -29,6 +29,24 @@
 --! der MCP-Server "docker" per npx laeuft und "docker" selbst nicht ueber
 --! MCP, sondern hier direkt per exec() aufgerufen wird — daher zusaetzlich
 --! in setup_sandbox eingetragen, siehe muninn.pipe).
+--! WICHTIG: "sqlite" wird hier BEWUSST NICHT importiert (weder bare noch
+--! aliasiert) — zwei Gruende, beide live reproduziert:
+--! 1) Das sqlite-Modul exportiert selbst eine Funktion 'exec(handle, sql)',
+--!    die den globalen exec()-Builtin (Prozessausfuehrung) STILLSCHWEIGEND
+--!    ueberschreibt, sobald "sqlite" im selben Dateiscope importiert wird
+--!    ("at: Index must be a number" — der Kommando-String wurde faelschlich
+--!    als Datenbank-Handle interpretiert). docker_tools.pipe ruft exec()
+--!    intensiv auf, darf das also nicht riskieren.
+--! 2) Ein EIGENER (auch aliasierter) "sqlite"-Import erzeugt eine eigene,
+--!    zum Rest der App inkompatible Handle-Registry — ein hier erzeugter
+--!    Handle waere im Rest der App ungueltig und umgekehrt ("Invalid
+--!    database handle").
+--! Stattdessen: mem.raw_exec/mem.raw_query (duenne Durchreichen in
+--! memory.pipe, das "sqlite" bereits bare importiert und selbst nie
+--! exec() aufruft — dort also unproblematisch, und alle DB-Handles bleiben
+--! kompatibel, da es DIESELBE sqlite-Modul-Instanz ist wie ueberall sonst
+--! in der App).
+import "modules/memory.pipe" as mem
 
 --! Docker-Image-Name: registry/namespace/name:tag, nur uebliche Zeichen.
 --! Bewusst einfach gehalten (lieber ein paar exotische, gueltige Image-Namen
@@ -62,6 +80,34 @@ fn docker_exec cmd_str
         else
             out
 
+--! Job-Tracking fuer lange Hintergrund-Setups (siehe tool_docker_setup_starten
+--! unten): 'docker run -d' liefert zurueck, sobald der Container GESTARTET
+--! ist, nicht wenn dessen Setup-Skript fertig ist. Diese Tabelle haelt fest,
+--! welcher Container zu welcher Nutzeranfrage gehoert, damit der Scheduler
+--! (job_check, siehe muninn.pipe sched_tick) periodisch nachschauen kann, ob
+--! die eigentliche Arbeit inzwischen fertig ist.
+export fn init_docker_jobs h
+    mem.raw_exec h "CREATE TABLE IF NOT EXISTS docker_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, container_name TEXT, description TEXT, status TEXT, created TEXT, finished TEXT, result TEXT)"
+    nil
+
+--! Legt einen neuen Job an (status 'running'). Liefert die id.
+export fn create_job h chat_id container_name description
+    init_docker_jobs h
+    mem.raw_exec h ("INSERT INTO docker_jobs (chat_id, container_name, description, status, created, finished, result) VALUES ('" ++ (mem.sql_escape (to_str chat_id)) ++ "', '" ++ (mem.sql_escape container_name) ++ "', '" ++ (mem.sql_escape description) ++ "', 'running', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "', '', '')")
+    get (at (mem.raw_query h "SELECT max(id) AS mid FROM docker_jobs") 0) "mid"
+
+--! Aktualisiert einen Job auf 'done'/'failed' inkl. Ergebnis/Logs.
+export fn update_job h id status result
+    mem.raw_exec h ("UPDATE docker_jobs SET status = '" ++ (mem.sql_escape status) ++ "', result = '" ++ (mem.sql_escape result) ++ "', finished = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
+
+--! Liest einen Job (nil wenn nicht gefunden).
+export fn get_job h id
+    rows: mem.raw_query h ("SELECT id, chat_id, container_name, description, status, result FROM docker_jobs WHERE id = " ++ (to_str id))
+    if (len rows) > 0
+        at rows 0
+    else
+        nil
+
 --! Tool: ein Image von Docker Hub (oder anderer Registry) herunterladen.
 export fn tool_docker_pull_image image
     if !(valid_image_name image)
@@ -92,3 +138,42 @@ export fn tool_docker_create_container image name host_port container_port publi
     if public == "true"
         hint: " (oeffentlich erreichbar auf Port " ++ host_port ++ " — bewusst gewaehlt!)"
     res ++ hint
+
+--! Escaped einen freien Text sicher als EIN einzelnes argv-Token fuer
+--! 'sh -c "<...>"' ein. WICHTIG: exec() tokenisiert per splitShellWords
+--! (siehe pipe/pkg/object/sandbox.go) direkt zu argv, OHNE echte Shell —
+--! ein doppeltes Anfuehrungszeichen im Nutzertext koennte das Token sonst
+--! vorzeitig beenden und den Rest als ZUSAETZLICHE, eigene argv-Elemente
+--! auf HOST-Ebene einschleusen (z.B. weitere 'docker run'-Flags). Erst
+--! Backslashes verdoppeln, DANACH Anfuehrungszeichen escapen — Reihenfolge
+--! wichtig, sonst werden frisch eingefuegte Escape-Backslashes selbst
+--! nochmal escaped.
+fn shell_quote s
+    s: replace_all s "\\" "\\\\"
+    s: replace_all s "\"" "\\\""
+    s
+
+--! Tool: einen Container starten und darin EINEN freien Setup-/Install-
+--! Befehl ausfuehren, der laenger dauern darf (z.B. Paketinstallation) —
+--! im Gegensatz zu tool_docker_create_container, das nur ein FERTIGES
+--! Image direkt startet. 'docker run -d' liefert zurueck, sobald der
+--! Container GESTARTET ist, NICHT wenn setup_command fertig ist — das
+--! Setup laeuft im Hintergrund beim Docker-Daemon weiter, unabhaengig vom
+--! Muninn-Prozess (uebersteht sogar einen Neustart). Der Aufrufer
+--! (swarm.pipe tool_docker_hintergrund_setup) legt dafuer einen Job-
+--! Tracking-Eintrag an und plant eine spaetere Pruefung per Scheduler ein.
+--! setup_command ist zwangslaeufig freier Text (Installationsbefehle
+--! brauchen && / ; — das ist gewollt, laeuft aber ISOLIERT IM CONTAINER,
+--! nicht auf dem Host) — shell_quote verhindert nur, dass er aus seinem
+--! EINEN Host-seitigen argv-Token ausbricht. Dieselben Grenzen wie
+--! tool_docker_create_container: KEINE Volume-Mounts, KEIN --privileged,
+--! KEIN --network=host, alles ueber ein festes Kommando-Template.
+export fn tool_docker_setup_starten image name setup_command
+    if !(valid_image_name image)
+        return "Abgelehnt: '" ++ image ++ "' ist kein gueltiger Image-Name."
+    if !(valid_identifier name)
+        return "Abgelehnt: '" ++ name ++ "' ist kein gueltiger Container-Name."
+    if setup_command == nil || (trim setup_command) == ""
+        return "Abgelehnt: kein setup_command angegeben."
+    cmd: "docker run -d --name " ++ name ++ " " ++ image ++ " sh -c \"" ++ (shell_quote setup_command) ++ "\""
+    docker_exec cmd

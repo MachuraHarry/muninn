@@ -12,6 +12,7 @@ import "modules/web.pipe" as web
 import "modules/mcp.pipe" as mcp
 import "modules/dashboard.pipe" as dash
 import "modules/scheduler.pipe" as sched
+import "modules/docker_tools.pipe" as dt
 
 --! Lädt KEY=VALUE-Zeilen aus einer .env-Datei in eine Map.
 --! Werte werden am ERSTEN "=" getrennt (nicht bei jedem), damit Werte, die selbst
@@ -988,6 +989,51 @@ fn sched_tick token
             if resumed > 0
                 tel.tel_send_message token (to_num cid) ("Fortschritt: " ++ (to_str resumed) ++ " unterbrochene Pläne fortgesetzt.")
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
+            continue
+        if kind == "job_check"
+            --! note-Feld traegt die docker_jobs-Zeilen-ID (siehe
+            --! grm.tool_docker_hintergrund_setup). Laeuft der Container noch,
+            --! einfach neu einplanen — KEIN Telegram-Spam bei jedem Tick, nur
+            --! bei tatsaechlichem Abschluss meldet sich Muninn.
+            job: dt.get_job dbh (to_num (get item "note"))
+            still_running: job != nil && (get job "status") == "running"
+            if still_running
+                sched.mark_fired dbh (get item "id") "5min" (get item "due_ts")
+                continue
+            beschreibung: "unbekannt"
+            ergebnis: "Job nicht gefunden."
+            if job != nil
+                beschreibung: get job "description"
+                ergebnis: (get job "status") ++ ": " ++ (to_str (get job "result"))
+            --! Frisches Tool-Budget wie an den beiden regulaeren
+            --! run_gremium_stream-Aufrufstellen — dieser Lauf startet
+            --! ausserhalb des normalen Nachrichtenflusses, hat also noch
+            --! kein aktuelles Sandbox-Profil fuer DIESE Anfrage.
+            setup_sandbox all_mcp_servers
+            continuation: "Ein zuvor im Hintergrund gestartetes Docker-Setup ist abgeschlossen. Beschreibung: " ++ beschreibung ++ ". Ergebnis: " ++ ergebnis ++ ". Berichte dem Nutzer knapp und sauber formatiert, was passiert ist. Braucht die urspruengliche Aufgabe noch einen naechsten Schritt, stosse ihn direkt an (z.B. erneuter Aufruf von 'docker_hintergrund_setup')."
+            res: grm.run_gremium dbh (to_num cid) continuation
+            tel.tel_send_message token (to_num cid) (get res "content")
+            sched.cancel dbh (get item "id")
+            continue
+        if kind == "task_check"
+            --! Generische Fortsetzung (siehe grm.tool_hintergrund_fortsetzen) —
+            --! im Gegensatz zu job_check oben gibt es hier KEINEN billigen
+            --! externen Status-Check: das Gremium bekommt einfach ein
+            --! frisches Rundenbudget und arbeitet mit dem gespeicherten
+            --! Fortschritt weiter. Ist es JETZT fertig, antwortet es normal;
+            --! ist es noch nicht fertig, ruft es 'hintergrund_fortsetzen'
+            --! selbst erneut auf (das legt einen NEUEN Checkpoint + neuen
+            --! Scheduler-Eintrag an) — DIESER Eintrag hier wird in jedem Fall
+            --! abgeschlossen, die Kette laeuft ueber den neuen Eintrag weiter.
+            t: sched.get_background_task dbh (to_num (get item "note"))
+            if t == nil
+                sched.cancel dbh (get item "id")
+                continue
+            setup_sandbox all_mcp_servers
+            continuation2: "Du arbeitest an einer zuvor zurueckgestellten Aufgabe weiter. Urspruengliche Aufgabe: " ++ (get t "task") ++ ". Bisheriger Fortschritt: " ++ (get t "progress") ++ ". Setze die Arbeit fort. Bist du JETZT fertig, teile dem Nutzer das Endergebnis klar mit. Bist du NOCH NICHT fertig, rufe 'hintergrund_fortsetzen' erneut auf mit dem aktualisierten Fortschritt."
+            res2: grm.run_gremium dbh (to_num cid) continuation2
+            tel.tel_send_message token (to_num cid) (get res2 "content")
+            sched.cancel dbh (get item "id")
             continue
         if cid != nil && cid != ""
             try

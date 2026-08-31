@@ -149,6 +149,24 @@ export fn cost_summary h
 export fn sql_escape s
     replace_all s "'" "''"
 
+--! Duenne Durchreiche zu db_exec/db_query fuer Module, die selbst KEIN
+--! eigenes "sqlite" importieren koennen — das sqlite-Modul exportiert eine
+--! Funktion 'exec(handle, sql)', die den globalen exec()-Builtin
+--! (Prozessausfuehrung) STILLSCHWEIGEND ueberschreibt, sobald "sqlite"
+--! (egal ob bare oder mit 'as') im selben Dateiscope importiert wird (live
+--! reproduziert: siehe docker_tools.pipe-Kommentar). docker_tools.pipe
+--! braucht sowohl echtes exec() als auch DB-Zugriff auf DENSELBEN Handle
+--! wie mem.open_locked/init_db (ein separates aliasiertes "sqlite"-Modul
+--! dort erzeugt eine eigene, inkompatible Handle-Registry — "Invalid
+--! database handle" beim Zugriff mit einem anderswo erzeugten Handle) —
+--! diese beiden Durchreichen loesen beides, ohne dass docker_tools.pipe
+--! selbst "sqlite" importieren muss.
+export fn raw_exec h sql
+    db_exec h sql
+
+export fn raw_query h sql
+    db_query h sql
+
 --! Aktueller Zeitstempel im SQLite-"datetime('now')"-Format (sortierbarer String).
 --! Hinweis: das reine-Pipe-sqlite-Modul wertet `datetime('now')` NICHT als
 --! Funktion aus — es landet woertlich der String "now" in der Spalte. Deshalb

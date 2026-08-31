@@ -15,6 +15,34 @@ export fn init_scheduler h
     db_exec h "CREATE TABLE IF NOT EXISTS scheduled (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, chat_id TEXT, note TEXT, due_ts INTEGER, repeat TEXT, state TEXT, created TEXT, last_fired TEXT)"
     nil
 
+--! background_tasks: generischer Checkpoint fuer EINE beliebige, vom
+--! Gremium selbst als "dauert zu lange" eingeschaetzte Aufgabe — nicht nur
+--! Docker (siehe docker_tools.pipe fuer den SPEZIFISCHEN, guenstiger zu
+--! prüfenden Fall "Docker-Container laeuft noch"). Hier gibt es keinen
+--! billigen externen Status-Check wie bei Docker — "fertig?" kann nur die
+--! KI selbst beim naechsten task_check-Tick beurteilen, indem sie mit
+--! frischem Rundenbudget an der Aufgabe weiterarbeitet (siehe muninn.pipe
+--! sched_tick, Zweig "task_check").
+export fn init_background_tasks h
+    db_exec h "CREATE TABLE IF NOT EXISTS background_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, task TEXT, progress TEXT, created TEXT, updated TEXT)"
+    nil
+
+--! Legt einen neuen Hintergrund-Checkpoint an. task: die urspruengliche
+--! Aufgabe (kurz zusammengefasst). progress: was bisher erledigt ist / was
+--! noch fehlt (von der KI selbst formuliert). Liefert die id.
+export fn create_background_task h chat_id task progress
+    init_background_tasks h
+    db_exec h ("INSERT INTO background_tasks (chat_id, task, progress, created, updated) VALUES ('" ++ (mem.sql_escape (to_str chat_id)) ++ "', '" ++ (mem.sql_escape task) ++ "', '" ++ (mem.sql_escape progress) ++ "', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "')")
+    get (at (db_query h "SELECT max(id) AS mid FROM background_tasks") 0) "mid"
+
+--! Liest einen Checkpoint (nil wenn nicht gefunden).
+export fn get_background_task h id
+    rows: db_query h ("SELECT id, chat_id, task, progress FROM background_tasks WHERE id = " ++ (to_str id))
+    if (len rows) > 0
+        at rows 0
+    else
+        nil
+
 --! Reine Hilfsfunktion: erste Ziffernfolge in einem String (0 wenn keine).
 fn leading_int s
     out: ""
@@ -62,9 +90,13 @@ export fn next_hhmm hh mm now_sec offset_sec
     target - offset_sec
 
 --! Plant eine Aufgabe/Erinnerung ein. kind: "reminder" | "briefing" | "goal_tick"
---! | "calendar_check". due_sec: Unix-Sekunden. repeat: "" (einmalig) | "daily"
---! | "weekly" | "15min" (Kalender-Check-Takt, siehe muninn.pipe sched_tick).
---! Liefert id.
+--! | "calendar_check" | "job_check" (Hintergrund-Docker-Setup, note = Job-ID
+--! aus docker_tools.pipe) | "task_check" (generische Gremium-Fortsetzung,
+--! note = Checkpoint-ID aus create_background_task oben — siehe muninn.pipe
+--! sched_tick fuer beide). due_sec: Unix-Sekunden. repeat: "" (einmalig,
+--! auch fuer task_check — jede erneute Zurueckstellung legt einen NEUEN
+--! Eintrag an) | "daily" | "weekly" | "15min" (Kalender-Check-Takt) |
+--! "5min" (Docker-Job-Check-Takt). Liefert id.
 export fn schedule h kind chat_id text due_sec repeat
     init_scheduler h
     db_exec h ("INSERT INTO scheduled (kind, chat_id, note, due_ts, repeat, state, created) VALUES ('" ++ (mem.sql_escape kind) ++ "', '" ++ (mem.sql_escape (to_str chat_id)) ++ "', '" ++ (mem.sql_escape text) ++ "', " ++ (to_str due_sec) ++ ", '" ++ (mem.sql_escape repeat) ++ "', 'pending', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "')")
@@ -75,15 +107,18 @@ export fn due h now_sec
     init_scheduler h
     db_query h ("SELECT id, kind, chat_id, note, due_ts, repeat FROM scheduled WHERE state = 'pending' AND due_ts <= " ++ (to_str now_sec) ++ " ORDER BY due_ts ASC")
 
---! Markiert einen Eintrag als erledigt — bzw. schiebt ihn bei daily/weekly/15min
---! auf den naechsten Termin (+86400/+604800/+900) statt ihn zu schliessen.
+--! Markiert einen Eintrag als erledigt — bzw. schiebt ihn bei
+--! daily/weekly/15min/5min auf den naechsten Termin
+--! (+86400/+604800/+900/+300) statt ihn zu schliessen.
 export fn mark_fired h id repeat due_sec
-    if repeat == "daily" || repeat == "weekly" || repeat == "15min"
+    if repeat == "daily" || repeat == "weekly" || repeat == "15min" || repeat == "5min"
         inc: 86400
         if repeat == "weekly"
             inc: 604800
         if repeat == "15min"
             inc: 900
+        if repeat == "5min"
+            inc: 300
         db_exec h ("UPDATE scheduled SET due_ts = " ++ (to_str (due_sec + inc)) ++ ", last_fired = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
     else
         db_exec h ("UPDATE scheduled SET state = 'done', last_fired = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
