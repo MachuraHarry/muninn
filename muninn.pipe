@@ -49,11 +49,31 @@ fn setup_ai key
         ai_set_key "deepseek" key
     ai_model "deepseek-chat"
 
---! Aktiviert Muninns Sandbox-Profil (P1: Tool-Sandboxing). fs bleibt "full", da
---! die reine-Pipe-sqlite-Persistenz (muninn.db) Dateizugriff braucht; exec ist
---! nur erlaubt, wenn MCP-Server konfiguriert sind, und dann ausschliesslich auf
---! deren Kommandos beschraenkt (Lehre der Sandbox-Audit-Reihe: nie unbeschraenkter
---! exec an die KI). network bleibt offen, da Web-Recherche beliebige Treffer-URLs
+--! Sandbox-Profile sind unveraenderlich und ihr Name ist einmalig vergeben
+--! (ein zweiter sandbox_profile-Aufruf mit demselben Namen scheitert mit
+--! "already exists") — max_tool_calls zaehlt daher NICHT pro Nachricht oder
+--! Gremium-Lauf, sondern kumulativ ueber die GESAMTE Prozess-Laufzeit seit
+--! dem letzten Neustart. Live beobachtet: nach genug Nachrichten seit dem
+--! letzten Neustart lief eine an sich harmlose Anfrage (Recherche + langes
+--! Dokument, viele Werkzeugaufrufe) mitten in echte "E_SANDBOX: max tool
+--! calls exceeded"-Fehler, die die KI dann als raetselhaftes "technisches
+--! Limit" ausgab und sich in wiederholten, sich selbst widersprechenden
+--! Rettungsversuchen verhedderte — nichts davon hatte mit dem KI-Provider
+--! zu tun. setup_sandbox bekommt deshalb bei jedem Aufruf einen neuen,
+--! durchnummerierten Profilnamen (SANDBOX_STATE.gen), damit ein frischer
+--! Aufruf (siehe die beiden run_gremium_stream-Aufrufstellen) das Budget
+--! zuverlaessig pro Nachricht statt kumulativ ueber die Prozesslaufzeit
+--! zuruecksetzt. Mutable Map statt eines bloßen Zaehlers, weil eine
+--! bare Neuzuweisung einer Top-Level-Variable INNERHALB einer Funktion in
+--! Pipe nicht nach außen persistiert (siehe COST_STATE fuer dasselbe Muster).
+SANDBOX_STATE: {gen: 0}
+
+--! Aktiviert Muninns Sandbox-Profil (P1: Tool-Sandboxing) frisch (siehe
+--! SANDBOX_GEN oben). fs bleibt "full", da die reine-Pipe-sqlite-Persistenz
+--! (muninn.db) Dateizugriff braucht; exec ist nur erlaubt, wenn MCP-Server
+--! konfiguriert sind, und dann ausschliesslich auf deren Kommandos
+--! beschraenkt (Lehre der Sandbox-Audit-Reihe: nie unbeschraenkter exec an
+--! die KI). network bleibt offen, da Web-Recherche beliebige Treffer-URLs
 --! abruft; eine feste Whitelist wuerde die Recherche brechen.
 fn setup_sandbox servers
     wl: mcp.exec_whitelist_for servers
@@ -69,8 +89,10 @@ fn setup_sandbox servers
     --! Flags — nur die beiden Dateipfade werden uebergeben.
     push wl "tts_synth.sh"
     allow_exec: (len wl) > 0
-    sandbox_profile "muninn" {fs: "full", network: true, exec: allow_exec, exec_whitelist: wl, ai: true, max_tool_calls: 40, audit_log: true}
-    set_sandbox "muninn"
+    set SANDBOX_STATE "gen" ((get SANDBOX_STATE "gen") + 1)
+    name: "muninn-" ++ (to_str (get SANDBOX_STATE "gen"))
+    sandbox_profile name {fs: "full", network: true, exec: allow_exec, exec_whitelist: wl, ai: true, max_tool_calls: 40, audit_log: true}
+    set_sandbox name
     nil
 
 fn ensure_mcp_for_task task
@@ -442,6 +464,7 @@ fn handle_message token cid text dbh
     if (get ph "ok") == true
         message_id: get (get ph "result") "message_id"
     on_update: make_swarm_updater token cid message_id
+    setup_sandbox all_mcp_servers
     answer: ""
     try
         res: grm.run_gremium_stream dbh cid task on_update
@@ -795,6 +818,7 @@ fn handle_callback token dbh cbq
             if (get ph "ok") == true
                 message_id: get (get ph "result") "message_id"
             on_update: make_swarm_updater token cid message_id
+            setup_sandbox all_mcp_servers
             res: grm.run_gremium_stream dbh cid ("Vertiefe bitte diesen Sachverhalt: " ++ txt) on_update
             a: get res "content"
             if a != nil && a != ""
