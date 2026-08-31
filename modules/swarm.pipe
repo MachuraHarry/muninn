@@ -271,10 +271,14 @@ fn tts_synthesize text
     write_file txt_path text
     r: exec ("/root/muninn/tts_synth.sh " ++ txt_path ++ " " ++ ogg_path)
     file_delete txt_path
+    print ("tts_synthesize: exec-status=" ++ (to_str (get r "status")) ++ " ogg=" ++ ogg_path)
     if (get r "status") != 0
+        print ("tts_synthesize FEHLGESCHLAGEN: " ++ (to_str (get r "output")))
         return {ok: false, ogg_path: nil, error: (get r "output")}
     if !(file_exists ogg_path)
+        print ("tts_synthesize: Ausgabedatei fehlt: " ++ ogg_path)
         return {ok: false, ogg_path: nil, error: "Keine Ausgabedatei erzeugt."}
+    print ("tts_synthesize OK: " ++ ogg_path)
     {ok: true, ogg_path: ogg_path, error: nil}
 
 --! Tool: Text als echte Sprachnachricht (statt Textnachricht) an den Nutzer
@@ -291,10 +295,12 @@ fn tool_sprachnachricht_senden text
         spoken: (substring spoken 0 TTS_MAX_CHARS) ++ "…"
     synth: tts_synthesize spoken
     if !(get synth "ok")
+        print ("sprachnachricht_senden: Synthese-Fehler: " ++ (to_str (get synth "error")))
         return "Sprachsynthese fehlgeschlagen: " ++ (to_str (get synth "error"))
     ogg: get synth "ogg_path"
     res: tel.tel_send_voice tok cid ogg nil
     file_delete ogg
+    print ("sprachnachricht_senden: sendVoice-Ergebnis ok=" ++ (to_str (get res "ok")) ++ " -> " ++ (tel.shorten_body (to_str res)))
     if (get res "ok") == false
         return "Senden der Sprachnachricht fehlgeschlagen: " ++ (to_str res)
     "Sprachnachricht gesendet."

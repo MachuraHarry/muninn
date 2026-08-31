@@ -140,6 +140,15 @@ export fn tel_send_message token chat_id text
     set m "text" text
     tel_post_with_markdown token "sendMessage" m
 
+--! Kuerzt einen String fuer Log-Ausgaben (Telegram-Antworten koennen lang sein).
+export fn shorten_body s
+    if s == nil
+        return "nil"
+    if (len s) > 500
+        (substring s 0 500) ++ "…"
+    else
+        s
+
 --! Laedt eine lokale Datei per multipart/form-data an einen Telegram-Endpoint
 --! hoch (sendPhoto/sendDocument brauchen echten Datei-Upload, JSON reicht
 --! dafuer nicht). Pipe-Strings sind byte-safe (read_file ohne "bytes"-Modus
@@ -169,8 +178,10 @@ fn tel_upload token method field_name chat_id file_path caption
     url: "https://api.telegram.org/bot" ++ token ++ "/" ++ method
     hdrs: {}
     set hdrs "Content-Type" ("multipart/form-data; boundary=" ++ boundary)
+    print ("tel_upload " ++ method ++ " datei=" ++ file_path ++ " groesse=" ++ (to_str (len content)) ++ " chat=" ++ (to_str chat_id))
     r: http_request "POST" url hdrs body
     status: get r "status"
+    print ("tel_upload " ++ method ++ " http_status=" ++ (to_str status) ++ " antwort=" ++ (shorten_body (get r "body")))
     j: nil
     try
         j: parse_json (get r "body")

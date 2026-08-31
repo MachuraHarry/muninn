@@ -52,8 +52,9 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
   frischem Rundenbudget weiter, bis sie wirklich fertig ist — kein Pipe-Hintergrundprozess,
   laeuft ueber den bestehenden Scheduler.
 - **Sprachnachrichten verstehen** — transkribiert eingehende Telegram-Sprachnachrichten
-  lokal (whisper-transcribe-mcp, kein API-Key) und verarbeitet den Text genauso wie eine
-  getippte Nachricht — Befehle, Erinnerungen und Gremium funktionieren identisch per Sprache.
+  lokal (eigener `whisper`-Server auf `faster-whisper`, kein API-Key) und verarbeitet
+  den Text genauso wie eine getippte Nachricht — Befehle, Erinnerungen und Gremium
+  funktionieren identisch per Sprache.
 - **Proaktive Kalender-Erinnerungen** — meldet sich von sich aus vor bevorstehenden
   Terminen, reichert das tägliche Briefing um echte Kalenderdaten an.
 - **Präsentationen & Dokumente** — erstellt echte PowerPoint-/Word-Dateien (inkl.
@@ -628,7 +629,7 @@ unverändert wie zuvor.
 | `google` | `taylorwilsdon/google_workspace_mcp` | Gmail/Drive/Kalender — braucht eigenes OAuth-Setup, siehe unten |
 | `praesentation` | `office-powerpoint-mcp-server` | PowerPoint-Präsentationen erstellen (.pptx) |
 | `dokument` | `office-word-mcp-server` | Word-Dokumente erstellen, inkl. PDF-Export (.docx/.pdf) |
-| `whisper` | `whisper-transcribe-mcp[local]` | Audio/Sprachnachrichten lokal transkribieren, kein API-Key |
+| `whisper` | eigenes Modul (`modules/whisper_server.py`) | Audio/Sprachnachrichten lokal transkribieren, kein API-Key |
 
 ### Eingeschränkte Docker-Erweiterung (`docker_tools.pipe`)
 
@@ -848,10 +849,16 @@ Erinnerungen und das Gremium funktionieren also identisch per Sprache wie
 per Text (das Gegenstück zu den bestehenden Sprachnachrichten, die Muninn
 selbst verschicken kann).
 
-- **`whisper-transcribe-mcp`** (PyPI, MIT) im `[local]`-Modus —
-  `faster-whisper`, komplett lokal, kein API-Key. Live end-to-end getestet:
-  ein per Piper synthetisierter Satz wurde 1:1 korrekt zurücktranskribiert
-  (deutsche Spracherkennung, `language_probability: 1.0`, Modell `base`).
+- **Eigenes Modul `modules/whisper_server.py`** (fastmcp + `faster-whisper`) als
+  FastMCP-Server — komplett lokal, kein API-Key. Der frühere `whisper-transcribe-mcp`
+  (PyPI) fiel mit `faster-whisper>=1.2` aus: Er las intern
+  `model_size_or_path`, das in `faster-whisper` 1.2 entfernt wurde, und brach genau
+  ab dem **zweiten** Aufruf mit `'WhisperModel' object has no attribute
+  'model_size_or_path'` — die erste Sprachnachricht klappte, jede weitere nicht.
+  Das eigene Modul speichert die Modellgröße selbst und ist über beliebig viele
+  Aufrufe stabil. Live end-to-end getestet: ein per Piper synthetisierter Satz
+  wurde 1:1 korrekt zurücktranskribiert (deutsche Spracherkennung,
+  `language_probability: 1.0`, Modell `base`).
 - Modell lädt beim ersten Gebrauch automatisch von HuggingFace (~74 MB für
   `base`) und wird danach gecacht — kein manueller Download nötig.
 - Ist der `whisper`-Server nicht konfiguriert (optionaler
