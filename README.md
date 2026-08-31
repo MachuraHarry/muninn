@@ -45,6 +45,10 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 - **Sprachnachrichten** — der Registrator entscheidet pro Antwort selbst, ob eine echte
   Telegram-Sprachnachricht (statt Text) passender ist; lokale Synthese per Piper + ffmpeg,
   kein Cloud-Dienst/API-Key.
+- **Proaktive Kalender-Erinnerungen** — meldet sich von sich aus vor bevorstehenden
+  Terminen, reichert das tägliche Briefing um echte Kalenderdaten an.
+- **Präsentationen & Dokumente** — erstellt echte PowerPoint-/Word-Dateien (inkl.
+  PDF-Export) und verschickt sie direkt als Telegram-Anhang.
 - **Eingeschränkte Docker-Erweiterung** — Image ziehen + Container anlegen, aber strukturell
   ohne Volume-Mounts/`--privileged`, Ports standardmäßig nur auf `127.0.0.1` (siehe
   [Sicherheit](#sicherheit)).
@@ -72,6 +76,7 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 | Google Workspace (Gmail, Drive, Kalender) via MCP | ✅ |
 | Sprachnachrichten (Piper-TTS, KI entscheidet selbst) | ✅ |
 | Proaktive Kalender-Erinnerungen + Briefing-Anreicherung | ✅ |
+| Präsentationen & Dokumente (PowerPoint/Word/PDF) erstellen + verschicken | ✅ |
 | Live-Status-Stream im Telegram-Chat (`ai_swarm_stream`) | ✅ |
 | M5 — Discord | ⏳ geplant |
 
@@ -561,6 +566,8 @@ unverändert wie zuvor.
 | `docker` | `mcp-docker-server` | bestehende Container/Images verwalten (kein Erstellen — siehe unten) |
 | `zeit` | `time-mcp` | Uhrzeit/Zeitzonen-Umrechnung |
 | `google` | `taylorwilsdon/google_workspace_mcp` | Gmail/Drive/Kalender — braucht eigenes OAuth-Setup, siehe unten |
+| `praesentation` | `office-powerpoint-mcp-server` | PowerPoint-Präsentationen erstellen (.pptx) |
+| `dokument` | `office-word-mcp-server` | Word-Dokumente erstellen, inkl. PDF-Export (.docx/.pdf) |
 
 ### Eingeschränkte Docker-Erweiterung (`docker_tools.pipe`)
 
@@ -669,6 +676,34 @@ Ziele, jüngste Ereignisse), ganz ohne externe Datenquelle. Jetzt:
   siehe [Google Workspace](#google-workspace-google_creds) zum
   7-Tage-Testing-Mode-Ablauf) lässt die Prüfung einfach ausfallen, ohne den
   Scheduler-Tick oder andere Nachrichten zu stören.
+
+### Präsentationen & Dokumente (`praesentation`/`dokument`)
+
+Zwei zusätzliche MCP-Server erzeugen echte Office-Dateien, die Muninn direkt
+per `datei_senden` verschickt — geprüft nach demselben Muster wie alle
+anderen Server (Sterne, Aktivität, Wartungsstatus), live end-to-end
+verifiziert (echte .pptx/.docx erstellt und über Telegram zugestellt):
+
+- **`praesentation`** ([office-powerpoint-mcp-server](https://github.com/GongRzhe/Office-PowerPoint-MCP-Server),
+  1.8k★, `python-pptx`) — 37 Werkzeuge, aber der Registrator-Spezialist
+  bekommt eine gezielte Anleitung auf den einfachen, zuverlässigen Pfad
+  (`create_presentation` → `add_slide` pro Folie → `save_presentation`):
+  live beobachtet, dass die KI sich im umfangreichen Vorlagen-System
+  (`create_presentation_from_templates`, `populate_placeholder`, ...) verlor
+  und nie speicherte, bevor die Rundenzahl aufgebraucht war — mit der
+  Anleitung lief es zuverlässig in 7-9 Runden durch.
+- **`dokument`** ([office-word-mcp-server](https://github.com/GongRzhe/Office-Word-MCP-Server),
+  2.1k★, `python-docx`, inkl. PDF-Export via `word_convert_to_pdf`) — 54
+  Werkzeuge, dateiname-adressiert statt ID-basiert (jeder Aufruf schreibt
+  sofort in die Datei, kein separater Speicher-Schritt).
+- **Beide Pakete sind auf PyPI archiviert** (keine Updates mehr) — das
+  PowerPoint-Paket lief unverändert von PyPI (mit `mcp<2`-Pin, da die
+  neueste MCP-Python-SDK-Version `FastMCP` umbenannt hat), das Word-Paket
+  hatte auf PyPI einen kaputten Packaging-Fehler (fehlendes Modul) und wird
+  daher direkt aus dem GitHub-Repository installiert (`uvx --from
+  git+https://github.com/...`).
+- Erzeugte Dateien landen immer unter `mcp_data/` (Prompt-Vorgabe, kein
+  technischer Zwang) — vom Filesystem-MCP-Server ohnehin schon freigegeben.
 
 ### Kosten-Tracking (`memory.pipe`, `muninn.pipe`)
 
