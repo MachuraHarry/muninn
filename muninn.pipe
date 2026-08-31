@@ -710,7 +710,7 @@ fn do_search token cid dbh query
         return nil
     answer: ""
     try
-        answer: ai_chat "Du bist ein präziser Recherche-Assistent. Beantworte die Frage anhand des recherchierten Kontexts, kurz und faktentreu." ("Frage: " ++ query ++ "\n\nKontext:\n" ++ ctx)
+        answer: ai_chat ((grm.self_context 0) ++ "Du bist ein präziser Recherche-Assistent. Beantworte die Frage anhand des recherchierten Kontexts, kurz und faktentreu. WICHTIG: Dieser Aufruf hier ist reine Textzusammenfassung OHNE Werkzeugzugriff — behaupte NIEMALS, du könntest generell keine Dokumente/Dateien erstellen oder versenden (das kannst du sehr wohl, nur nicht in DIESEM Aufruf); erwähnt die Frage sowas, sag stattdessen nur, dass du dafür direkt (nicht als Recherche-Anfrage) gefragt werden musst.") ("Frage: " ++ query ++ "\n\nKontext:\n" ++ ctx)
     catch
         answer: ctx
     mem.add_message dbh tid cid "assistant" answer
