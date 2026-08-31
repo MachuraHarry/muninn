@@ -714,7 +714,7 @@ fn question_needs_research answer
 
 --! Liefert eine direkte Übersicht der Fähigkeiten statt einer Faktenantwort.
 fn capability_text _
-    "Ich kann dich unterstützen bei:\n• Fragen beantworten und bei fehlendem Wissen selbstständig im Web recherchieren\n• Informationen mit Quellen in meiner Seele speichern und später wiederfinden\n• Aufgaben planen und über den Executor ausführen\n• Ziele und zeitgesteuerte Erinnerungen verwalten\n• Wissensgraphen und Dokumente aufbauen\n• Fotos verstehen und beschreiben (einfach schicken, optional mit Bildunterschrift als Frage)\n• angebundene MCP-Werkzeuge kontrolliert nutzen\n• Telegram und das Web-Dashboard bedienen\n\nSchreib einfach eine Frage oder eine konkrete Aufgabe."
+    "Ich kann dich unterstützen bei:\n• Fragen beantworten und bei fehlendem Wissen selbstständig im Web recherchieren\n• Informationen mit Quellen in meiner Seele speichern und später wiederfinden\n• Aufgaben planen und über den Executor ausführen\n• Ziele und zeitgesteuerte Erinnerungen verwalten\n• Wissensgraphen und Dokumente aufbauen\n• Fotos verstehen und beschreiben (einfach schicken, optional mit Bildunterschrift als Frage)\n• Bilder auf Anfrage generieren (kostenloser KI-Bildgenerator)\n• angebundene MCP-Werkzeuge kontrolliert nutzen\n• Telegram und das Web-Dashboard bedienen\n\nSchreib einfach eine Frage oder eine konkrete Aufgabe."
 
 --! Kürzt Text auf Telegram-Grenze (4096 Zeichen).
 fn shorten s

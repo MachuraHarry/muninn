@@ -45,6 +45,8 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 - **Sprachnachrichten** — der Registrator entscheidet pro Antwort selbst, ob eine echte
   Telegram-Sprachnachricht (statt Text) passender ist; lokale Synthese per Piper + ffmpeg,
   kein Cloud-Dienst/API-Key.
+- **Bildgenerierung** — erstellt auf Anfrage neue Bilder aus einer Textbeschreibung und
+  schickt sie direkt per Telegram; Pollinations.ai's offene HTTP-API, kein API-Key/Account.
 - **Proaktive Kalender-Erinnerungen** — meldet sich von sich aus vor bevorstehenden
   Terminen, reichert das tägliche Briefing um echte Kalenderdaten an.
 - **Präsentationen & Dokumente** — erstellt echte PowerPoint-/Word-Dateien (inkl.
@@ -755,6 +757,29 @@ verifiziert (echte .pptx/.docx erstellt und über Telegram zugestellt):
   git+https://github.com/...`).
 - Erzeugte Dateien landen immer unter `mcp_data/` (Prompt-Vorgabe, kein
   technischer Zwang) — vom Filesystem-MCP-Server ohnehin schon freigegeben.
+
+### Bildgenerierung (`swarm.pipe`, `bild_erstellen`)
+
+Der Registrator erzeugt auf Anfrage ("erstelle/generiere/zeichne mir ein
+Bild von...") ein neues Bild aus einer Textbeschreibung und verschickt es
+sofort — Generieren und Senden bewusst in einem Werkzeugaufruf, damit die
+KI das nicht als zwei separate Schritte falsch verketten kann.
+
+- **Kein MCP-Server, kein API-Key** — der offizielle, per npm vertriebene
+  Pollinations-MCP-Server (`@pollinations/mcp`) verlangt inzwischen einen
+  Account/Key (live geprüft: `generateImage` schlägt ohne Key fehl), die
+  darunterliegende klassische offene HTTP-API
+  (`image.pollinations.ai/prompt/...`) aber weiterhin nicht — direkt per
+  `http_request` angebunden statt über den MCP-Server.
+- Anonyme Nutzung laut Pollinations-Doku: ~1 Anfrage/15s, evtl. kleines
+  Wasserzeichen. Für einen persönlichen Bot ohne Massennutzung
+  unproblematisch.
+- `planer` leitet reine Bildanfragen (ohne Recherche/sonstige Aufgabe)
+  direkt an `registrator` weiter (eigenes Handoff-Ziel) — ohne das sprang
+  eine simple Anfrage live beobachtet 16 Runden zwischen den anderen
+  Agenten hin und her, bevor sie zufällig beim richtigen Agenten landete.
+- `http_request` statt `http_get` (30s statt 10s Timeout) — ein frischer,
+  noch nie generierter Prompt braucht live beobachtet bis zu ~6s.
 
 ### Kosten-Tracking (`memory.pipe`, `muninn.pipe`)
 
