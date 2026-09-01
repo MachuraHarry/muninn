@@ -1,26 +1,26 @@
---! executor.pipe — autonomer Task-Executor mit Plan-Bibliothek + Feedback-Loop.
---! Lehre aus der Sandbox-Audit-Reihe: keine rohen Shell-/Datei-Builtins — nur
---! registrierte, validierende Aktionen (store/graph/goal/retrieve/search/fetch/
---! research/mcp_call). mcp_call nutzt den Pipe-Builtin `tool_call` (P1), der ein
---! per MCP angebundenes Werkzeug direkt per Name aufruft — deterministisch, ohne
---! dass dafuer das Gremium/eine KI-Tool-Call-Schleife noetig waere.
+--! executor.pipe — autonomous task executor with a plan library + feedback
+--! loop. Lesson from the sandbox audit series: no raw shell/file builtins —
+--! only registered, validating actions (store/graph/goal/retrieve/search/
+--! fetch/research/mcp_call). mcp_call uses the Pipe builtin `tool_call` (P1),
+--! which calls an MCP-connected tool directly by name — deterministic,
+--! without needing the swarm/an AI tool-call loop for it.
 import "sqlite"
 import "modules/memory.pipe" as mem
 import "modules/web.pipe" as web
 import "modules/mcp.pipe" as mcp
 
---! Legt die plans-Tabelle an (idempotent).
+--! Creates the plans table (idempotent).
 export fn init_executor h
     db_exec h "CREATE TABLE IF NOT EXISTS plans (id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, steps TEXT, state TEXT, step_idx INTEGER, result TEXT, created TEXT, updated TEXT)"
     nil
 
---! Baut einen leeren Schritt mit gegebener Aktion.
+--! Builds an empty step with the given action.
 fn step action
     s: {}
     set s "action" action
     s
 
---! Deterministische Plan-Bibliothek: bekannte Aufgabenarten -> Schrittliste.
+--! Deterministic plan library: known task kinds -> step list.
 export fn plan_template kind goal
     out: []
     if kind == "permanent" || kind == "remember"
@@ -46,7 +46,7 @@ export fn plan_template kind goal
                 push out s1
     out
 
---! Führt einen einzelnen Schritt aus. Liefert {ok, result|error}.
+--! Executes a single step. Returns {ok, result|error}.
 export fn exec_step h s
     action: get s "action"
     r: {}
@@ -58,21 +58,21 @@ export fn exec_step h s
             imp: 3
         if c == nil || k == nil
             set r "ok" false
-            set r "error" "store braucht content und kind"
+            set r "error" "store needs content and kind"
             return r
         mem.add_memory h c k imp "executor" "plan"
         set r "ok" true
-        set r "result" ("Gemerkt: " ++ c)
+        set r "result" ("Remembered: " ++ c)
         return r
     if action == "goal"
         t: get s "text"
         if t == nil
             set r "ok" false
-            set r "error" "goal braucht text"
+            set r "error" "goal needs text"
             return r
         gid: mem.add_goal h t
         set r "ok" true
-        set r "result" ("Ziel angelegt (id " ++ (to_str gid) ++ ")")
+        set r "result" ("Goal created (id " ++ (to_str gid) ++ ")")
         return r
     if action == "graph"
         f: get s "from"
@@ -80,17 +80,17 @@ export fn exec_step h s
         rel: get s "rel"
         if f == nil || t == nil || rel == nil
             set r "ok" false
-            set r "error" "graph braucht from, to, rel"
+            set r "error" "graph needs from, to, rel"
             return r
         mem.add_relation h f t rel
         set r "ok" true
-        set r "result" ("Verknuepft: " ++ f ++ " -> " ++ t)
+        set r "result" ("Linked: " ++ f ++ " -> " ++ t)
         return r
     if action == "retrieve"
         q: get s "query"
         if q == nil
             set r "ok" false
-            set r "error" "retrieve braucht query"
+            set r "error" "retrieve needs query"
             return r
         ctx: mem.retrieve_context h q 3
         out: ""
@@ -103,7 +103,7 @@ export fn exec_step h s
         q: get s "query"
         if q == nil
             set r "ok" false
-            set r "error" "search braucht query"
+            set r "error" "search needs query"
             return r
         results: web.web_results q 5
         out: ""
@@ -116,12 +116,12 @@ export fn exec_step h s
         u: get s "url"
         if u == nil
             set r "ok" false
-            set r "error" "fetch braucht url"
+            set r "error" "fetch needs url"
             return r
         text: web.web_fetch u
         if text == ""
             set r "ok" false
-            set r "error" ("Seite nicht abrufbar: " ++ u)
+            set r "error" ("Page not reachable: " ++ u)
             return r
         set r "ok" true
         set r "result" text
@@ -130,7 +130,7 @@ export fn exec_step h s
         q: get s "query"
         if q == nil
             set r "ok" false
-            set r "error" "research braucht query"
+            set r "error" "research needs query"
             return r
         rr: web.research q
         set r "ok" true
@@ -140,7 +140,7 @@ export fn exec_step h s
         tname: get s "tool"
         if tname == nil
             set r "ok" false
-            set r "error" "mcp_call braucht tool"
+            set r "error" "mcp_call needs tool"
             return r
         targs: get s "args"
         if targs == nil
@@ -154,37 +154,38 @@ export fn exec_step h s
             set r "error" (to_str e)
         return r
     set r "ok" false
-    set r "error" ("Unbekannte Aktion: " ++ action)
+    set r "error" ("Unknown action: " ++ action)
     r
 
---! Legt einen Plan an und liefert die id.
+--! Creates a plan and returns the id.
 fn create_plan h goal steps
     ts: mem.sql_escape (mem.now_ts 0)
     db_exec h ("INSERT INTO plans (goal, steps, state, step_idx, result, created, updated) VALUES ('" ++ (mem.sql_escape goal) ++ "', '" ++ (mem.sql_escape (to_json steps)) ++ "', 'running', 0, '', '" ++ ts ++ "', '" ++ ts ++ "')")
     get (at (db_query h "SELECT max(id) AS mid FROM plans") 0) "mid"
 
---! Aktualisiert den Planzustand (Checkpoint).
+--! Updates the plan state (checkpoint).
 fn update_plan h pid state idx result
     db_exec h ("UPDATE plans SET state = '" ++ (mem.sql_escape state) ++ "', step_idx = " ++ (to_str idx) ++ ", result = '" ++ (mem.sql_escape result) ++ "', updated = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str pid))
 
---! Beschreibt die 'mcp_call'-Aktion inkl. aktuell verfuegbarer Werkzeuge (lokal + MCP)
---! fuer die KI-Plan-Prompts. Leer, wenn (noch) keine Werkzeuge registriert sind.
+--! Describes the 'mcp_call' action including currently available tools
+--! (local + MCP) for the AI plan prompts. Empty if no tools are registered
+--! (yet).
 fn mcp_call_hint _
     tools: mcp.discovered_tool_names ([])
     if (len tools) == 0
         ""
     else
-        " mcp_call braucht 'tool' (Werkzeugname) und optional 'args' (Map). Verfuegbare Werkzeuge: " ++ (join tools ", ") ++ "."
+        " mcp_call needs 'tool' (tool name) and optionally 'args' (map). Available tools: " ++ (join tools ", ") ++ "."
 
---! Revidiert den Plan nach einem Fehler. Fallback: fehlgeschlagenen Schritt streichen.
+--! Revises the plan after an error. Fallback: drop the failed step.
 fn revise_steps h goal steps fail_idx error
     try
-        j: ai_chat_json ("Du revidierst einen Aufgabenplan. Antworte ausschliesslich als JSON-Liste von Schritten mit 'action' (store, graph, goal, retrieve, search, fetch, research oder mcp_call) und den noetigen Parametern. Vermeide den fehlgeschlagenen Schritt." ++ (mcp_call_hint 0)) ("Aufgabe: " ++ goal ++ ". Fehler: " ++ error)
+        j: ai_chat_json ("You revise a task plan. Respond ONLY as a JSON list of steps with 'action' (store, graph, goal, retrieve, search, fetch, research, or mcp_call) and the needed parameters. Avoid the failed step." ++ (mcp_call_hint 0)) ("Task: " ++ goal ++ ". Error: " ++ error)
         normalize_steps j
     catch
         drop_step steps fail_idx
 
---! Normalisiert KI-Schritte in validierte Schritt-Maps (nur bekannte Aktionen).
+--! Normalizes AI-produced steps into validated step maps (known actions only).
 export fn normalize_steps raw
     out: []
     for e in raw
@@ -197,7 +198,7 @@ export fn normalize_steps raw
                 push out e
     out
 
---! Deterministischer Fallback: streicht den fehlgeschlagenen Schritt.
+--! Deterministic fallback: drops the failed step.
 fn drop_step steps fail_idx
     out: []
     i: 0
@@ -207,28 +208,28 @@ fn drop_step steps fail_idx
         i: i + 1
     out
 
---! Führt einen Plan mit Checkpoints und Feedback-Loop aus.
+--! Runs a plan with checkpoints and a feedback loop.
 export fn run_plan h goal steps
     init_executor h
     pid: create_plan h goal steps
     execute_from h pid goal steps 0
 
---! Setzt einen bereits angelegten, laufenden Plan ab seinem Checkpoint fort
---! (P4: langlaufende Ziele mit Resume — der Scheduler tickt offene Pläne an).
---! step_idx zählt abgeschlossene Schritte; dadurch ist ein Resume idempotent.
+--! Continues an already-created, running plan from its checkpoint (P4:
+--! long-running goals with resume — the scheduler ticks open plans).
+--! step_idx counts completed steps; that makes a resume idempotent.
 export fn resume_plan h pid
     init_executor h
     rows: db_query h ("SELECT goal, steps, state, step_idx FROM plans WHERE id = " ++ (to_str pid))
     if (len rows) == 0
         f: {}
         set f "ok" false
-        set f "error" "Plan nicht gefunden"
+        set f "error" "Plan not found"
         return f
     p: at rows 0
     if (get p "state") == "done" || (get p "state") == "failed"
         f2: {}
         set f2 "ok" false
-        set f2 "error" "Plan ist bereits abgeschlossen"
+        set f2 "error" "Plan is already complete"
         return f2
     steps: []
     try
@@ -237,8 +238,8 @@ export fn resume_plan h pid
         steps: []
     execute_from h pid (get p "goal") steps (get p "step_idx")
 
---! Gemeinsamer Schritt-Loop (run_plan/resume_plan): ab Schritt `start` bis Ende,
---! mit Checkpoint nach jedem Erfolg und Feedback-Loop bei Fehlern.
+--! Shared step loop (run_plan/resume_plan): from step `start` to the end,
+--! with a checkpoint after every success and a feedback loop on errors.
 fn execute_from h pid goal steps start
     i: start
     errs: 0
@@ -271,8 +272,8 @@ fn execute_from h pid goal steps start
     set out "steps_done" i
     out
 
---! Setzt alle laufenden (unterbrochenen) Pläne fort — der "goal_tick" des
---! Schedulers ruft das periodisch auf. Liefert die Anzahl fortgesetzter Pläne.
+--! Continues all running (interrupted) plans — the scheduler's "goal_tick"
+--! calls this periodically. Returns the number of plans resumed.
 export fn resume_running_plans h
     init_executor h
     rows: db_query h "SELECT id FROM plans WHERE state = 'running'"
@@ -283,25 +284,25 @@ export fn resume_running_plans h
             resumed: resumed + 1
     resumed
 
---! Haupt-Einstieg: leitet einen Plan ab (Template oder KI) und führt ihn aus.
+--! Main entry point: derives a plan (template or AI) and runs it.
 export fn execute_task h goal
     init_executor h
     kind: mem.rule_classify goal
     steps: plan_template kind goal
     if (len steps) == 0
         try
-            j: ai_chat_json ("Du zerlegst eine Aufgabe in ausfuehrbare Schritte. Antworte ausschliesslich als JSON-Liste von Schritten mit 'action' (store, graph, goal, retrieve, search, fetch, research oder mcp_call) und den noetigen Parametern." ++ (mcp_call_hint 0)) goal
+            j: ai_chat_json ("You break a task down into executable steps. Respond ONLY as a JSON list of steps with 'action' (store, graph, goal, retrieve, search, fetch, research, or mcp_call) and the needed parameters." ++ (mcp_call_hint 0)) goal
             steps: normalize_steps j
         catch
             steps: []
     if (len steps) == 0
         f: {}
         set f "ok" false
-        set f "error" "Keine Schritte ableitbar"
+        set f "error" "No steps could be derived"
         return f
     run_plan h goal steps
 
---! Liest den Zustand eines Plans (Test/Debug).
+--! Reads a plan's state (test/debug).
 export fn plan_state h pid
     rows: db_query h ("SELECT id, goal, state, step_idx, result FROM plans WHERE id = " ++ (to_str pid))
     if (len rows) > 0
@@ -309,7 +310,7 @@ export fn plan_state h pid
     else
         nil
 
---! Die n juengsten Plaene (Web-Dashboard P3).
+--! The n most recent plans (web dashboard P3).
 export fn recent_plans h limit
     init_executor h
     db_query h ("SELECT id, goal, state, step_idx, updated FROM plans ORDER BY id DESC LIMIT " ++ (to_str limit))
