@@ -19,6 +19,9 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 - **Selbst-Diagnose** — ein strukturiertes Fehler-Log sammelt alle intern
   auftretenden Fehler; einmal täglich meldet sich Muninn proaktiv, wenn
   derselbe Fehler wiederholt auftrat (Schweigen, wenn nichts auffällig ist).
+- **GitHub-Repos klonen und testen** — auf Zuruf in einem isolierten Docker-
+  Container (kein Volume-Mount, kein `--privileged`, bewusst ohne Zeitlimit),
+  meldet sich automatisch mit den echten Testergebnissen.
 - **Hybride Suche (RAG)** — TF-IDF-Keyword-Scoring + semantische Embeddings; faellt bei leerem
   Ergebnis auf die wichtigsten dauerhaften Fakten zurueck (Fragen wie „Wer bin ich?" bestehen
   sonst nur aus Stoppwoertern und liefern garantiert 0 Treffer).
@@ -733,6 +736,40 @@ Root-Zugriff auf den Host. `docker_tools.pipe` deckt den konkreten Bedarf
 Nur der `werkzeug_docker`-Spezial-Agent bekommt diese beiden zusätzlichen
 lokalen Werkzeuge neben den MCP-Werkzeugen aus `docker`.
 
+### GitHub-Repos klonen und testen
+
+Auf Zuruf klont Muninn ein GitHub-Repo in einen isolierten Docker-Container
+und führt dessen Testsuite aus — dasselbe Prinzip wie Claude Codes autonomes
+Testen, nur über die bestehende `docker_hintergrund_setup`-Infrastruktur
+(kein separates neues Werkzeug nötig): der `werkzeug_docker`-Agent wählt ein
+passendes Basis-Image nach der erkennbaren Projektsprache
+(`node:20-alpine`, `python:3.12-slim`, `golang:1.22-alpine`, `rust:1-slim`,
+`eclipse-temurin:21-jdk`, ...) und baut eine Befehlskette (`git` installieren
+→ `git clone --depth 1` → Installations- und Testbefehl), die als
+`setup_command` im Container läuft.
+
+- **Läuft komplett isoliert** — dieselben strukturellen Grenzen wie überall
+  in `docker_tools.pipe`: kein Volume-Mount, kein `--privileged`, kein
+  Zugriff auf den Host. Ein fremdes, ungeprüftes Repo kann im Container tun,
+  was es will (Fehler, Abstürze, Ressourcenverbrauch) — genau dafür ist die
+  Docker-Isolation da, das ist explizit erwünscht statt eine Gefahr.
+  **Bewusst kein Zeit-/Ressourcenlimit** für den Testlauf selbst (Absicht,
+  keine vergessene Vorsichtsmaßnahme).
+- **Der fehlende Baustein war Fertigstellungs-Erkennung**: `docker run -d`
+  liefert nur zurück, sobald der Container GESTARTET ist — vorher gab es
+  keine Stelle, die den tatsächlichen Abschluss aktiv prüft (`update_job`
+  war definiert, wurde aber nirgends aufgerufen; jeder Hintergrund-Job wäre
+  für immer als „running" stehen geblieben). `refresh_job_status`
+  (`docker_tools.pipe`) prüft jetzt bei jedem `job_check`-Scheduler-Tick per
+  `docker inspect`, ob der Container wirklich beendet ist, liest bei
+  Abschluss die letzten 200 Zeilen `docker logs` (echte Testausgabe statt
+  nur Exit-Status) und räumt den gestoppten Container danach auf.
+- Live end-to-end gegengetestet mit einem echten öffentlichen npm-Paket
+  (`sindresorhus/is-plain-obj`): das Gremium wählte selbstständig
+  `node:20-alpine`, klonte das Repo, installierte Abhängigkeiten, führte
+  die echte Testsuite (`xo && ava && tsd`) aus und berichtete danach korrekt
+  „1 Test ausgeführt, 1 bestanden" — mit den echten Logs, nicht erfunden.
+
 ### Google Workspace (`google_creds/`)
 
 Anders als die übrigen MCP-Server braucht Gmail/Drive/Kalender echtes OAuth 2.0
@@ -895,14 +932,16 @@ Scheduler (kein Pipe-Hintergrundprozess, siehe Architekturhinweis unten).
   weiterbearbeitet, mit jeweils ehrlichem, kurzem Zwischenstatus statt
   einer vorgetäuscht fertigen Antwort.
 - **Spezifisch (`docker_hintergrund_setup`, nur Docker-Spezialist)**: für
-  Docker-Setups, die länger dauern (z.B. Paketinstallation) — nutzt aus,
-  dass `docker run -d` sofort zurückkehrt, sobald der Container gestartet
-  ist, während die eigentliche Einrichtung beim Docker-Daemon
-  weiterläuft (übersteht sogar einen `systemctl restart muninn`). Ein
-  eigener `job_check`-Scheduler-Takt (5 Minuten) prüft GÜNSTIG per
-  Container-Status nach, ohne dafür jedes Mal einen vollen
+  Docker-Setups, die länger dauern (z.B. Paketinstallation, GitHub-Repos
+  klonen und testen) — nutzt aus, dass `docker run -d` sofort zurückkehrt,
+  sobald der Container gestartet ist, während die eigentliche Einrichtung
+  beim Docker-Daemon weiterläuft (übersteht sogar einen
+  `systemctl restart muninn`). Ein eigener `job_check`-Scheduler-Takt (5
+  Minuten) prüft GÜNSTIG per `refresh_job_status` (`docker inspect`, siehe
+  [GitHub-Repos klonen und testen](#github-repos-klonen-und-testen)) nach,
+  ob der Container wirklich fertig ist, ohne dafür jedes Mal einen vollen
   Gremiums-Durchlauf zu brauchen — nur bei tatsächlichem Abschluss meldet
-  sich Muninn.
+  sich Muninn, dann mit den echten Container-Logs.
 - **Architekturentscheidung — kein Pipe-Hintergrundprozess**: ein
   `spawn`/`go`-Goroutine-Ansatz wurde geprüft und bewusst verworfen. Die
   Sandbox (`ActiveProfile`) ist ein einziger globaler Zeiger für den

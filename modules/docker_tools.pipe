@@ -108,6 +108,54 @@ export fn get_job h id
     else
         nil
 
+--! Prueft den ECHTEN Docker-Container-Zustand und aktualisiert den Job auf
+--! 'done'/'failed' inkl. Logs, sobald der Container tatsaechlich beendet ist
+--! — 'docker run -d' liefert nur den START zurueck (siehe Datei-Kommentar
+--! oben zu init_docker_jobs), OHNE diese aktive Pruefung bliebe der Status
+--! fuer immer 'running' (update_job wurde vor diesem Fix nirgends
+--! aufgerufen — jeder Hintergrund-Job haette sich NIE als fertig gemeldet).
+--! Von sched_tick (job_check in muninn.pipe) bei JEDEM Tick aufgerufen,
+--! solange der Job noch 'running' ist. container_name kommt ausschliesslich
+--! aus bereits bei der Erstellung validierten Namen (valid_identifier in
+--! tool_docker_setup_starten) — sicher direkt in exec() einzusetzen, wie an
+--! den anderen Docker-Tool-Stellen in dieser Datei. Liefert den (ggf.
+--! aktualisierten) Job zurueck, oder nil wenn nicht gefunden.
+export fn refresh_job_status h id
+    job: get_job h id
+    if job == nil
+        return nil
+    if (get job "status") != "running"
+        return job
+    name: get job "container_name"
+    ins: exec ("docker inspect --format {{.State.Running}}|{{.State.ExitCode}} " ++ name)
+    if (get ins "status") != 0
+        --! Container nicht (mehr) auffindbar (z.B. von Hand entfernt) — als
+        --! fehlgeschlagen abschliessen statt fuer immer 'running' zu bleiben.
+        update_job h id "failed" ("Container '" ++ name ++ "' nicht mehr auffindbar: " ++ (trim (get ins "output")))
+        return get_job h id
+    parts: split (trim (get ins "output")) "|"
+    running: (len parts) > 0 && (at parts 0) == "true"
+    if running
+        return job
+    exit_code: "0"
+    if (len parts) > 1
+        exit_code: at parts 1
+    --! Auf die letzten 200 Zeilen begrenzt — reine Lesbarkeits-/Kosten-
+    --! Entscheidung fuer die Anzeige (der Testlauf SELBST laeuft komplett
+    --! unbeschraenkt durch), keine Sicherheits-Beschraenkung.
+    logs_r: exec ("docker logs --tail 200 " ++ name)
+    logs: trim (get logs_r "output")
+    if logs == ""
+        logs: "(keine Ausgabe)"
+    status: "done"
+    if exit_code != "0"
+        status: "failed (Exit-Code " ++ exit_code ++ ")"
+    update_job h id status logs
+    --! Logs/Ergebnis sind bereits in docker_jobs gesichert — kein Grund,
+    --! den gestoppten Container liegen zu lassen.
+    exec ("docker rm " ++ name)
+    get_job h id
+
 --! Tool: ein Image von Docker Hub (oder anderer Registry) herunterladen.
 export fn tool_docker_pull_image image
     if !(valid_image_name image)

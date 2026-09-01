@@ -893,7 +893,7 @@ fn question_needs_research answer
 
 --! Liefert eine direkte Übersicht der Fähigkeiten statt einer Faktenantwort.
 fn capability_text _
-    "Ich kann dich unterstützen bei:\n• Fragen beantworten und bei fehlendem Wissen selbstständig im Web recherchieren\n• Informationen mit Quellen in meiner Seele speichern und später wiederfinden\n• Aufgaben planen und über den Executor ausführen\n• Ziele und zeitgesteuerte Erinnerungen verwalten\n• Wissensgraphen und Dokumente aufbauen (inkl. PDFs — Text wird automatisch extrahiert und gelernt)\n• Fotos verstehen und beschreiben (einfach schicken, optional mit Bildunterschrift als Frage)\n• Bilder auf Anfrage generieren (kostenloser KI-Bildgenerator)\n• Sprachnachrichten verstehen (lokale Transkription, kein API-Key)\n• angebundene MCP-Werkzeuge kontrolliert nutzen\n• Telegram und das Web-Dashboard bedienen\n\nSchreib einfach eine Frage oder eine konkrete Aufgabe."
+    "Ich kann dich unterstützen bei:\n• Fragen beantworten und bei fehlendem Wissen selbstständig im Web recherchieren\n• Informationen mit Quellen in meiner Seele speichern und später wiederfinden\n• Aufgaben planen und über den Executor ausführen\n• Ziele und zeitgesteuerte Erinnerungen verwalten\n• Wissensgraphen und Dokumente aufbauen (inkl. PDFs — Text wird automatisch extrahiert und gelernt)\n• Fotos verstehen und beschreiben (einfach schicken, optional mit Bildunterschrift als Frage)\n• Bilder auf Anfrage generieren (kostenloser KI-Bildgenerator)\n• GitHub-Repos klonen und testen (isolierter Docker-Container, läuft im Hintergrund)\n• Sprachnachrichten verstehen (lokale Transkription, kein API-Key)\n• angebundene MCP-Werkzeuge kontrolliert nutzen\n• Telegram und das Web-Dashboard bedienen\n\nSchreib einfach eine Frage oder eine konkrete Aufgabe."
 
 --! Kürzt Text auf Telegram-Grenze (4096 Zeichen).
 fn shorten s
@@ -1238,10 +1238,20 @@ fn sched_tick token
             continue
         if kind == "job_check"
             --! note-Feld traegt die docker_jobs-Zeilen-ID (siehe
-            --! grm.tool_docker_hintergrund_setup). Laeuft der Container noch,
-            --! einfach neu einplanen — KEIN Telegram-Spam bei jedem Tick, nur
-            --! bei tatsaechlichem Abschluss meldet sich Muninn.
-            job: dt.get_job dbh (to_num (get item "note"))
+            --! grm.tool_docker_hintergrund_setup). Frisches Tool-/Exec-Budget
+            --! VOR dem ersten exec()-Aufruf noetig (refresh_job_status ruft
+            --! selbst exec() auf — docker inspect/logs — siehe
+            --! setup_sandbox-Kommentar bei handle_voice; dieser Lauf startet
+            --! ausserhalb des normalen Nachrichtenflusses, hat also noch kein
+            --! aktuelles Sandbox-Profil fuer DIESE Anfrage).
+            setup_sandbox all_mcp_servers
+            --! refresh_job_status prueft den ECHTEN Docker-Container-Zustand
+            --! (docker inspect/logs) und aktualisiert docker_jobs erst hier
+            --! auf 'done'/'failed' — 'docker run -d' liefert nur den START
+            --! zurueck, siehe Kommentar in docker_tools.pipe. Laeuft der
+            --! Container noch, einfach neu einplanen — KEIN Telegram-Spam bei
+            --! jedem Tick, nur bei tatsaechlichem Abschluss meldet sich Muninn.
+            job: dt.refresh_job_status dbh (to_num (get item "note"))
             still_running: job != nil && (get job "status") == "running"
             if still_running
                 sched.mark_fired dbh (get item "id") "5min" (get item "due_ts")
@@ -1251,12 +1261,7 @@ fn sched_tick token
             if job != nil
                 beschreibung: get job "description"
                 ergebnis: (get job "status") ++ ": " ++ (to_str (get job "result"))
-            --! Frisches Tool-Budget wie an den beiden regulaeren
-            --! run_gremium_stream-Aufrufstellen — dieser Lauf startet
-            --! ausserhalb des normalen Nachrichtenflusses, hat also noch
-            --! kein aktuelles Sandbox-Profil fuer DIESE Anfrage.
-            setup_sandbox all_mcp_servers
-            continuation: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "Ein zuvor im Hintergrund gestartetes Docker-Setup ist abgeschlossen. Beschreibung: " ++ beschreibung ++ ". Ergebnis: " ++ ergebnis ++ ". Berichte dem Nutzer knapp und sauber formatiert, was passiert ist. Braucht die urspruengliche Aufgabe noch einen naechsten Schritt, stosse ihn direkt an (z.B. erneuter Aufruf von 'docker_hintergrund_setup')."
+            continuation: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "Ein zuvor im Hintergrund gestartetes Docker-Setup ist abgeschlossen. Beschreibung: " ++ beschreibung ++ ". Ergebnis (inkl. Container-Logs/Testausgabe, falls vorhanden): " ++ ergebnis ++ ". Berichte dem Nutzer knapp und sauber formatiert, was passiert ist — bei Testlaeufen: wie viele Tests liefen, bestanden/fehlgeschlagen, wichtigste Fehlermeldung falls fehlgeschlagen. Braucht die urspruengliche Aufgabe noch einen naechsten Schritt, stosse ihn direkt an (z.B. erneuter Aufruf von 'docker_hintergrund_setup')."
             res: grm.run_gremium dbh (to_num cid) continuation
             tel.tel_send_message token (to_num cid) (get res "content")
             sched.cancel dbh (get item "id")
