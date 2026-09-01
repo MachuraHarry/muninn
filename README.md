@@ -265,6 +265,7 @@ neben dem Eingabefeld.
 | `/briefing` | tägliches Morgen-Briefing aktivieren (`/briefing stop` zum Abbestellen) |
 | `/learn <URL>` | Dokument lernen (oder direkt eine `.txt`/`.md`-Datei oder PDF schicken) |
 | `/settings` | Antwortstil, Sprache, proaktive Nachrichten und Gedächtnis-Aggressivität einstellen (Inline-Menü, siehe [Architektur → Einstellungen](#einstellungen-settings-memorypipe-muninnpipe)) |
+| `/stop` | SOFORT alle laufenden Hintergrund-Docker-Jobs und geplanten Fortsetzungen abbrechen — deterministisch, unabhängig von einer KI-Entscheidung (siehe [GitHub-Repos klonen und testen](#github-repos-klonen-und-testen)) |
 
 ### Natürliche Sprache
 
@@ -742,9 +743,12 @@ Auf Zuruf klont Muninn ein GitHub-Repo in einen isolierten Docker-Container
 und führt dessen Testsuite aus — dasselbe Prinzip wie Claude Codes autonomes
 Testen, nur über die bestehende `docker_hintergrund_setup`-Infrastruktur
 (kein separates neues Werkzeug nötig): der `werkzeug_docker`-Agent wählt ein
-passendes Basis-Image nach der erkennbaren Projektsprache
-(`node:20-alpine`, `python:3.12-slim`, `golang:1.22-alpine`, `rust:1-slim`,
-`eclipse-temurin:21-jdk`, ...) und baut eine Befehlskette (`git` installieren
+passendes Basis-Image nach der erkennbaren Projektsprache — bewusst
+**„floating" Major-Version-Tags** (`node:lts-alpine`, `python:3-slim`,
+`golang:1-alpine`, `rust:1-slim`, `eclipse-temurin:21-jdk`, ...), NIE eine
+geratene Minor-Version: live beobachtet, dass eine geratene, zu alte
+Go-Version (`golang:1.22-alpine`) an `go.mod requires go >= 1.25.0`
+scheiterte, bevor die Tests überhaupt liefen. Baut eine Befehlskette (`git` installieren
 → `git clone --depth 1` → Installations- und Testbefehl), die als
 `setup_command` im Container läuft.
 
@@ -769,6 +773,42 @@ passendes Basis-Image nach der erkennbaren Projektsprache
   `node:20-alpine`, klonte das Repo, installierte Abhängigkeiten, führte
   die echte Testsuite (`xo && ava && tsd`) aus und berichtete danach korrekt
   „1 Test ausgeführt, 1 bestanden" — mit den echten Logs, nicht erfunden.
+
+**Zwei reale Nutzer-Sessions (Testlauf gegen `MachuraHarry/pipe`) deckten
+zwei weitere ernste Probleme auf, beide gefixt:**
+
+- **Retry-Sturm ohne Koordination**: bei fehlschlagenden Versuchen startete
+  die KI auf jede Rückfrage/Fehlermeldung hin einfach einen weiteren Job
+  (`pipe-test-v3` … `v6`, teils zwei parallel laufende Jobs für dieselbe
+  Aufgabe) — jeweils mit neu erfundenem Container-Namen wegen
+  Namenskollisionen. Gefixt:
+  - `tool_docker_setup_starten` hängt jedem Container-Namen jetzt IMMER
+    automatisch einen Zeitstempel-Suffix an — Kollisionen sind strukturell
+    ausgeschlossen, die KI muss sich keine eindeutigen Namen mehr ausdenken.
+  - Neues Werkzeug `docker_job_status`: die KI prüft jetzt VOR einem neuen
+    Versuch, ob für dieselbe Aufgabe schon ein Job läuft, statt blind einen
+    parallelen Duplikat-Job zu starten.
+- **Kein echter Abbruch-Mechanismus**: auf „Breche alle Aufgaben ab" (zweimal
+  explizit wiederholt) antwortete die KI zweimal „alles abgebrochen" —
+  startete aber im selben Zug jeweils sofort einen neuen Hintergrund-Job
+  weiter. Ursache: es gab schlicht kein Werkzeug, das einen Abbruch
+  tatsächlich AUSFÜHRT und verifiziert — die KI konnte einen Container nur
+  über die rohen MCP-Docker-Werkzeuge löschen, ohne dass `job_check` je davon
+  erfuhr; der nächste Tick fand dann „Container nicht mehr auffindbar",
+  meldete das als Fehlschlag und schlug einen weiteren Versuch vor. Gefixt:
+  - `cancel_job`/`cancel_all_running` (`docker_tools.pipe`): stoppt/entfernt
+    den Container wirklich und markiert den Job als neuen Endzustand
+    `'cancelled'` — von `refresh_job_status`/`job_check` als sauberes Ende
+    erkannt (keine Fehlermeldung, kein Fortsetzungsvorschlag).
+  - **`/stop`** (Telegram-Befehl, `muninn.pipe`): der zuverlässige
+    Hauptweg — bricht deterministisch, OHNE jede KI-Beteiligung, sofort
+    alle laufenden Docker-Jobs und geplanten Fortsetzungen (`job_check`/
+    `task_check`) des Chats ab. Ein Abbruch darf nicht von einer
+    KI-Entscheidung abhängen.
+  - Werkzeug `docker_jobs_abbrechen` (Registrator + Docker-Spezialist) als
+    Sicherheitsnetz für natürlichsprachliche Bitten mitten im Gespräch —
+    mit expliziter Prompt-Regel, einen Abbruch NIE nur zu behaupten, ohne
+    das Werkzeug tatsächlich aufzurufen.
 
 ### Google Workspace (`google_creds/`)
 

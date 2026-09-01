@@ -747,6 +747,21 @@ test "docker_tools: create_job/get_job/update_job-Rundlauf"
     expect_eq (dt.get_job h 99999) nil "unbekannte id liefert nil"
     mem.close h
 
+--! cancel_job/cancel_all_running (P8: echter Abbruch-Mechanismus, siehe
+--! Kommentar dort) — nur der reine DB-Zustandsuebergang ohne echten
+--! Docker-Aufruf ist deterministisch testbar (cancel_job ruft exec() NUR
+--! auf, wenn status == 'running'; ein bereits abgeschlossener/unbekannter
+--! Job loest also KEINEN echten Docker-Aufruf aus). Der tatsaechliche
+--! Container-Abbruch wurde live gegengetestet, siehe Commit-Beschreibung.
+test "cancel_job ist ein No-op fuer bereits abgeschlossene oder unbekannte Jobs"
+    h: mem.init_db ":memory:"
+    jid: dt.create_job h "1" "c" "Testbeschreibung"
+    dt.update_job h jid "done" "schon fertig"
+    expect_eq (dt.cancel_job h jid) true "no-op auf bereits fertigem Job"
+    j: dt.get_job h jid
+    expect_eq (get j "status") "done" "Status bleibt unangetastet"
+    expect_eq (dt.cancel_job h 99999) false "unbekannte id liefert false"
+
 test "scheduler: create_background_task/get_background_task-Rundlauf"
     h: mem.init_db ":memory:"
     tid: sched.create_background_task h "42" "Beispielaufgabe" "Schritt 1 erledigt, Schritt 2 fehlt"

@@ -108,6 +108,62 @@ export fn get_job h id
     else
         nil
 
+--! Tool: Status der zuletzt gestarteten Hintergrund-Docker-Jobs dieses Chats
+--! anzeigen. IMMER vor einem erneuten docker_hintergrund_setup-Aufruf fuer
+--! eine Aufgabe pruefen, fuer die schon ein Job laufen KOENNTE — live
+--! beobachtet: die KI startete auf jede Rueckfrage/jeden Fehlschlag hin
+--! einfach einen weiteren Versuch, teils zwei parallel laufende Jobs fuer
+--! dieselbe Aufgabe gleichzeitig (siehe swarm.pipe-Prompt-Hinweis).
+export fn tool_docker_job_status h chat_id
+    rows: mem.raw_query h ("SELECT container_name, description, status, created FROM docker_jobs WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' ORDER BY id DESC LIMIT 5")
+    if (len rows) == 0
+        return "Keine Hintergrund-Docker-Jobs bisher gestartet."
+    out: "Letzte Hintergrund-Docker-Jobs (neueste zuerst):\n"
+    for r in rows
+        out: out ++ "- " ++ (get r "container_name") ++ " (" ++ (get r "created") ++ "): " ++ (get r "status") ++ " — " ++ (get r "description") ++ "\n"
+    out
+
+--! Bricht EINEN laufenden Hintergrund-Job aktiv ab: entfernt den Container
+--! (best-effort per 'docker rm -f', egal ob er noch existiert) und markiert
+--! den Job als 'cancelled'. KRITISCH: erst DAMIT gibt es ueberhaupt einen
+--! echten Abbruch-Mechanismus — vorher konnte die KI nur ueber die rohen
+--! MCP-Docker-Werkzeuge (docker_remove_container) einen Container loeschen,
+--! OHNE dass job_check je davon erfuhr: der naechste Tick fand dann "Container
+--! nicht mehr auffindbar", meldete das als Fehlschlag UND schlug einen
+--! Fortsetzungsversuch vor — obwohl der Nutzer explizit abgebrochen hatte
+--! (live beobachtet, siehe Kommentar bei cancel_all_running unten). Der
+--! Status 'cancelled' wird von refresh_job_status/sched_tick als Endzustand
+--! erkannt (kein Fehlschlag, keine Fortsetzungsfrage, keine Nutzernachricht).
+export fn cancel_job h id
+    job: get_job h id
+    if job == nil
+        return false
+    if (get job "status") == "running"
+        name: get job "container_name"
+        exec ("docker rm -f " ++ name)
+        update_job h id "cancelled" "Vom Nutzer abgebrochen."
+    true
+
+--! Bricht ALLE laufenden Hintergrund-Docker-Jobs eines Chats ab (siehe
+--! /stop in muninn.pipe UND das KI-Werkzeug 'docker_jobs_abbrechen' in
+--! swarm.pipe — /stop ist der ZUVERLAESSIGE, deterministische Weg, der NIE
+--! von einer KI-Entscheidung abhaengt; das KI-Werkzeug ist nur ein
+--! Sicherheitsnetz fuer natuerlichsprachliche Bitten mitten im Gespraech).
+--! Live beobachtet: auf "Breche alle Aufgaben ab" behauptete die KI
+--! zweimal, alles sei abgebrochen — startete aber jeweils SOFORT im selben
+--! Zug einen neuen Hintergrund-Job weiter, weil es schlicht kein Werkzeug
+--! gab, das eine echte, verifizierbare Abbruch-Aktion ausfuehrt; die KI
+--! konnte nur BEHAUPTEN abzubrechen. Liefert die Liste der abgebrochenen
+--! Job-IDs.
+export fn cancel_all_running h chat_id
+    rows: mem.raw_query h ("SELECT id FROM docker_jobs WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND status = 'running'")
+    ids: []
+    for r in rows
+        jid: get r "id"
+        cancel_job h jid
+        push ids jid
+    ids
+
 --! Prueft den ECHTEN Docker-Container-Zustand und aktualisiert den Job auf
 --! 'done'/'failed' inkl. Logs, sobald der Container tatsaechlich beendet ist
 --! — 'docker run -d' liefert nur den START zurueck (siehe Datei-Kommentar
@@ -216,12 +272,29 @@ fn shell_quote s
 --! EINEN Host-seitigen argv-Token ausbricht. Dieselben Grenzen wie
 --! tool_docker_create_container: KEINE Volume-Mounts, KEIN --privileged,
 --! KEIN --network=host, alles ueber ein festes Kommando-Template.
+--! Der angeforderte Name bekommt IMMER automatisch einen Zeitstempel-Suffix
+--! angehaengt — live beobachtet: bei einer Namenskollision (Retry nach
+--! Fehlschlag) erfand die KI selbst immer neue Namen ("v3", "v4",
+--! "pipe-test-neu", "v5", ...), teils sogar zwei parallel laufende Jobs fuer
+--! dieselbe Aufgabe. Kollisionen sind mit dem Suffix strukturell
+--! ausgeschlossen, die KI muss sich keine eindeutigen Namen mehr ausdenken.
+--! Liefert {ok, name, message} statt nur einem String — der Aufrufer
+--! (swarm.pipe tool_docker_hintergrund_setup) braucht den ECHTEN
+--! (suffigierten) Namen fuers Job-Tracking, nicht den urspruenglich
+--! angeforderten.
 export fn tool_docker_setup_starten image name setup_command
     if !(valid_image_name image)
-        return "Abgelehnt: '" ++ image ++ "' ist kein gueltiger Image-Name."
+        return {ok: false, name: nil, message: "Abgelehnt: '" ++ image ++ "' ist kein gueltiger Image-Name."}
     if !(valid_identifier name)
-        return "Abgelehnt: '" ++ name ++ "' ist kein gueltiger Container-Name."
+        return {ok: false, name: nil, message: "Abgelehnt: '" ++ name ++ "' ist kein gueltiger Container-Name."}
     if setup_command == nil || (trim setup_command) == ""
-        return "Abgelehnt: kein setup_command angegeben."
-    cmd: "docker run -d --name " ++ name ++ " " ++ image ++ " sh -c \"" ++ (shell_quote setup_command) ++ "\""
-    docker_exec cmd
+        return {ok: false, name: nil, message: "Abgelehnt: kein setup_command angegeben."}
+    base: name
+    if (len base) > 50
+        base: substring base 0 50
+    final_name: base ++ "-" ++ (to_str now)
+    cmd: "docker run -d --name " ++ final_name ++ " " ++ image ++ " sh -c \"" ++ (shell_quote setup_command) ++ "\""
+    res: docker_exec cmd
+    if contains res "Fehler"
+        return {ok: false, name: final_name, message: res}
+    {ok: true, name: final_name, message: res}

@@ -188,7 +188,7 @@ fn greeting_text _
 
 --! Hilfetext.
 fn help_text _
-    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/costs      — KI-Betriebskosten zusammengefasst (Sessions, Tokens, $)\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/learn      — Dokument lernen (z.B. /learn https://... oder eine .txt/.md-Datei schicken)\n/graph      — Wissensgraph abfragen (z.B. /graph Harry)\n/remind     — Erinnerung planen (z.B. /remind in 10 Minuten an die Pause)\n/reminders  — offene Erinnerungen/Briefings anzeigen\n/briefing   — tägliches Morgen-Briefing aktivieren (/briefing stop zum Abbestellen)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen\n/settings   — Antwortstil, Sprache, proaktive Nachrichten, Gedächtnis-Aggressivität einstellen"
+    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/costs      — KI-Betriebskosten zusammengefasst (Sessions, Tokens, $)\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/learn      — Dokument lernen (z.B. /learn https://... oder eine .txt/.md-Datei schicken)\n/graph      — Wissensgraph abfragen (z.B. /graph Harry)\n/remind     — Erinnerung planen (z.B. /remind in 10 Minuten an die Pause)\n/reminders  — offene Erinnerungen/Briefings anzeigen\n/briefing   — tägliches Morgen-Briefing aktivieren (/briefing stop zum Abbestellen)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen\n/settings   — Antwortstil, Sprache, proaktive Nachrichten, Gedächtnis-Aggressivität einstellen\n/stop       — SOFORT alle laufenden Hintergrund-Docker-Jobs und geplanten Fortsetzungen abbrechen"
 
 --! Status-Text (Statistiken aus der Seele).
 fn status_text dbh
@@ -562,6 +562,27 @@ fn handle_message token cid text dbh
         return nil
     if low == "/settings"
         tel.tel_send_message_kb token cid (settings_menu_text dbh cid) (settings_kb dbh cid)
+        return nil
+    if low == "/stop"
+        --! Deterministisch, OHNE KI-Beteiligung — bewusst so, siehe
+        --! Kommentar bei dt.cancel_all_running: die KI selbst konnte einen
+        --! Abbruch bisher nur BEHAUPTEN (kein echtes Werkzeug dafuer), live
+        --! beobachtet als "alles abgebrochen" gefolgt von einem sofort neu
+        --! gestarteten Hintergrund-Job. /stop garantiert, dass ein Abbruch
+        --! IMMER sofort und zuverlaessig wirkt, unabhaengig von jeder
+        --! KI-Entscheidung — fuer eine Stop-Anfrage die einzig vertretbare
+        --! Grundlage.
+        tel.tel_send_chat_action token cid "typing"
+        cancelled_jobs: dt.cancel_all_running dbh (to_str cid)
+        n_sched: 0
+        for r in (sched.list dbh (to_str cid))
+            if (get r "kind") == "job_check" || (get r "kind") == "task_check"
+                sched.cancel dbh (get r "id")
+                n_sched: n_sched + 1
+        if (len cancelled_jobs) == 0 && n_sched == 0
+            tel.tel_send_message token cid "Es liefen keine Hintergrund-Aufgaben — nichts abzubrechen."
+        else
+            tel.tel_send_message token cid ("Abgebrochen: " ++ (to_str (len cancelled_jobs)) ++ " laufende(r) Docker-Hintergrund-Job(s) (Container entfernt), " ++ (to_str n_sched) ++ " geplante Fortsetzung(en) storniert.")
         return nil
     if low == "/graph"
         tel.tel_send_message token cid "Bitte gib eine Entität an: /graph <Name>"
@@ -1256,6 +1277,16 @@ fn sched_tick token
             if still_running
                 sched.mark_fired dbh (get item "id") "5min" (get item "due_ts")
                 continue
+            --! Vom Nutzer explizit abgebrochen (/stop bzw. 'docker_jobs_abbrechen',
+            --! siehe docker_tools.pipe cancel_job) — sauber und STILL beenden,
+            --! keine Nachricht, keine Fortsetzungsfrage. Genau diese Luecke
+            --! fehlte vorher: ohne 'cancelled' als eigenen Endzustand landete ein
+            --! abgebrochener Job hier als "Container nicht mehr auffindbar" und
+            --! wurde als Fehlschlag gemeldet, samt Vorschlag, es erneut zu
+            --! versuchen — trotz expliziten Abbruchs durch den Nutzer.
+            if job != nil && (get job "status") == "cancelled"
+                sched.cancel dbh (get item "id")
+                continue
             beschreibung: "unbekannt"
             ergebnis: "Job nicht gefunden."
             if job != nil
@@ -1623,6 +1654,7 @@ else
                 push cmds {command: "reset", description: "Gesprächsverlauf zurücksetzen"}
                 push cmds {command: "consolidate", description: "Traum: Gedächtnis verdichten"}
                 push cmds {command: "settings", description: "Stil, Sprache, Proaktivität, Gedächtnis einstellen"}
+                push cmds {command: "stop", description: "Alle Hintergrund-Jobs sofort abbrechen"}
                 tel.tel_set_my_commands tok cmds
             catch
                 nil
