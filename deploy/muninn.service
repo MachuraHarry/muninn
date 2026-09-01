@@ -23,6 +23,22 @@ TimeoutStopSec=30
 Restart=on-failure
 RestartSec=5
 
+# Zweite Verteidigungslinie neben dem Pipe-internen exec()-Timeout (siehe
+# setup_sandbox in muninn.pipe): der Haupt-Loop meldet sich nach JEDER
+# Zyklus-Iteration per "systemd-notify WATCHDOG=1" (erfolgreich oder
+# abgefangener Fehler zaehlt gleichermassen als "lebt noch") — bleibt dieses
+# Signal laenger als WatchdogSec aus, wertet systemd den Dienst als
+# gehaengt, killt ihn und startet ihn dank Restart=on-failure automatisch
+# neu, statt dass ein Haenger erst manuell entdeckt werden muss (live
+# passiert: ein blockierender exec()-Aufruf legte den GESAMTEN Bot fuer
+# Stunden lahm, bis das von Hand aufgefallen ist). 900s (15 Minuten) statt
+# knapper bemessen, weil Pipe bewusst single-threaded ist — waehrend eines
+# echten, aber LEGITIMEN langen Gremiums-Durchlaufs (viele Runden, viele
+# Werkzeugaufrufe) kann kein Heartbeat gesendet werden, das darf nicht
+# faelschlich als Haenger gewertet werden. Deckt trotzdem jeden ECHTEN
+# unbegrenzten Haenger zuverlaessig ab, der sonst fuer immer stehen bliebe.
+WatchdogSec=900
+
 # Loggt automatisch in den systemd-Journal (journalctl -u muninn -f) statt
 # in eine manuell verwaltete Datei wie beim bisherigen nohup-Start.
 StandardOutput=journal

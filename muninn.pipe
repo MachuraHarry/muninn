@@ -98,6 +98,11 @@ fn setup_sandbox servers
     --! auf (kein MCP-Server dafuer). Fester Skriptpfad, keine AI-kontrollierbaren
     --! Flags — nur die beiden Dateipfade werden uebergeben.
     push wl "tts_synth.sh"
+    --! "systemd-notify" zusaetzlich zur Whitelist: der Haupt-Loop (siehe
+    --! unten) meldet sich damit periodisch beim systemd-Watchdog
+    --! (WatchdogSec in muninn.service) — reines Trust-System-Kommando ohne
+    --! AI-kontrollierbare Argumente, kein MCP-Server dafuer noetig.
+    push wl "systemd-notify"
     allow_exec: (len wl) > 0
     set SANDBOX_STATE "gen" ((get SANDBOX_STATE "gen") + 1)
     name: "muninn-" ++ (to_str (get SANDBOX_STATE "gen"))
@@ -1410,3 +1415,16 @@ else
                         maybe_log_cost 0
                     catch e
                         print ("Zyklus-Fehler — versuche erneut: " ++ (to_str e))
+                    --! systemd-Watchdog-Heartbeat: bewusst AUSSERHALB des
+                    --! try/catch oben, damit auch ein abgefangener
+                    --! Zyklus-Fehler als "lebt noch, iteriert weiter"
+                    --! zaehlt — nur ein echter Haenger (gar kein Code laeuft
+                    --! mehr, siehe Kommentar bei WatchdogSec in
+                    --! muninn.service) laesst diesen Aufruf ausbleiben.
+                    --! try/catch hier: best-effort, kein NOTIFY_SOCKET
+                    --! gesetzt (z.B. manueller Testlauf ausserhalb von
+                    --! systemd) darf die Hauptschleife nicht stoppen.
+                    try
+                        exec "systemd-notify WATCHDOG=1"
+                    catch
+                        nil
