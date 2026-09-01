@@ -103,6 +103,12 @@ fn setup_sandbox servers
     --! (WatchdogSec in muninn.service) — reines Trust-System-Kommando ohne
     --! AI-kontrollierbare Argumente, kein MCP-Server dafuer noetig.
     push wl "systemd-notify"
+    --! "pdftotext" zusaetzlich zur Whitelist: handle_document ruft Poppler
+    --! direkt per exec() auf, um hochgeladene PDFs ins Gedaechtnis zu lernen
+    --! (siehe extract_pdf_text oben) — kein MCP-Server dafuer noetig, das
+    --! Kommando wird komplett aus einem festen Template gebaut (nur der
+    --! bereits lokal gespeicherte Dateipfad wird eingesetzt, siehe shell_quote).
+    push wl "pdftotext"
     allow_exec: (len wl) > 0
     set SANDBOX_STATE "gen" ((get SANDBOX_STATE "gen") + 1)
     name: "muninn-" ++ (to_str (get SANDBOX_STATE "gen"))
@@ -260,6 +266,45 @@ fn is_text_doc fname mime
         return true
     false
 
+--! Prueft anhand Dateiname/Mime-Type, ob ein Dokument eine PDF ist.
+fn is_pdf_doc fname mime
+    if mime != nil
+        if contains mime "application/pdf"
+            return true
+    contains (lower fname) ".pdf"
+
+--! Escaped einen Pfad fuer die Einbettung als EIN Host-seitiges argv-Token in
+--! einen exec()-Kommandostring (siehe splitShellWords in
+--! pipe/pkg/object/sandbox.go: nur "\\" und "\"" werden innerhalb doppelter
+--! Anfuehrungszeichen entschluesselt) — dieselbe Eskalation wie shell_quote
+--! in docker_tools.pipe, hier lokal dupliziert statt importiert (docker_tools.pipe
+--! exportiert sie bewusst nicht, siehe dessen Kommentar zum sqlite-Shadowing-Bug,
+--! den ein zusaetzlicher Import hier unnoetig riskieren wuerde).
+fn shell_quote s
+    s: replace_all s "\\" "\\\\"
+    s: replace_all s "\"" "\\\""
+    s
+
+--! Extrahiert reinen Text aus einer lokalen PDF-Datei per `pdftotext`
+--! (Poppler, systemweit installiert, kein API-Key/Cloud-Dienst — siehe
+--! setup_sandbox fuer die exec-Whitelist-Eintragung). "-q" unterdrueckt
+--! Poppler-Warnungen (z.B. zu fehlenden eingebetteten Fonts) — ohne das
+--! landen sie ueber exec()s CombinedOutput MITTEN im extrahierten Text.
+--! "-" als Ausgabe-Pfad schreibt den Text nach stdout statt in eine Datei.
+--! Liefert nil, wenn die PDF keinen Text-Layer hat (z.B. reine Bild-Scans
+--! ohne OCR — Poppler liefert dann leeren Output, kein Fehler) oder
+--! pdftotext scheitert (kaputte/verschluesselte Datei).
+fn extract_pdf_text path
+    cmd: "pdftotext -q \"" ++ (shell_quote path) ++ "\" -"
+    r: exec cmd
+    if (get r "status") != 0
+        print ("pdftotext fehlgeschlagen (Status " ++ (to_str (get r "status")) ++ "): " ++ path)
+        return nil
+    out: get r "output"
+    if out == nil || (trim out) == ""
+        return nil
+    out
+
 fn is_mcp_server_question low
     if !contains low "mcp"
         return false
@@ -281,9 +326,9 @@ fn safe_filename fname
 
 --! Verarbeitet ein hochgeladenes Dokument (Telegram "document"-Nachricht).
 --! JEDE Datei wird roh im mcp_data-Ordner gespeichert (fuer werkzeug_
---! filesystem lesbar/bearbeitbar); reine Textdateien werden zusaetzlich ins
---! Gedaechtnis gelernt (ingest_document, siehe dortigen Kommentar zur
---! bewussten PDF-Einschraenkung dafuer — das Lernen, nicht das Speichern).
+--! filesystem lesbar/bearbeitbar); reine Textdateien werden zusaetzlich direkt
+--! ins Gedaechtnis gelernt (ingest_document), PDFs ueber pdftotext (siehe
+--! extract_pdf_text oben) — andere Binaerformate bleiben nur gespeichert.
 fn handle_document token cid dbh doc
     fname: get doc "file_name"
     if fname == nil
@@ -305,6 +350,19 @@ fn handle_document token cid dbh doc
     if is_text_doc fname mime
         res: mem.ingest_document dbh content ("telegram-datei:" ++ fname) fname 20
         out: out ++ "\nZusaetzlich als Wissen gelernt: " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten."
+    else
+        if is_pdf_doc fname mime
+            --! Frisches Tool-/Exec-Budget noetig (siehe setup_sandbox-Kommentar
+            --! bei handle_voice) — ein vorheriger Nachrichtendurchlauf im selben
+            --! Prozess koennte "pdftotext" sonst nicht (mehr) auf der aktiven
+            --! exec-Whitelist haben.
+            setup_sandbox all_mcp_servers
+            pdf_text: extract_pdf_text save_path
+            if pdf_text == nil
+                out: out ++ "\nKein Text extrahierbar (evtl. reine Bild-Scans ohne Text-Layer, verschluesselt oder beschaedigt) — nicht ins Gedaechtnis gelernt."
+            else
+                res: mem.ingest_document dbh pdf_text ("telegram-pdf:" ++ fname) fname 20
+                out: out ++ "\nText extrahiert und als Wissen gelernt: " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten."
     tel.tel_send_message token cid out
 
 --! Verarbeitet ein hochgeladenes Foto (Telegram "photo"-Nachricht) per ai_vision.
@@ -816,7 +874,7 @@ fn question_needs_research answer
 
 --! Liefert eine direkte Übersicht der Fähigkeiten statt einer Faktenantwort.
 fn capability_text _
-    "Ich kann dich unterstützen bei:\n• Fragen beantworten und bei fehlendem Wissen selbstständig im Web recherchieren\n• Informationen mit Quellen in meiner Seele speichern und später wiederfinden\n• Aufgaben planen und über den Executor ausführen\n• Ziele und zeitgesteuerte Erinnerungen verwalten\n• Wissensgraphen und Dokumente aufbauen\n• Fotos verstehen und beschreiben (einfach schicken, optional mit Bildunterschrift als Frage)\n• Bilder auf Anfrage generieren (kostenloser KI-Bildgenerator)\n• Sprachnachrichten verstehen (lokale Transkription, kein API-Key)\n• angebundene MCP-Werkzeuge kontrolliert nutzen\n• Telegram und das Web-Dashboard bedienen\n\nSchreib einfach eine Frage oder eine konkrete Aufgabe."
+    "Ich kann dich unterstützen bei:\n• Fragen beantworten und bei fehlendem Wissen selbstständig im Web recherchieren\n• Informationen mit Quellen in meiner Seele speichern und später wiederfinden\n• Aufgaben planen und über den Executor ausführen\n• Ziele und zeitgesteuerte Erinnerungen verwalten\n• Wissensgraphen und Dokumente aufbauen (inkl. PDFs — Text wird automatisch extrahiert und gelernt)\n• Fotos verstehen und beschreiben (einfach schicken, optional mit Bildunterschrift als Frage)\n• Bilder auf Anfrage generieren (kostenloser KI-Bildgenerator)\n• Sprachnachrichten verstehen (lokale Transkription, kein API-Key)\n• angebundene MCP-Werkzeuge kontrolliert nutzen\n• Telegram und das Web-Dashboard bedienen\n\nSchreib einfach eine Frage oder eine konkrete Aufgabe."
 
 --! Kürzt Text auf Telegram-Grenze (4096 Zeichen).
 fn shorten s

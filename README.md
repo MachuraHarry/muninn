@@ -13,6 +13,9 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 ## Features
 
 - **Persistente Seele** — SQLite mit Erinnerungen, Wissensgraph (Entitäten/Relationen), Zielen und Verlauf.
+- **PDFs lernen** — hochgeladene PDFs (z.B. Rechnungen, Verträge, Berichte) werden per
+  lokalem `pdftotext` (kein API-Key) automatisch als Text ins Gedächtnis aufgenommen,
+  nicht nur roh gespeichert.
 - **Hybride Suche (RAG)** — TF-IDF-Keyword-Scoring + semantische Embeddings; faellt bei leerem
   Ergebnis auf die wichtigsten dauerhaften Fakten zurueck (Fragen wie „Wer bin ich?" bestehen
   sonst nur aus Stoppwoertern und liefern garantiert 0 Treffer).
@@ -254,7 +257,7 @@ neben dem Eingabefeld.
 | `/remind <Anweisung>` | Erinnerung planen (z.B. `/remind in 10 Minuten an die Pause`) |
 | `/reminders` | offene Erinnerungen/Briefings anzeigen |
 | `/briefing` | tägliches Morgen-Briefing aktivieren (`/briefing stop` zum Abbestellen) |
-| `/learn <URL>` | Dokument lernen (oder direkt eine `.txt`/`.md`-Datei schicken) |
+| `/learn <URL>` | Dokument lernen (oder direkt eine `.txt`/`.md`-Datei oder PDF schicken) |
 | `/settings` | Antwortstil, Sprache, proaktive Nachrichten und Gedächtnis-Aggressivität einstellen (Inline-Menü, siehe [Architektur → Einstellungen](#einstellungen-settings-memorypipe-muninnpipe)) |
 
 ### Natürliche Sprache
@@ -415,18 +418,26 @@ mehr, die das für jede Nachricht pauschal entscheidet.
 
 ### Dokument-Ingestion (P2)
 
-`/learn <URL>` oder eine hochgeladene `.txt`/`.md`-Datei nehmen ein Dokument in
-die Wissensbasis auf:
+`/learn <URL>`, eine hochgeladene `.txt`/`.md`-Datei oder eine hochgeladene
+PDF nehmen ein Dokument in die Wissensbasis auf:
 
 - **`chunk_text`** zerlegt den Text rein/deterministisch in ≤1200-Zeichen-Stücke
   (bevorzugt an Absatzgrenzen).
 - **`ingest_document`** speichert jeden Chunk als eigene Erinnerung (kind
   `document`, mit Embedding + Auto-Verknüpfung) und begrenzt die Anzahl über
   `max_chunks` (Kosten-/Zeit-Deckel).
-- **PDFs/Binärformate werden bewusst nicht unterstützt** — Pipe ist ein
-  dependency-freies Binary ohne PDF-Bibliothek. Der saubere Weg dafür wäre ein
-  angebundener MCP-Server mit PDF-Extraktion (siehe P1) statt einer Abhängigkeit
-  im Kernbinary.
+- **PDFs** (`handle_document`/`extract_pdf_text`, `muninn.pipe`): Text wird per
+  `pdftotext` (Poppler, systemweit installiert, kein API-Key/Cloud-Dienst) aus
+  einer hochgeladenen PDF extrahiert und genau wie eine Textdatei gelernt —
+  Pipe selbst bleibt dependency-frei, `pdftotext` läuft über `exec()` mit einer
+  festen exec-Whitelist-Eintragung (siehe `setup_sandbox`), das Kommando wird
+  komplett aus einem festen Template gebaut (nur der bereits lokal
+  gespeicherte Dateipfad wird eingesetzt, `-q` unterdrückt Poppler-Warnungen,
+  die sonst mitten im extrahierten Text landen würden). Reine Bild-Scans ohne
+  Text-Layer, verschlüsselte oder beschädigte PDFs liefern ehrlich "kein Text
+  extrahierbar" statt stillschweigend nichts zu tun. Nur der URL-Lernpfad
+  (`/learn <URL>`) unterstützt PDFs (noch) nicht — der bräuchte einen
+  eigenen, nicht-HTML-strippenden Fetch-Pfad.
 - **Hybride Retrieval:** `retrieve_context` kombiniert lexikalisches TF-IDF-Scoring (0.75)
   mit semantischen Embeddings (0.25). DeepSeek liefert nur einen 128-dim lexikalischen
   Hash — bei einem echten Embedding-Provider (>300 dim) schaltet die Gewichtung
