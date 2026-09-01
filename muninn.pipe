@@ -867,6 +867,24 @@ fn tel_finalize token cid message_id text kb
 fn question_needs_research answer
     if answer == nil || answer == ""
         return true
+    trimmed: trim answer
+    --! Endet die Antwort mit einem Fragezeichen, ist es mit hoher
+    --! Wahrscheinlichkeit eine legitime Rueckfrage (HONESTY_RULE: bei zu
+    --! vager/kontextabhaengiger Anfrage lieber nachfragen als raten) — KEIN
+    --! Fall fuer eine blinde Web-Suche mit dem unveraenderten Nutzertext als
+    --! Suchbegriff. Live beobachtet: "Was wuerdest du vorschlagen?" (bezog
+    --! sich auf den laufenden Gespraechskontext) loeste genau das aus und
+    --! durchsuchte woertlich "was wuerdest du vorschlagen" im Netz — reine
+    --! Woerterbuch-/Konjugations-Treffer, komplett am Sinn vorbei.
+    if (len trimmed) > 0 && (substring trimmed ((len trimmed) - 1) (len trimmed)) == "?"
+        return false
+    --! Nur bei KURZEN Antworten unten als "hat aufgegeben" werten — eine
+    --! laengere, substanzielle Antwort, die eine dieser Phrasen nur
+    --! beilaeufig als Teil einer echten Erklaerung enthaelt (z.B. "dazu gibt
+    --! es keine Informationen, aber X ist bekannt..."), ist keine
+    --! gescheiterte Antwort und sollte nicht verworfen werden.
+    if (len trimmed) > 300
+        return false
     low: lower answer
     if contains low "ich weiß es nicht"
         return true
