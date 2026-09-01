@@ -820,6 +820,23 @@ export fn retrieve_context h query k
             sem_w: 0.7
             kw_w: 0.3
     scored: []
+    --! KRITISCHER BUG (live gefunden: "Wer bin ich?" fand trotz mehrfach
+    --! gespeicherter Identitaet "keinen Eintrag"): kw_denom ist 0, wenn ALLE
+    --! Query-Tokens Stoppwoerter sind ("wer"/"bin"/"ich" stehen alle in
+    --! is_stop) — dann bleibt kw=0 fuer JEDE Erinnerung. sem bleibt IMMER 0,
+    --! da embed() ohne OPENAI_API_KEY grundsaetzlich fehlschlaegt (siehe
+    --! EMBED_STATE oben). Score ist in diesem Fall fuer ALLE 249+ Erinnerungen
+    --! IDENTISCH 0 — der darunterliegende "if (len out) == 0"-Fallback griff
+    --! NIE, weil die Top-k-Auswahl trotz durchgaengig 0 Punkten trotzdem NICHT
+    --! leer ist (sorted_by liefert bei lauter Gleichstand einfach die ersten k
+    --! Eintraege der Eingabereihenfolge, hier: die NEUESTEN Erinnerungen nach
+    --! id DESC) — dem Gremium wurden also voellig beliebige juengste
+    --! Erinnerungen als "Kontext" untergeschoben, NIE die tatsaechlich
+    --! gespeicherte Identitaet. any_signal trackt jetzt explizit, ob
+    --! IRGENDEINE Erinnerung einen ECHTEN (> 0) Score hatte — nur dann wird
+    --! die Scored-Liste ueberhaupt verwendet, sonst greift der Fallback jetzt
+    --! wirklich.
+    any_signal: false
     for r in rows
         c: get r "content"
         kw: 0
@@ -837,27 +854,30 @@ export fn retrieve_context h query k
                 if cv != nil
                     sem: cosine_sim qvec cv
         score: (sem * sem_w) + (kw * kw_w)
+        if score > 0
+            any_signal: true
         push scored {content: c, score: score, kind: (get r "kind")}
-    ordered: sorted_by scored (fn x: (0 - (get x "score")))
     out: []
-    i: 0
-    while i < k && i < (len ordered)
-        item: at ordered i
-        c: get item "content"
-        --! Herkunfts-Kennzeichnung: "fact" & Co sind KI-Recherche-Ergebnisse oder
-        --! Task-Protokolle, KEINE Aussagen des Nutzers ueber sich selbst — ohne
-        --! diese Markierung haelt das Gremium sie sonst faelschlich fuer
-        --! Nutzerpraeferenzen (beobachtet: eine alte AfD-Recherche wurde bei
-        --! "Wofuer interessiere ich mich?" als "klares Signal fuer politisches
-        --! Interesse" fehlinterpretiert, obwohl es nur eine fruehere Recherche
-        --! zu einer ANDEREN Frage war). "permanent"/"document" bleiben
-        --! unmarkiert: das sind explizite Nutzeraussagen bzw. selbst gelehrte
-        --! Inhalte.
-        k2: get item "kind"
-        if k2 != "permanent" && k2 != "document"
-            c: "[fruehere Recherche/Protokoll, KEINE Aussage des Nutzers] " ++ c
-        push out c
-        i: i + 1
+    if any_signal
+        ordered: sorted_by scored (fn x: (0 - (get x "score")))
+        i: 0
+        while i < k && i < (len ordered)
+            item: at ordered i
+            c: get item "content"
+            --! Herkunfts-Kennzeichnung: "fact" & Co sind KI-Recherche-Ergebnisse oder
+            --! Task-Protokolle, KEINE Aussagen des Nutzers ueber sich selbst — ohne
+            --! diese Markierung haelt das Gremium sie sonst faelschlich fuer
+            --! Nutzerpraeferenzen (beobachtet: eine alte AfD-Recherche wurde bei
+            --! "Wofuer interessiere ich mich?" als "klares Signal fuer politisches
+            --! Interesse" fehlinterpretiert, obwohl es nur eine fruehere Recherche
+            --! zu einer ANDEREN Frage war). "permanent"/"document" bleiben
+            --! unmarkiert: das sind explizite Nutzeraussagen bzw. selbst gelehrte
+            --! Inhalte.
+            k2: get item "kind"
+            if k2 != "permanent" && k2 != "document"
+                c: "[fruehere Recherche/Protokoll, KEINE Aussage des Nutzers] " ++ c
+            push out c
+            i: i + 1
     if (len out) == 0
         --! Fallback: Fragen wie "Wer bin ich?" bestehen fast nur aus Stoppwoertern
         --! (wer/bin/ich, siehe is_stop) und liefern daher IMMER 0 Keyword-Treffer,
@@ -868,6 +888,38 @@ export fn retrieve_context h query k
         perm: db_query h ("SELECT content FROM memories WHERE kind = 'permanent' ORDER BY importance DESC, id DESC LIMIT " ++ (to_str k))
         for r in perm
             push out (get r "content")
+    else
+        --! Live-Bug (P10, Folgefund): der obige Stoppwort-Fallback allein
+        --! reichte NICHT — das Gremium formuliert die Suchanfrage beim
+        --! Werkzeugaufruf oft frei um (z.B. "Wer bin ich?" -> "Nutzer
+        --! Identitaet Name persoenliche Daten"), was any_signal durchaus auf
+        --! true setzen kann (irgendeine andere, weniger wichtige Erinnerung
+        --! trifft zufaellig ein Wort), OHNE dass die eigentliche Identitaet
+        --! (rein lexikalisch komplett anders formuliert: "Ich bin Harry
+        --! Machura, geboren...") jemals im Ergebnis auftaucht. Deshalb hier
+        --! IMMER die wichtigste "permanent"-Erinnerung mit hineinmischen,
+        --! falls es eine gibt und sie noch nicht enthalten ist — das sind
+        --! per Definition explizite, dauerhafte Kernfakten des Nutzers
+        --! (Name, Geburtsdatum, Vorlieben), genau das, wonach bei
+        --! Identitaets-/Selbstfragen typischerweise gesucht wird. NUR ab k>=2:
+        --! bei k=1 will der Aufrufer explizit GENAU den einen besten Treffer,
+        --! den darf ein pauschaler Identitaets-Merge nicht ueberschreiben
+        --! (live als Testregression aufgefallen: ein k=1-Treffer mit echtem
+        --! Wortueberlappungs-Match wurde faelschlich durch eine andere, nur
+        --! zufaellig aeltere/neuere "permanent"-Erinnerung ersetzt).
+        if k >= 2
+            top_perm: db_query h "SELECT content FROM memories WHERE kind = 'permanent' ORDER BY importance DESC, id DESC LIMIT 1"
+            if (len top_perm) > 0
+                perm_content: get (at top_perm 0) "content"
+                already_present: false
+                for c in out
+                    if c == perm_content
+                        already_present: true
+                if !already_present
+                    if (len out) < k
+                        push out perm_content
+                    else
+                        set out (k - 1) perm_content
     out
 
 --! Alle gespeicherten Workflow-Rezepte (kind "rezept"), wichtigste zuerst.

@@ -473,6 +473,44 @@ test "retrieve_context rankt nach Wortüberlappung"
     expect_eq (len ctx) 1 "eine relevante Erinnerung"
     expect_eq (at ctx 0) "Pfannkuchen braucht Mehl und Milch" "Top-Match"
 
+--! Live-Bug (P10): "Wer bin ich?" fand trotz gespeicherter Identitaet
+--! "keinen Eintrag" — kw_denom ist 0, wenn ALLE Query-Tokens Stoppwoerter
+--! sind ("wer"/"bin"/"ich"), sem bleibt IMMER 0 (kein OPENAI_API_KEY) — jede
+--! Erinnerung bekam score=0, der "if (len out) == 0"-Fallback griff NIE,
+--! weil eine durchgaengige 0-Punkte-Auswahl trotzdem nicht LEER ist (liefert
+--! stattdessen beliebige/juengste Eintraege). Muss jetzt stattdessen auf die
+--! wichtigsten PERMANENTEN Erinnerungen zurueckfallen, unabhaengig davon,
+--! wie viele andere (irrelevante, neuere) Erinnerungen existieren.
+test "retrieve_context faellt bei reiner Stoppwort-Frage auf permanente Fakten zurueck"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "Ich heisse Harry Machura, geboren 1992." "permanent" 5 "test" "identity"
+    --! Viele neuere, komplett irrelevante Erinnerungen — vor dem Fix waeren
+    --! GENAU DIESE (als juengste per id DESC) faelschlich zurueckgekommen.
+    i: 0
+    while i < 5
+        mem.add_memory h ("Irrelevante Recherche Nr. " ++ (to_str i)) "fact" 2 "test" "x"
+        i: i + 1
+    ctx: mem.retrieve_context h "Wer bin ich?" 3
+    expect_eq (contains (join ctx " | ") "Harry Machura") true "Identitaet wird gefunden, nicht die juengsten irrelevanten Eintraege"
+
+--! Live-Bug (P10, Folgefund): der obige Fallback allein reichte nicht — das
+--! Gremium formuliert die eigene Suchanfrage beim Werkzeugaufruf oft frei um
+--! (beobachtet: "Wer bin ich?" -> "Nutzer Identitaet Name persoenliche
+--! Daten"), was any_signal auf true setzen KANN, weil irgendeine andere,
+--! unwichtigere Erinnerung zufaellig ein Wort trifft — ohne dass die
+--! eigentliche, lexikalisch komplett anders formulierte Identitaet ("Ich bin
+--! Harry Machura...") je im Ergebnis auftaucht. retrieve_context muss die
+--! wichtigste "permanent"-Erinnerung deshalb IMMER mit hineinmischen, auch
+--! wenn schon ein (irrelevanter) Keyword-Treffer existiert.
+test "retrieve_context mischt permanente Identitaet auch bei umformulierter, treffender Anfrage ein"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "Ich bin Harry Machura, geboren am 20.02.1992 in Pinneberg." "permanent" 5 "test" "identity"
+    --! Trifft die umformulierte KI-Anfrage lexikalisch (enthaelt "Daten"),
+    --! hat mit der eigentlichen Nutzer-Identitaet aber nichts zu tun.
+    mem.add_memory h "Die Datenbank fuer Rechnungen wurde erfolgreich angelegt." "fact" 2 "test" "x"
+    ctx: mem.retrieve_context h "Nutzer Identität Name persönliche Daten" 2
+    expect_eq (contains (join ctx " | ") "Harry Machura") true "permanente Identitaet trotz unrelated Keyword-Treffer enthalten"
+
 --! Vektor-Mathematik (kein KI-Call).
 test "cosine_sim identischer Vektoren ist 1"
     sim: cosine_sim ([1, 0, 0]) ([1, 0, 0])
