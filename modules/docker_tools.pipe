@@ -164,6 +164,57 @@ export fn cancel_all_running h chat_id
         push ids jid
     ids
 
+--! docker_environments: dauerhafte, WIEDERVERWENDBARE Docker-Umgebungen —
+--! bewusstes Gegenstueck zu docker_jobs, das EINMALIGE Hintergrund-
+--! Aufgaben trackt (Repo testen, Paket installieren — die sollen fertig
+--! werden und aufgeraeumt werden). Ohne dieses Register wusste die KI
+--! nicht, was in einem bereits laufenden Container installiert ist bzw.
+--! wofuer er gedacht ist, und legte fuer jede Anfrage, die "irgendein
+--! Linux" braucht, reflexartig einen NEUEN Container an, statt einen
+--! bestehenden wiederzuverwenden (Nutzerbeobachtung).
+export fn init_docker_environments h
+    mem.raw_exec h "CREATE TABLE IF NOT EXISTS docker_environments (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, container_name TEXT, purpose TEXT, installed TEXT, created TEXT, status TEXT)"
+    nil
+
+--! Tool: registriert einen Container als dauerhafte, wiederverwendbare
+--! Umgebung — NICHT fuer einmalige Test-/Build-Jobs ueber
+--! docker_hintergrund_setup (die docker_jobs-Tabelle trackt die bereits;
+--! diese Faelle sollen NICHT wiederverwendet werden, siehe Kommentar oben).
+export fn tool_docker_environment_registrieren h chat_id container_name purpose installed
+    if !(valid_identifier container_name)
+        return "Abgelehnt: '" ++ container_name ++ "' ist kein gueltiger Container-Name."
+    init_docker_environments h
+    mem.raw_exec h ("INSERT INTO docker_environments (chat_id, container_name, purpose, installed, created, status) VALUES ('" ++ (mem.sql_escape (to_str chat_id)) ++ "', '" ++ (mem.sql_escape container_name) ++ "', '" ++ (mem.sql_escape purpose) ++ "', '" ++ (mem.sql_escape installed) ++ "', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "', 'active')")
+    "Umgebung '" ++ container_name ++ "' registriert: " ++ purpose
+
+--! Tool: listet aktive registrierte dauerhafte Umgebungen dieses Chats —
+--! VOR dem Anlegen eines neuen Containers fuer eine Anfrage, die eine
+--! Linux-/Docker-Umgebung braucht, IMMER zuerst pruefen, ob schon eine
+--! passende existiert.
+export fn tool_docker_environments_auflisten h chat_id
+    init_docker_environments h
+    rows: mem.raw_query h ("SELECT container_name, purpose, installed FROM docker_environments WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND status = 'active' ORDER BY id DESC")
+    if (len rows) == 0
+        return "Keine dauerhaften Docker-Umgebungen registriert."
+    out: "Registrierte dauerhafte Docker-Umgebungen:\n"
+    for r in rows
+        out: out ++ "- " ++ (get r "container_name") ++ ": " ++ (get r "purpose") ++ " (installiert: " ++ (get r "installed") ++ ")\n"
+    out
+
+--! Tool: entfernt eine registrierte Umgebung (Container UND Registrierung)
+--! — z.B. wenn der Nutzer explizit sagt, eine dauerhafte Umgebung nicht
+--! mehr zu brauchen.
+export fn tool_docker_environment_entfernen h chat_id container_name
+    if !(valid_identifier container_name)
+        return "Abgelehnt: '" ++ container_name ++ "' ist kein gueltiger Container-Name."
+    init_docker_environments h
+    rows: mem.raw_query h ("SELECT id FROM docker_environments WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND container_name = '" ++ (mem.sql_escape container_name) ++ "' AND status = 'active'")
+    if (len rows) == 0
+        return "Keine aktive Umgebung mit dem Namen '" ++ container_name ++ "' registriert."
+    exec ("docker rm -f " ++ container_name)
+    mem.raw_exec h ("UPDATE docker_environments SET status = 'removed' WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND container_name = '" ++ (mem.sql_escape container_name) ++ "'")
+    "Umgebung '" ++ container_name ++ "' entfernt."
+
 --! Prueft den ECHTEN Docker-Container-Zustand und aktualisiert den Job auf
 --! 'done'/'failed' inkl. Logs, sobald der Container tatsaechlich beendet ist
 --! — 'docker run -d' liefert nur den START zurueck (siehe Datei-Kommentar

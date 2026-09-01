@@ -21,7 +21,11 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
   derselbe Fehler wiederholt auftrat (Schweigen, wenn nichts auffällig ist).
 - **GitHub-Repos klonen und testen** — auf Zuruf in einem isolierten Docker-
   Container (kein Volume-Mount, kein `--privileged`, bewusst ohne Zeitlimit),
-  meldet sich automatisch mit den echten Testergebnissen.
+  meldet sich automatisch mit den echten Testergebnissen. `/stop` bricht
+  jederzeit deterministisch alle laufenden Hintergrund-Jobs ab.
+- **Dauerhafte Docker-Umgebungen wiederverwenden** — statt für jede Anfrage
+  einen neuen Container anzulegen, registriert und nutzt Muninn bestehende,
+  passende Umgebungen (Name, Zweck, installierte Tools) weiter.
 - **Hybride Suche (RAG)** — TF-IDF-Keyword-Scoring + semantische Embeddings; faellt bei leerem
   Ergebnis auf die wichtigsten dauerhaften Fakten zurueck (Fragen wie „Wer bin ich?" bestehen
   sonst nur aus Stoppwoertern und liefern garantiert 0 Treffer).
@@ -809,6 +813,34 @@ zwei weitere ernste Probleme auf, beide gefixt:**
     Sicherheitsnetz für natürlichsprachliche Bitten mitten im Gespräch —
     mit expliziter Prompt-Regel, einen Abbruch NIE nur zu behaupten, ohne
     das Werkzeug tatsächlich aufzurufen.
+
+### Dauerhafte Docker-Umgebungen wiederverwenden (`docker_environments`)
+
+Nutzerbeobachtung: für jede Anfrage, die „irgendeine Linux-Umgebung" braucht
+(z.B. „gib mir eine Shell zum Ausprobieren"), legte die KI reflexartig einen
+neuen Container an, statt einen bereits laufenden, passenden wiederzuverwenden
+— sie wusste schlicht nicht, was in einem laufenden Container installiert ist
+oder wofür er gedacht ist. Bewusstes Gegenstück zu `docker_jobs` (das
+EINMALIGE Hintergrund-Aufgaben wie Repo-Tests trackt, die fertig werden und
+aufgeräumt werden sollen):
+
+- **`docker_environment_registrieren`** (Name, Zweck, installierte Tools) —
+  NUR für Container, die bewusst dauerhaft laufen sollen, NICHT für einmalige
+  Test-/Build-Läufe über `docker_hintergrund_setup`.
+- **`docker_environments_auflisten`** — IMMER zuerst aufgerufen, bevor ein
+  neuer Container für eine „ich brauche irgendeine Umgebung"-Anfrage entsteht;
+  passt eine registrierte Umgebung, wird sie über die MCP-Werkzeuge aus
+  `docker` (`docker_exec_command`) direkt weiterverwendet.
+- **`docker_environment_entfernen`** — Container UND Registrierung entfernen,
+  wenn der Nutzer eine dauerhafte Umgebung nicht mehr braucht.
+- Bewusst **nicht** Teil von `/stop`/`docker_jobs_abbrechen` — die räumen nur
+  Hintergrund-*Aufgaben* auf, eine registrierte Umgebung soll gerade
+  Neustarts/Konversationen überdauern.
+- Live end-to-end mit echter KI gegengetestet: nach dem Registrieren einer
+  Umgebung erkannte das Gremium auf „Ich brauche eine Linux-Umgebung" die
+  bestehende Registrierung, prüfte deren echten Zustand per
+  `docker_list_containers`/`docker_exec_command` und nutzte sie, statt blind
+  eine neue anzulegen.
 
 ### Google Workspace (`google_creds/`)
 

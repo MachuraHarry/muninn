@@ -762,6 +762,33 @@ test "cancel_job ist ein No-op fuer bereits abgeschlossene oder unbekannte Jobs"
     expect_eq (get j "status") "done" "Status bleibt unangetastet"
     expect_eq (dt.cancel_job h 99999) false "unbekannte id liefert false"
 
+--! docker_environments (P9: dauerhafte, wiederverwendbare Umgebungen statt
+--! reflexartig neue Container anzulegen, siehe Kommentar in
+--! docker_tools.pipe). registrieren/auflisten sind reine DB-Logik; der
+--! echte Docker-Abbruch-Pfad von entfernen (auf eine WIRKLICH aktive
+--! Umgebung) wurde live gegengetestet, siehe Commit-Beschreibung — hier
+--! nur der deterministische "nicht gefunden"-Zweig (loest KEINEN
+--! Docker-Aufruf aus).
+test "docker_environment registrieren/auflisten Rundlauf, getrennt nach Chat"
+    h: mem.init_db ":memory:"
+    r: dt.tool_docker_environment_registrieren h "1" "dev-env" "Testumgebung fuer Node-Projekte" "node:20, npm, git"
+    expect_eq (contains r "registriert") true "Bestaetigung enthaelt 'registriert'"
+    liste: dt.tool_docker_environments_auflisten h "1"
+    expect_eq (contains liste "dev-env") true "registrierte Umgebung erscheint in der Liste"
+    expect_eq (contains liste "Node-Projekte") true "Zweck erscheint in der Liste"
+    andere_chat: dt.tool_docker_environments_auflisten h "2"
+    expect_eq (contains andere_chat "dev-env") false "anderer Chat sieht die Umgebung nicht"
+
+test "docker_environment_registrieren lehnt ungueltige Container-Namen ab"
+    h: mem.init_db ":memory:"
+    r: dt.tool_docker_environment_registrieren h "1" "un guel tig!" "x" "y"
+    expect_eq (contains r "Abgelehnt") true "ungueltiger Name wird abgelehnt"
+
+test "docker_environment_entfernen meldet fehlende Umgebung ohne Docker-Aufruf"
+    h: mem.init_db ":memory:"
+    r: dt.tool_docker_environment_entfernen h "1" "existiert-nicht"
+    expect_eq (contains r "Keine aktive Umgebung") true "sauberer Hinweis statt Fehler"
+
 test "scheduler: create_background_task/get_background_task-Rundlauf"
     h: mem.init_db ":memory:"
     tid: sched.create_background_task h "42" "Beispielaufgabe" "Schritt 1 erledigt, Schritt 2 fehlt"
