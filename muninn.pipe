@@ -1460,6 +1460,10 @@ fn setup_core mcp_servers deepseek_key
         else
             print ("MCP fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
             mem.log_error dbh0 ("mcp_connect_startup:" ++ (get r "alias")) (get r "error")
+    --! MUSS vor init_gremium gesetzt sein: der Google-Spezialist baut seinen
+    --! System-Prompt (inkl. der konfigurierten E-Mail) nur EINMAL beim Start,
+    --! ein spaeteres Setzen haette keine Wirkung mehr.
+    grm.set_google_email user_google_email
     grm.init_gremium 0
     grm.set_tz_offset tz_offset
     set COST_STATE "session_id" (mem.next_session_id dbh0)

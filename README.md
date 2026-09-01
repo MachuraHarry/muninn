@@ -1226,4 +1226,4 @@ Intelligenz-Upgrade, Ops) liegt in [Plan.md](Plan.md).
 
 ## Lizenz
 
-Keine festgelegt (noch).
+MIT — siehe [LICENSE](LICENSE).
