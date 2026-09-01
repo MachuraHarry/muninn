@@ -75,6 +75,38 @@ test "setting_proaktiv_enabled folgt der Einstellung, Standard ist an"
     mem.setting_set h "1" "proaktiv" "off"
     expect_eq (mem.setting_proaktiv_enabled h "1") false "nach Abschalten: aus"
 
+--! Selbst-Diagnose (P7): log_error/error_summary gruppieren nach tag und
+--! zaehlen korrekt, auch bei mehreren verschiedenen tags durcheinander.
+test "log_error/error_summary gruppiert nach tag und zaehlt korrekt"
+    h: mem.init_db ":memory:"
+    mem.log_error h "run_gremium_stream" "Fehler A"
+    mem.log_error h "run_gremium_stream" "Fehler B"
+    mem.log_error h "handle_update" "Fehler C"
+    summary: mem.error_summary h 7
+    expect_eq (len summary) 2 "zwei verschiedene tags"
+    top: at summary 0
+    expect_eq (get top "tag") "run_gremium_stream" "haeufigster tag zuerst"
+    expect_eq (get top "cnt") 2 "zweimal gezaehlt"
+
+test "error_summary ignoriert Eintraege ausserhalb des Zeitfensters"
+    h: mem.init_db ":memory:"
+    mem.log_error h "alter_fehler" "laengst vorbei"
+    db_exec h ("UPDATE error_log SET ts = '" ++ (mem.cutoff_ts 10) ++ "' WHERE tag = 'alter_fehler'")
+    mem.log_error h "neuer_fehler" "gerade eben"
+    summary3: mem.error_summary h 3
+    expect_eq (len summary3) 1 "nur der neue Fehler zaehlt bei 3 Tagen Fenster"
+    expect_eq (get (at summary3 0) "tag") "neuer_fehler" "der aktuelle Fehler"
+
+test "prune_error_log entfernt nur Eintraege aelter als N Tage"
+    h: mem.init_db ":memory:"
+    mem.log_error h "alt" "wird geloescht"
+    db_exec h ("UPDATE error_log SET ts = '" ++ (mem.cutoff_ts 40) ++ "' WHERE tag = 'alt'")
+    mem.log_error h "neu" "bleibt"
+    mem.prune_error_log h 30
+    rows: db_query h "SELECT tag FROM error_log"
+    expect_eq (len rows) 1 "nur ein Eintrag uebrig"
+    expect_eq (get (at rows 0) "tag") "neu" "der neue Eintrag bleibt"
+
 test "setting_consolidate_days liefert die richtigen Tage je Stufe"
     h: mem.init_db ":memory:"
     normal: mem.setting_consolidate_days h "1"

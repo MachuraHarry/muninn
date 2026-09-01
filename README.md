@@ -16,6 +16,9 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 - **PDFs lernen** — hochgeladene PDFs (z.B. Rechnungen, Verträge, Berichte) werden per
   lokalem `pdftotext` (kein API-Key) automatisch als Text ins Gedächtnis aufgenommen,
   nicht nur roh gespeichert.
+- **Selbst-Diagnose** — ein strukturiertes Fehler-Log sammelt alle intern
+  auftretenden Fehler; einmal täglich meldet sich Muninn proaktiv, wenn
+  derselbe Fehler wiederholt auftrat (Schweigen, wenn nichts auffällig ist).
 - **Hybride Suche (RAG)** — TF-IDF-Keyword-Scoring + semantische Embeddings; faellt bei leerem
   Ergebnis auf die wichtigsten dauerhaften Fakten zurueck (Fragen wie „Wer bin ich?" bestehen
   sonst nur aus Stoppwoertern und liefern garantiert 0 Treffer).
@@ -481,6 +484,8 @@ Ein periodischer Aufräum-/Verdichtungsjob, ausführbar per `pipe muninn.pipe co
   `/settings` → „Gedächtnis" einstellbar (siehe
   [Einstellungen](#einstellungen-settings-memorypipe-muninnpipe)) — der CLI-Cron-Modus
   ohne Chat-Kontext nutzt weiterhin fest 14/30.
+- **`prune_error_log`** räumt zusätzlich `error_log`-Einträge älter als 30 Tage
+  auf (siehe [Selbst-Diagnose](#selbst-diagnose-error_log-selbstdiagnose-scheduler-tick)).
 - **Bug gefixt**: das externe, reine-Pipe-`sqlite`-Modul wertet `datetime('now')`
   nicht aus (speichert wörtlich `"now"`) — `mem.now_ts` baut Zeitstempel seither
   selbst aus Pipes `now`/`format_time`.
@@ -948,6 +953,37 @@ Tool-Bediener zum selbstorganisierenden Agenten"):
 - **Längerer Kontext**: `handle_message` übergibt dem Gremium jetzt die
   letzten 12 statt 6 Nachrichten des Threads — Langzeitgedächtnis
   (`retrieve_context`) deckt alles Ältere ab.
+
+### Selbst-Diagnose (`error_log`, `selbstdiagnose`-Scheduler-Tick)
+
+Alle bestehenden `print("... fehlgeschlagen: ...")`-Stellen im Code (siehe
+Fehler-Sichtbarkeits-Aufräumaktion weiter oben) schreiben zusätzlich —
+best-effort, ein fehlschlagender Log-Versuch darf selbst nie einen Fehler
+werfen — eine strukturierte Zeile in eine neue `error_log`-Tabelle
+(`mem.log_error h tag message`). `tag` ist dabei ein stabiler Bezeichner
+(z.B. `run_gremium_stream`, `mcp_connect_startup:google`, `pdftotext`), NICHT
+die variable Fehlermeldung selbst, damit sich gleichartige Fehler über die
+Zeit zusammenzählen lassen (`mem.error_summary h days` gruppiert nach `tag`
+und zählt).
+
+Ein neuer Scheduler-Tick `selbstdiagnose` (täglich 09:00, idempotent beim
+Start registriert — andere Uhrzeit als Briefing/08:00 und Eigenimpuls/12:00,
+damit sich proaktive Nachrichten nicht ballen) prüft die letzten 3 Tage und
+meldet sich **nur**, wenn ein `tag` **mindestens 3×** aufgetreten ist — ein
+einzelner Ausrutscher (kurzzeitig nicht erreichbares MCP, ein transienter
+API-Fehler) ist normal und kein Meldungsgrund. Gibt es nichts Auffälliges,
+bleibt Muninn still (dasselbe Prinzip wie beim proaktiven Eigenimpuls: Schweigen
+ist ein vollwertiges Ergebnis). Über `/settings` → „Proaktive Nachrichten"
+ebenfalls abschaltbar (siehe
+[Einstellungen](#einstellungen-settings-memorypipe-muninnpipe)).
+`prune_error_log` (Teil von `/consolidate`) hält die Tabelle auf 30 Tage
+begrenzt.
+
+Bewusst NICHT an jeder einzelnen `catch`-Stelle verdrahtet: `tel_get_updates`
+(würde die DB-Sperre über einen Netzwerk-Wartezeitraum hinweg offen halten
+müssen, genau das Muster, das den früheren Total-Hänger verursacht hat) und
+`parse_mcp_config` (läuft vor jeder DB-Initialisierung, kein Handle
+verfügbar) bleiben reine `print()`-Stellen wie zuvor.
 
 ### Sprachnachrichten verstehen (`whisper`, `handle_voice`)
 

@@ -38,6 +38,7 @@ export fn init_db path
     db_exec h "CREATE TABLE IF NOT EXISTS relations (id INTEGER PRIMARY KEY AUTOINCREMENT, from_id INTEGER, to_id INTEGER, rel TEXT)"
     db_exec h "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER, chat_id TEXT, role TEXT, content TEXT, ts TEXT)"
     db_exec h "CREATE TABLE IF NOT EXISTS cost_log (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts TEXT, cost_usd REAL, tokens INTEGER, calls INTEGER, cache_hits INTEGER, cache_misses INTEGER)"
+    db_exec h "CREATE TABLE IF NOT EXISTS error_log (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT, message TEXT, ts TEXT)"
     h
 
 --! Schließt die Datenbank und persistiert die Änderungen auf die Datei.
@@ -368,6 +369,7 @@ export fn add_memory h content kind importance source tags
         --! add_memory erneut zu spammen.
         if (get EMBED_STATE "warned") == false
             print ("embed() fehlgeschlagen (Erinnerungen werden ab jetzt ohne Embedding gespeichert, nur Keyword-Suche): " ++ (to_str e))
+            log_error h "embed" (to_str e)
             set EMBED_STATE "warned" true
         vec: nil
     if vec != nil
@@ -584,6 +586,34 @@ export fn format_history rows
 export fn cutoff_ts days_ago
     format_time (now - (days_ago * 86400)) "2006-01-02 15:04:05"
 
+--! Strukturiertes Fehler-Log fuer die Selbst-Diagnose (siehe muninn.pipe:
+--! sched_tick "selbstdiagnose"). Ergaenzt (ersetzt NICHT) die bestehenden
+--! print()-Aufrufe an denselben Stellen — journalctl bleibt die vollstaendige,
+--! chronologische Aufzeichnung, error_log ist eine ZAEHLBARE, ueber Neustarts
+--! hinweg persistente Teilmenge fuer automatisierte Auswertung. "tag" MUSS ein
+--! stabiler, kurzer Bezeichner sein (z.B. "run_gremium_stream"), NICHT die
+--! variable Fehlermeldung selbst — sonst gruppiert error_summary nichts
+--! zusammen. Bewusst best-effort: ein fehlschlagender Log-Schreibversuch darf
+--! selbst nie einen Fehler werfen (sonst koennte Fehler-Logging selbst neue
+--! Fehler erzeugen).
+export fn log_error h tag message
+    try
+        db_exec h ("INSERT INTO error_log (tag, message, ts) VALUES ('" ++ (sql_escape tag) ++ "', '" ++ (sql_escape message) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "')")
+    catch e
+        nil
+
+--! Fehler-Haeufigkeit je tag der letzten 'days' Tage, absteigend nach Anzahl
+--! sortiert — Basis fuer die taegliche Selbst-Diagnose.
+export fn error_summary h days
+    cut: cutoff_ts days
+    db_query h ("SELECT tag, COUNT(*) as cnt, MAX(ts) as last_ts FROM error_log WHERE ts > '" ++ (sql_escape cut) ++ "' GROUP BY tag ORDER BY cnt DESC")
+
+--! Raeumt error_log-Eintraege aelter als 'days' Tage auf, Teil von
+--! consolidate() — sonst waechst die Tabelle unbegrenzt.
+export fn prune_error_log h days
+    cut: cutoff_ts days
+    db_exec h ("DELETE FROM error_log WHERE ts < '" ++ (sql_escape cut) ++ "'")
+
 --! Verdichtet faellige Threads (geschlossen, oder aktiv aber seit
 --! inactive_days ohne neue Nachricht) zu je einer Zusammenfassungs-Erinnerung
 --! (kind "summary") und loescht danach deren Rohnachrichten. Zeilen mit dem
@@ -655,6 +685,7 @@ export fn consolidate_memories h decay_after_days forget_after_days
 export fn consolidate h decay_days forget_days
     threads_summarized: consolidate_threads h 3
     mres: consolidate_memories h decay_days forget_days
+    prune_error_log h 30
     out: {}
     set out "threads_summarized" threads_summarized
     set out "memories_decayed" (get mres "decayed")

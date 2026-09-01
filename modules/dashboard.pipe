@@ -709,6 +709,7 @@ fn dashboard_reply h text
             answer: ai_chat "Du bist ein präziser Recherche-Assistent. Beantworte die Frage anhand des recherchierten Kontexts, kurz und faktentreu." ("Frage: " ++ sq ++ "\n\nKontext:\n" ++ ctx)
         catch e
             print ("Dashboard-Recherche-ai_chat fehlgeschlagen: " ++ (to_str e))
+            mem.log_error h "dashboard_recherche_ai_chat" (to_str e)
             answer: ctx
         return answer
     --! Ab hier: EIN gemeinsamer Pfad fuers gesamte freie Gespraech (frueher hier
@@ -731,6 +732,7 @@ fn dashboard_reply h text
         --! Wie in muninn.pipes handle_message: ohne dieses Log sah ein
         --! echter Gremium-Absturz identisch aus wie "die KI weiss es nicht".
         print ("Dashboard run_gremium fehlgeschlagen: " ++ (to_str e))
+        mem.log_error h "dashboard_run_gremium" (to_str e)
         answer: ""
     mem.add_message h tid DASH_CHAT_ID "user" tnorm
     if answer == nil || answer == ""

@@ -140,13 +140,14 @@ fn setup_sandbox servers
     set_sandbox name
     nil
 
-fn ensure_mcp_for_task task
+fn ensure_mcp_for_task task dbh
     results: mcp.ensure_for_task mcp_auto_servers task
     for r in results
         if get r "ok"
             print ("MCP autonom verbunden: " ++ (get r "alias"))
         else
             print ("MCP autonom fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
+            mem.log_error dbh ("mcp_autonom:" ++ (get r "alias")) (get r "error")
     if (len results) > 0
         grm.init_gremium 0
     nil
@@ -294,11 +295,13 @@ fn shell_quote s
 --! Liefert nil, wenn die PDF keinen Text-Layer hat (z.B. reine Bild-Scans
 --! ohne OCR — Poppler liefert dann leeren Output, kein Fehler) oder
 --! pdftotext scheitert (kaputte/verschluesselte Datei).
-fn extract_pdf_text path
+fn extract_pdf_text path dbh
     cmd: "pdftotext -q \"" ++ (shell_quote path) ++ "\" -"
     r: exec cmd
     if (get r "status") != 0
-        print ("pdftotext fehlgeschlagen (Status " ++ (to_str (get r "status")) ++ "): " ++ path)
+        msg: "Status " ++ (to_str (get r "status")) ++ ": " ++ path
+        print ("pdftotext fehlgeschlagen (" ++ msg ++ ")")
+        mem.log_error dbh "pdftotext" msg
         return nil
     out: get r "output"
     if out == nil || (trim out) == ""
@@ -368,7 +371,7 @@ fn handle_document token cid dbh doc
             --! Prozess koennte "pdftotext" sonst nicht (mehr) auf der aktiven
             --! exec-Whitelist haben.
             setup_sandbox all_mcp_servers
-            pdf_text: extract_pdf_text save_path
+            pdf_text: extract_pdf_text save_path dbh
             if pdf_text == nil
                 out: out ++ "\nKein Text extrahierbar (evtl. reine Bild-Scans ohne Text-Layer, verschluesselt oder beschaedigt) — nicht ins Gedaechtnis gelernt."
             else
@@ -478,6 +481,7 @@ fn handle_voice token cid dbh msg
         --! fehlschlug). Dem Nutzer ehrlich mitteilen, dass es fehlgeschlagen ist.
         if last_err != nil
             print ("whisper_transcribe_base64 fehlgeschlagen: " ++ last_err)
+            mem.log_error dbh "whisper_transcribe" last_err
         tel.tel_send_message token cid "Sprachnachrichten verstehe ich gerade nicht (Transkription nicht verfuegbar oder fehlgeschlagen). Bitte tippe es."
         return nil
     handle_message token cid (trim text) dbh
@@ -618,7 +622,7 @@ fn handle_message token cid text dbh
     --! bekommt das Gremium (schon fuer "question" bewaehrt: echte Werkzeuge,
     --! Gedaechtnis, Verlauf) IMMER den vollen Kontext und entscheidet selbst,
     --! ob es merkt, eine Erinnerung plant, recherchiert oder einfach antwortet.
-    ensure_mcp_for_task tnorm
+    ensure_mcp_for_task tnorm dbh
     tel.tel_send_chat_action token cid "typing"
     tid: mem.active_thread dbh cid
     hist: mem.thread_history dbh tid 12
@@ -647,6 +651,7 @@ fn handle_message token cid text dbh
         --! es nicht" — beides landete stillschweigend im selben do_search-
         --! Fallback darunter. Journal-Log macht den Unterschied sichtbar.
         print ("run_gremium_stream fehlgeschlagen: " ++ (to_str e))
+        mem.log_error dbh "run_gremium_stream" (to_str e)
         answer: ""
     mem.add_message dbh tid cid "user" tnorm
     if question_needs_research answer
@@ -662,6 +667,7 @@ fn handle_message token cid text dbh
                 reply: ai_chat ((grm.self_context 0) ++ "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des folgenden Kontexts knapp und faktentreu. Wenn der Kontext nichts Passendes enthaelt, sage ehrlich, dass du es nicht weisst. Gib nur die Antwort aus, kein internes Reasoning.") ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx_text)
             catch e3
                 print ("Kontext-Fallback-ai_chat fehlgeschlagen: " ++ (to_str e3))
+                mem.log_error dbh "kontext_fallback_ai_chat" (to_str e3)
                 reply: ""
             if reply == nil || reply == ""
                 reply: "Dazu erinnere ich mich an:\n"
@@ -684,6 +690,7 @@ fn handle_message token cid text dbh
                     answer2: ai_chat ((grm.self_context 0) ++ "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des recherchierten Kontexts knapp und faktentreu — der Kontext stammt aus einer WEB-Recherche zum Thema der Frage, NICHT aus einer Recherche ueber Muninn selbst. Geht es in der Frage um Muninns eigene Faehigkeiten/Werkzeuge, nutze dafuer das Selbstwissen oben, nicht den Web-Kontext. WICHTIG: Dieser Aufruf hier ist reine Textzusammenfassung OHNE Werkzeugzugriff — behaupte NIEMALS, gerade etwas zu tun/recherchieren/einzurichten oder Schritte einzuleiten. Ist die Anfrage eine AKTION (z.B. 'richte X ein', 'lege einen Container an') statt einer Wissensfrage, erklaere knapp, dass du das ueber deine echten Werkzeuge tun kannst, und bitte den Nutzer, es nochmal als direkte Aufforderung zu senden. Gib nur die Antwort aus, kein internes Reasoning.") ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx2)
                 catch e4
                     print ("Web-Recherche-Fallback-ai_chat fehlgeschlagen: " ++ (to_str e4))
+                    mem.log_error dbh "web_fallback_ai_chat" (to_str e4)
                     answer2: ctx2
                 if answer2 == nil || answer2 == ""
                     answer2: ctx2
@@ -915,6 +922,7 @@ fn do_search token cid dbh query
         answer: ai_chat ((grm.self_context 0) ++ "Du bist ein präziser Recherche-Assistent. Beantworte die Frage anhand des recherchierten Kontexts, kurz und faktentreu. WICHTIG: Dieser Aufruf hier ist reine Textzusammenfassung OHNE Werkzeugzugriff — behaupte NIEMALS, du könntest generell keine Dokumente/Dateien erstellen oder versenden (das kannst du sehr wohl, nur nicht in DIESEM Aufruf); erwähnt die Frage sowas, sag stattdessen nur, dass du dafür direkt (nicht als Recherche-Anfrage) gefragt werden musst.") ("Frage: " ++ query ++ "\n\nKontext:\n" ++ ctx)
     catch e5
         print ("do_search-ai_chat fehlgeschlagen: " ++ (to_str e5))
+        mem.log_error dbh "do_search_ai_chat" (to_str e5)
         answer: ctx
     mem.add_message dbh tid cid "assistant" answer
     src_text: ""
@@ -1192,6 +1200,7 @@ fn calendar_notify_new token dbh cid email window_minutes
                 --! Versand wenigstens zu loggen, statt ihn spurlos zu
                 --! verlieren.
                 print ("Kalender-Erinnerung senden fehlgeschlagen: " ++ (to_str e6))
+                mem.log_error dbh "kalender_erinnerung_senden" (to_str e6)
             set notified id now
             changed: true
     if changed
@@ -1290,6 +1299,27 @@ fn sched_tick token
                     tel.tel_send_message token (to_num cid) (shorten (trim content_proaktiv))
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
             continue
+        if kind == "selbstdiagnose"
+            --! Selbst-Diagnose: einmal taeglich wertet Muninn sein eigenes
+            --! strukturiertes Fehler-Log der letzten 3 Tage aus (siehe
+            --! mem.error_summary/log_error) und meldet sich NUR, wenn ein Fehler
+            --! wiederholt (>= 3x) aufgetreten ist — ein einzelner Ausrutscher
+            --! (z.B. ein kurzzeitig nicht erreichbares MCP) ist normal und kein
+            --! Meldungsgrund, sonst Schweigen wie beim Eigenimpuls. Per
+            --! /settings ("Proaktive Nachrichten") ebenfalls abschaltbar.
+            if mem.setting_proaktiv_enabled dbh (to_str cid)
+                summary: mem.error_summary dbh 3
+                auffaellig: []
+                for row in summary
+                    if (get row "cnt") >= 3
+                        push auffaellig row
+                if (len auffaellig) > 0
+                    diag_msg: "⚠️ Selbst-Diagnose: diese Fehler traten in den letzten 3 Tagen wiederholt auf, evtl. lohnt ein Blick:\n"
+                    for row in auffaellig
+                        diag_msg: diag_msg ++ "• " ++ (get row "tag") ++ " (" ++ (to_str (get row "cnt")) ++ "x, zuletzt " ++ (get row "last_ts") ++ ")\n"
+                    tel.tel_send_message token (to_num cid) (shorten diag_msg)
+            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
+            continue
         if cid != nil && cid != ""
             try
                 tel.tel_send_message token (to_num cid) msg
@@ -1298,6 +1328,7 @@ fn sched_tick token
                 --! Wiederholungsversuch) — daher wichtig, einen fehlgeschlagenen
                 --! Versand wenigstens zu loggen, statt ihn spurlos zu verlieren.
                 print ("Scheduler-Nachricht senden fehlgeschlagen (" ++ kind ++ "): " ++ (to_str e7))
+                mem.log_error dbh ("scheduler_nachricht_senden:" ++ kind) (to_str e7)
         sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
     mem.close_locked hl
     nil
@@ -1350,6 +1381,7 @@ fn poll_once token offset allowed timeout
                         --! "Muninn antwortet einfach nicht", ganz ohne
                         --! Hinweis worauf.
                         print ("handle_update fehlgeschlagen: " ++ (to_str e9))
+                        mem.log_error dbh2 "handle_update" (to_str e9)
         cq: get upd "callback_query"
         if cq != nil
             chat2: get (get cq "message") "chat"
@@ -1360,6 +1392,7 @@ fn poll_once token offset allowed timeout
                         handle_callback token dbh2 cq
                     catch e10
                         print ("handle_callback fehlgeschlagen: " ++ (to_str e10))
+                        mem.log_error dbh2 "handle_callback" (to_str e10)
     if offset != nil
         mem.meta_set dbh2 "telegram_offset" (to_str offset)
     mem.close_locked hl2
@@ -1377,15 +1410,23 @@ fn setup_core mcp_servers deepseek_key
     setup_sandbox all_mcp_servers
     setup_ai deepseek_key
     mcp_results: mcp.connect_servers all_mcp_servers
+    --! DB-Handle vorgezogen (frueher erst nach dem Connect-Loop fuer
+    --! session_id geoeffnet), damit ein bei JEDEM Neustart fehlschlagender
+    --! MCP-Server (z.B. abgelaufenes Google-Token) ebenfalls im
+    --! error_log landet — nicht nur im Journal — und so ueber die
+    --! Selbst-Diagnose (sched_tick "selbstdiagnose") auffaellt, statt nur bei
+    --! zufaelligem journalctl-Blick.
+    hl: mem.open_locked nil
+    dbh0: get hl "h"
     for r in mcp_results
         if get r "ok"
             print ("MCP verbunden: " ++ (get r "alias"))
         else
             print ("MCP fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
+            mem.log_error dbh0 ("mcp_connect_startup:" ++ (get r "alias")) (get r "error")
     grm.init_gremium 0
     grm.set_tz_offset tz_offset
-    hl: mem.open_locked nil
-    set COST_STATE "session_id" (mem.next_session_id (get hl "h"))
+    set COST_STATE "session_id" (mem.next_session_id dbh0)
     mem.close_locked hl
     nil
 
@@ -1541,6 +1582,26 @@ else
                     sched.schedule dbhp "proaktiv" allowed "" proaktiv_due "daily"
                     print "Taeglicher proaktiver Eigenimpuls aktiviert."
                 mem.close_locked hlp
+            --! Taegliche Selbst-Diagnose (siehe sched_tick, kind
+            --! "selbstdiagnose"): Muninn prueft einmal taeglich sein eigenes
+            --! strukturiertes Fehler-Log (mem.error_summary, siehe log_error-
+            --! Aufrufstellen im ganzen Code) auf wiederholte Fehler und meldet
+            --! sich NUR, wenn etwas ueber dem Schwellwert liegt — sonst
+            --! Schweigen (wie beim Eigenimpuls). Andere Uhrzeit als Briefing
+            --! (08:00) und Eigenimpuls (12:00), damit proaktive Nachrichten
+            --! sich nicht ballen. Idempotent wie die beiden Eintraege oben.
+            if allowed != nil && allowed != ""
+                hld: mem.open_locked nil
+                dbhd: get hld "h"
+                has_diag: false
+                for e in (sched.list dbhd allowed)
+                    if (get e "kind") == "selbstdiagnose"
+                        has_diag: true
+                if !has_diag
+                    diag_due: sched.next_hhmm 9 0 now tz_offset
+                    sched.schedule dbhd "selbstdiagnose" allowed "" diag_due "daily"
+                    print "Taegliche Selbst-Diagnose aktiviert."
+                mem.close_locked hld
             try
                 cmds: []
                 push cmds {command: "start", description: "Begrüßung"}
