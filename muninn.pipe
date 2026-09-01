@@ -329,29 +329,40 @@ fn safe_filename fname
 --! filesystem lesbar/bearbeitbar); reine Textdateien werden zusaetzlich direkt
 --! ins Gedaechtnis gelernt (ingest_document), PDFs ueber pdftotext (siehe
 --! extract_pdf_text oben) — andere Binaerformate bleiben nur gespeichert.
+--! Live-Status wie beim Gremium (siehe tel_finalize/swarm_status_text unten):
+--! EINE Platzhalternachricht wird ueber die Verarbeitungsschritte hinweg per
+--! editMessageText aktualisiert, statt stillschweigend erst am Ende zu
+--! antworten — bei einer PDF (Download + Extraktion + Lernen) kann das
+--! spuerbar dauern, ohne Zwischenstand wirkt Muninn dabei wie haengengeblieben.
 fn handle_document token cid dbh doc
     fname: get doc "file_name"
     if fname == nil
         fname: "dokument"
     mime: get doc "mime_type"
     tel.tel_send_chat_action token cid "typing"
+    message_id: nil
+    ph: tel.tel_send_message token cid "📄 Lade Dokument herunter..."
+    if (get ph "ok") == true
+        message_id: get (get ph "result") "message_id"
     fpath: tel.tel_get_file token (get doc "file_id")
     if fpath == nil
-        tel.tel_send_message token cid "Datei konnte nicht abgerufen werden."
+        tel_finalize token cid message_id "Datei konnte nicht abgerufen werden." nil
         return nil
     content: tel.tel_download_file token fpath
     if content == nil || content == ""
-        tel.tel_send_message token cid "Datei war leer oder nicht lesbar."
+        tel_finalize token cid message_id "Datei war leer oder nicht lesbar." nil
         return nil
     safe_name: safe_filename fname
     save_path: "/root/muninn/mcp_data/" ++ safe_name
     write_file save_path content
     out: "Gespeichert: " ++ safe_name ++ " (" ++ (to_str (len content)) ++ " Bytes)."
     if is_text_doc fname mime
+        tel.tel_edit_message_text token cid message_id "🧠 Lerne den Inhalt..."
         res: mem.ingest_document dbh content ("telegram-datei:" ++ fname) fname 20
         out: out ++ "\nZusaetzlich als Wissen gelernt: " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten."
     else
         if is_pdf_doc fname mime
+            tel.tel_edit_message_text token cid message_id "📄 Extrahiere Text aus der PDF..."
             --! Frisches Tool-/Exec-Budget noetig (siehe setup_sandbox-Kommentar
             --! bei handle_voice) — ein vorheriger Nachrichtendurchlauf im selben
             --! Prozess koennte "pdftotext" sonst nicht (mehr) auf der aktiven
@@ -361,9 +372,10 @@ fn handle_document token cid dbh doc
             if pdf_text == nil
                 out: out ++ "\nKein Text extrahierbar (evtl. reine Bild-Scans ohne Text-Layer, verschluesselt oder beschaedigt) — nicht ins Gedaechtnis gelernt."
             else
+                tel.tel_edit_message_text token cid message_id "🧠 Lerne den Inhalt..."
                 res: mem.ingest_document dbh pdf_text ("telegram-pdf:" ++ fname) fname 20
                 out: out ++ "\nText extrahiert und als Wissen gelernt: " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten."
-    tel.tel_send_message token cid out
+    tel_finalize token cid message_id out nil
 
 --! Verarbeitet ein hochgeladenes Foto (Telegram "photo"-Nachricht) per ai_vision.
 --! "photo" ist eine Liste von Groessen aufsteigend sortiert — das letzte Element

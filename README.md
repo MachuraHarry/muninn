@@ -287,6 +287,14 @@ gedrosselt auf ca. 1 Edit/Sekunde — statt neuer Nachrichtenblöcke oder
 kompletten Schweigens bis zur Endantwort. Details:
 [Architektur → Inneres Gremium](#inneres-gremium-swarmpipe).
 
+Dasselbe Prinzip gilt für **hochgeladene Dokumente** (`handle_document`):
+eine Platzhalternachricht wird über Download → Extraktion (bei PDFs) →
+Lernen ins Gedächtnis hinweg per `editMessageText` aktualisiert (`📄 Lade
+Dokument herunter...` → `📄 Extrahiere Text aus der PDF...` → `🧠 Lerne den
+Inhalt...`), bevor sie mit dem Endergebnis abschließt — kein stilles
+Verarbeiten mehr gerade bei größeren PDFs, wo Download + Extraktion +
+Lernen spürbar dauern können.
+
 Antworten tragen **Inline-Buttons**: `💾 Merken` (in die Seele speichern) und
 `🔍 Vertiefen` (weiter recherchieren).
 
