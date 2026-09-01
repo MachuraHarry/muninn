@@ -1,8 +1,9 @@
---! web.pipe — Web-Recherche: Suche (DDG + Wikipedia), Seiten-Fetch, Research-Orchestrierung.
---! Frei (kein API-Key): DDG Instant Answer + DDG-HTML-Volltext + Wikipedia.
+--! web.pipe — web research: search (DDG + Wikipedia), page fetch, research
+--! orchestration. Free (no API key): DDG Instant Answer + DDG HTML full-text
+--! + Wikipedia.
 
---! Kombinierte Suche: DDG Instant Answer + Wikipedia.
---! Heisst bewusst nicht "web_search", um das gleichnamige Builtin nicht zu überschatten.
+--! Combined search: DDG Instant Answer + Wikipedia.
+--! Deliberately not called "web_search", to avoid shadowing the builtin of the same name.
 export fn web_lookup query
     out: []
     try
@@ -19,7 +20,7 @@ export fn web_lookup query
         nil
     out
 
---! HTML-Entities und Whitespace bereinigen.
+--! Clean up HTML entities and whitespace.
 export fn html_clean s
     s: replace_all s "&nbsp;" " "
     s: replace_all s "&amp;" "&"
@@ -34,7 +35,7 @@ export fn html_clean s
     s: regex_replace "\n[ \n]*\n+" "\n" s
     trim s
 
---! HTML zu Fließtext reduzieren (Tags, script/style entfernen).
+--! Reduce HTML to plain flowing text (strip tags, script/style).
 export fn strip_html html
     t: html
     t: regex_replace "(?s)<script[^>]*>.*?</script>" " " t
@@ -42,7 +43,7 @@ export fn strip_html html
     t: regex_replace "<[^>]+>" " " t
     html_clean t
 
---! DDG-HTML-Volltext-Suchergebnisse parsen (Titel + URL + Snippet).
+--! Parse DDG HTML full-text search results (title + URL + snippet).
 export fn parse_ddg body
     t: replace_all body "<b>" " "
     t: replace_all t "</b>" " "
@@ -96,7 +97,7 @@ export fn parse_ddg body
         k: k + 1
     out
 
---! Volltext-Suche über den DDG-HTML-Endpoint (best effort, kein Key).
+--! Full-text search via the DDG HTML endpoint (best effort, no key).
 export fn web_search_full query
     url: "https://html.duckduckgo.com/html/?q=" ++ (url_encode query)
     hdrs: {}
@@ -111,7 +112,7 @@ export fn web_search_full query
         return []
     parse_ddg body
 
---! Roher HTTP-GET-Body (leer bei Fehler). Gemeinsame Basis fuer web_fetch/web_fetch_raw.
+--! Raw HTTP GET body (empty on error). Shared base for web_fetch/web_fetch_raw.
 fn fetch_body url
     hdrs: {}
     set hdrs "User-Agent" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
@@ -123,7 +124,7 @@ fn fetch_body url
         body: ""
     body
 
---! Seite abrufen und zu Fließtext reduzieren (gekürzt, fuer schnelle Lookups).
+--! Fetch a page and reduce it to plain text (truncated, for quick lookups).
 export fn web_fetch url
     body: fetch_body url
     if body == ""
@@ -133,15 +134,15 @@ export fn web_fetch url
         t: substring t 0 4000
     t
 
---! Wie web_fetch, aber OHNE Kuerzung — fuer Dokument-Ingestion (P2), wo der
---! vollstaendige Text gebraucht wird (wird anschliessend gechunked).
+--! Like web_fetch, but WITHOUT truncation — for document ingestion (P2),
+--! where the full text is needed (gets chunked afterward).
 export fn web_fetch_raw url
     body: fetch_body url
     if body == ""
         return ""
     strip_html body
 
---! Dedupliziert Ergebnisse nach URL.
+--! Deduplicates results by URL.
 fn dedup results
     seen: {}
     out: []
@@ -153,7 +154,7 @@ fn dedup results
                 push out r
     out
 
---! Filtert Junk-Ergebnisse (DDG "No results", Wikipedia-Suchseiten, leere URLs).
+--! Filters junk results (DDG "No results", Wikipedia search pages, empty URLs).
 fn filter_junk results
     out: []
     for r in results
@@ -174,7 +175,7 @@ fn filter_junk results
         push out r
     out
 
---! Liefert die k saubersten Suchergebnisse (lookup + DDG-Volltext, Junk gefiltert).
+--! Returns the k cleanest search results (lookup + DDG full-text, junk filtered).
 export fn web_results query k
     results: filter_junk (dedup (web_lookup query))
     if (len results) < k
@@ -184,8 +185,8 @@ export fn web_results query k
                 push results e
     results
 
---! Recherche-Orchestrierung: suchen -> Top-N fetchen -> verdichten -> Quellen.
---! Liefert {context, sources}.
+--! Research orchestration: search -> fetch top N -> condense -> sources.
+--! Returns {context, sources}.
 export fn research query
     results: web_results query 5
     ctx: ""
