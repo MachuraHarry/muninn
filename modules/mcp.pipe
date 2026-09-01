@@ -1,6 +1,6 @@
---! mcp.pipe — MCP-Tool-Ökosystem (Plan.md P1): beliebige externe Werkzeuge per
---! Model Context Protocol einbinden. Server werden per Umgebungsvariable
---! MCP_SERVERS konfiguriert (JSON-Liste), z.B.:
+--! mcp.pipe — MCP tool ecosystem (Plan.md P1): connects arbitrary external
+--! tools via the Model Context Protocol. Servers are configured through the
+--! MCP_SERVERS environment variable (JSON list), e.g.:
 --!   [{"alias":"fs","type":"stdio","command":"npx",
 --!     "args":["-y","@modelcontextprotocol/server-filesystem","/root/muninn/mcp_data"]},
 --!    {"alias":"gh","type":"stdio","command":"npx",
@@ -8,13 +8,14 @@
 --!     "env":{"GITHUB_TOKEN":"env:GITHUB_TOKEN"}}]
 CONNECTED: {}
 
---! "env:NAME"-Werte werden zur Laufzeit aus der echten Umgebung aufgelöst, damit
---! Secrets nicht doppelt in .env stehen müssen. Jede Verbindung läuft unter dem
---! Sandbox-Profil "muninn" mit exec-Whitelist (nur konfigurierte Kommandos) —
---! Lehre aus der Sandbox-Audit-Reihe: nie unbeschränkten exec an die KI.
+--! "env:NAME" values are resolved at runtime from the real environment, so
+--! secrets don't have to sit twice in .env. Every connection runs under the
+--! "muninn" sandbox profile with an exec whitelist (only configured
+--! commands) — lesson from the sandbox audit series: never give the AI
+--! unrestricted exec.
 
---! Parst MCP_SERVERS (JSON-Liste von Server-Maps). Leer/ungueltig -> [] (MCP
---! bleibt deaktiviert, kein Fehler und kein exec/network noetig).
+--! Parses MCP_SERVERS (JSON list of server maps). Empty/invalid -> [] (MCP
+--! stays disabled, no error and no exec/network needed).
 export fn parse_mcp_config raw
     out: []
     if raw != nil && (trim raw) != ""
@@ -23,13 +24,13 @@ export fn parse_mcp_config raw
             if (type_of j) == "LIST"
                 out: j
             else
-                print "WARNUNG: MCP-Server-Konfiguration ist kein JSON-Array — ignoriert."
+                print "WARNING: MCP server configuration is not a JSON array — ignored."
         catch e
-            print ("WARNUNG: MCP-Server-Konfiguration ist ungueltiges JSON, ignoriert: " ++ (to_str e))
+            print ("WARNING: MCP server configuration is invalid JSON, ignored: " ++ (to_str e))
             out: []
     out
 
---! Letztes Pfadsegment eines Kommandos (für die exec-Whitelist), z.B. "npx".
+--! Last path segment of a command (for the exec whitelist), e.g. "npx".
 fn cmd_basename cmd
     parts: split cmd "/"
     n: len parts
@@ -38,7 +39,7 @@ fn cmd_basename cmd
     else
         at parts (n - 1)
 
---! Eindeutige Kommando-Basenamen aller stdio-Server, für sandbox_profile.exec_whitelist.
+--! Unique command basenames of all stdio servers, for sandbox_profile.exec_whitelist.
 export fn exec_whitelist_for servers
     seen: {}
     out: []
@@ -53,8 +54,8 @@ export fn exec_whitelist_for servers
                     push out b
     out
 
---! Löst eine env-Map aus der Konfig auf. Werte im Format "env:NAME" werden aus
---! der echten Prozess-Umgebung gelesen (Secrets bleiben aus der JSON-Konfig raus).
+--! Resolves an env map from the config. Values in the format "env:NAME" are
+--! read from the real process environment (secrets stay out of the JSON config).
 fn resolve_env raw_env
     out: {}
     if raw_env != nil
@@ -65,19 +66,19 @@ fn resolve_env raw_env
             set out k v
     out
 
---! Löst "env:NAME"-Werte in ALLEN Server-envs auf. MUSS aufgerufen werden, BEVOR
---! ein Sandbox-Profil aktiv ist: sobald irgendein Profil aktiv ist, blockiert
---! `env()` sicherheitshalber jeden Namen, der wie ein Secret aussieht
---! (*KEY*/*TOKEN*/*SECRET*) — und genau solche Namen stehen typischerweise hinter
---! "env:" (z.B. "env:GITHUB_TOKEN"). Mutiert die env-Maps der übergebenen Server
---! in place und liefert dieselbe Liste zurück.
+--! Resolves "env:NAME" values in ALL server envs. MUST be called BEFORE any
+--! sandbox profile is active: once a profile is active, `env()` blocks any
+--! name that looks like a secret (*KEY*/*TOKEN*/*SECRET*) as a safety
+--! measure — and names like that typically sit behind "env:" (e.g.
+--! "env:GITHUB_TOKEN"). Mutates the passed servers' env maps in place and
+--! returns the same list.
 export fn resolve_all_env servers
     for s in servers
         set s "env" (resolve_env (get s "env"))
     servers
 
---! Verbindet einen stdio-Server. Pipe-Builtins sind variadisch ohne Spread/Apply,
---! daher Fallunterscheidung nach Argumentzahl (bis zu 7 Programmargumente).
+--! Connects a stdio server. Pipe builtins are variadic without spread/apply,
+--! hence the case split by argument count (up to 7 program arguments).
 fn connect_stdio cmd cargs cenv alias
     n: len cargs
     if n == 0
@@ -97,14 +98,14 @@ fn connect_stdio cmd cargs cenv alias
     else
         mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) cenv alias
 
---! Verbindet einen einzelnen konfigurierten Server (stdio oder sse). Liefert {alias, ok, error?}.
---! Markiert bei Erfolg CONNECTED[alias] — einzige Stelle, die das tut (vorher
---! setzte nur ensure_for_task das nach erfolgreichem Aufruf, der eager
---! Start-Connect in setup_core lief aber direkt ueber connect_servers und
---! liess CONNECTED leer; dadurch hielt auto_servers_for_task jeden schon
---! verbundenen Server faelschlich fuer neu und versuchte ihn bei jeder
---! passenden Nachricht erneut zu verbinden -> "alias already in use"-Fehler
---! im Log bei jeder Nachricht, die auf ein Server-Keyword traf).
+--! Connects a single configured server (stdio or sse). Returns {alias, ok, error?}.
+--! Marks CONNECTED[alias] on success — the ONLY place that does so (before,
+--! only ensure_for_task set that after a successful call, but the eager
+--! startup connect in setup_core went straight through connect_servers and
+--! left CONNECTED empty; auto_servers_for_task then wrongly treated every
+--! already-connected server as new and tried to reconnect it on every
+--! matching message -> "alias already in use" error in the log on every
+--! message that hit a server keyword).
 fn connect_one idx s
     typ: get s "type"
     alias: get s "alias"
@@ -126,8 +127,8 @@ fn connect_one idx s
         set r "error" (to_str e)
     r
 
---! Verbindet alle konfigurierten Server. Ein fehlschlagender Server blockiert
---! die anderen nicht (best effort, jeder Fehler wird zurückgemeldet).
+--! Connects all configured servers. One failing server doesn't block the
+--! others (best effort, every error is reported back).
 export fn connect_servers servers
     out: []
     i: 0
@@ -136,12 +137,12 @@ export fn connect_servers servers
         i: i + 1
     out
 
---! Ob ein Server per Alias aktuell erfolgreich verbunden ist.
+--! Whether a server is currently successfully connected by alias.
 export fn is_connected alias
     (get CONNECTED alias) == true
 
---! Waehlt MCP-Server aus einer vertrauenswuerdigen Auto-Registry. Ein Eintrag
---! braucht `keywords` und die normale Server-Konfiguration.
+--! Selects MCP servers from a trusted auto-registry. An entry needs
+--! `keywords` and the normal server configuration.
 export fn auto_servers_for_task servers task
     out: []
     low: lower task
@@ -157,18 +158,19 @@ export fn auto_servers_for_task servers task
             push out s
     out
 
---! Verbindet passende Registry-Server einmalig (CONNECTED wird bereits von
---! connect_one/connect_servers selbst gepflegt, siehe dortiger Kommentar).
+--! Connects matching registry servers once (CONNECTED is already maintained
+--! by connect_one/connect_servers themselves, see comment there).
 export fn ensure_for_task servers task
     selected: auto_servers_for_task servers task
     connect_servers selected
 
---! Namen aller entdeckten MCP-Tools (lokal + remote), ohne die übergebenen
---! (bereits als ai_tool registrierten) lokalen Namen. Für die Zuteilung an den
---! "werkzeugmeister"-Agenten im Gremium.
---! Hinweis: `mcp_tools` liefert lokale ai_tool-Eintraege nur, wenn zuvor `mcp_server`
---! aufgerufen wurde (Muninn tut das nicht) UND liefert einen Fehler, wenn ueberhaupt
---! keine Tools registriert sind — beides best-effort auf [] abgefangen, nicht als Fehler.
+--! Names of all discovered MCP tools (local + remote), excluding the passed-in
+--! (already ai_tool-registered) local names. Used to hand tools to the swarm's
+--! per-server specialist agents.
+--! Note: `mcp_tools` only returns local ai_tool entries if `mcp_server` was
+--! called beforehand (Muninn doesn't do that) AND returns an error if no
+--! tools are registered at all — both cases are caught best-effort as [], not
+--! treated as an error.
 export fn discovered_tool_names local_names
     out: []
     tools: []
@@ -183,15 +185,15 @@ export fn discovered_tool_names local_names
                 push out name
     out
 
---! Wie discovered_tool_names, aber nach Herkunfts-Server gruppiert (das
---! "source"-Feld von mcp_tools ist der Verbindungs-Alias, z.B. "filesystem",
---! "github"). Grundlage fuer P5: ein eigener, fokussierter Spezial-Agent pro
---! MCP-Server statt ein Alleskoenner mit allen Werkzeugen — skaliert von
---! selbst mit jedem neu angebundenen Server, ohne Code-Aenderung in swarm.pipe.
---! Liefert eine Liste von {alias, tools} statt einer Map, weil Pipe-Maps nur
---! bare Identifier als Literal-Keys erlauben, ein MCP-Alias aber beliebiger
---! String sein kann (set/get funktionieren zwar mit beliebigen Keys, eine
---! Liste ist hier trotzdem die robustere, iterationsfreundlichere Form).
+--! Like discovered_tool_names, but grouped by origin server (the "source"
+--! field from mcp_tools is the connection alias, e.g. "filesystem",
+--! "github"). Basis for P5: one dedicated, focused specialist agent per MCP
+--! server instead of a jack-of-all-trades with every tool — scales on its
+--! own with every newly connected server, no code change needed in
+--! swarm.pipe. Returns a list of {alias, tools} instead of a map, because
+--! Pipe maps only allow bare identifiers as literal keys, while an MCP alias
+--! can be an arbitrary string (set/get do work with arbitrary keys, but a
+--! list is still the more robust, iteration-friendly form here).
 export fn discovered_tools_by_source local_names
     groups: {}
     order: []
