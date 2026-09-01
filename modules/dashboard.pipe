@@ -415,10 +415,10 @@ function deleteMemory(id){
 }
 
 function goalItemHtml(g){
-  var done = g.status === 'erledigt';
+  var done = g.status === 'done';
   var acc = done ? 'acc-green' : 'acc-orange';
-  var next = done ? 'offen' : 'erledigt';
-  var label = done ? 'wieder öffnen' : 'erledigt';
+  var next = done ? 'open' : 'done';
+  var label = done ? 'reopen' : 'done';
   return '<div class="row-item ' + acc + '"><div class="row-main">' +
     '<div class="txt">' + escapeHtml(g.goal_text) + '</div>' +
     '<div class="row-meta"><span class="tag">' + escapeHtml(g.status) + '</span></div>' +

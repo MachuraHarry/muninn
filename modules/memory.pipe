@@ -497,19 +497,19 @@ export fn memory_count h
 export fn recent_events h n
     db_query h ("SELECT chat_id, msg, kind, ts FROM events ORDER BY id DESC LIMIT " ++ (to_str n))
 
---! Legt ein Ziel an und liefert die id.
+--! Creates a goal and returns the id.
 export fn add_goal h text
-    db_exec h ("INSERT INTO goals (text, status) VALUES ('" ++ (sql_escape text) ++ "', 'offen')")
+    db_exec h ("INSERT INTO goals (text, status) VALUES ('" ++ (sql_escape text) ++ "', 'open')")
     get (at (db_query h "SELECT max(id) AS mid FROM goals") 0) "mid"
 
---! Die n juengsten Ziele (Web-Dashboard P3). "text" ist ein SQL-Typ-Schluesselwort
---! im reinen-Pipe-sqlite-Modul — ein unqualifizierter SELECT einer Spalte namens
---! "text" scheitert am Parser (INSERT/CREATE TABLE vertragen den Namen, ein
---! bloßes "SELECT text" nicht); tabellenqualifiziert ("goals.text") geht.
+--! The n most recent goals (web dashboard P3). "text" is a SQL type keyword
+--! in the pure-Pipe sqlite module — an unqualified SELECT of a column named
+--! "text" fails to parse (INSERT/CREATE TABLE tolerate the name, a bare
+--! "SELECT text" doesn't); table-qualified ("goals.text") works.
 export fn list_goals h limit
     db_query h ("SELECT id, goals.text AS goal_text, status FROM goals ORDER BY id DESC LIMIT " ++ (to_str limit))
 
---! Setzt den Status eines Ziels (z.B. "offen"/"erledigt", Web-Dashboard P3).
+--! Sets a goal's status (e.g. "open"/"done", web dashboard P3).
 export fn set_goal_status h id status
     db_exec h ("UPDATE goals SET status = '" ++ (sql_escape status) ++ "' WHERE id = " ++ (to_str id))
 

@@ -157,15 +157,15 @@ test "list_goals liefert die juengsten Ziele mit Status"
     goals: mem.list_goals h 10
     expect_eq (len goals) 2 "zwei Ziele"
     expect_eq (get (at goals 0) "goal_text") "Muninn ausbauen" "neuestes zuerst"
-    expect_eq (get (at goals 0) "status") "offen" "Default-Status offen"
+    expect_eq (get (at goals 0) "status") "open" "Default-Status open"
     mem.close h
 
 test "set_goal_status aendert den Status eines Ziels"
     h: mem.init_db ":memory:"
     id: mem.add_goal h "Pipe lernen"
-    mem.set_goal_status h id "erledigt"
+    mem.set_goal_status h id "done"
     goals: mem.list_goals h 10
-    expect_eq (get (at goals 0) "status") "erledigt" "Status aktualisiert"
+    expect_eq (get (at goals 0) "status") "done" "Status aktualisiert"
     mem.close h
 
 test "log_event protokolliert Ereignisse"

@@ -239,12 +239,12 @@ export fn compose_briefing h
     goals: mem.list_goals h 5
     open: 0
     for g in goals
-        if (get g "status") != "erledigt"
+        if (get g "status") != "done"
             open: open + 1
     if open > 0
         out: out ++ "\n• Open goals:\n"
         for g in goals
-            if (get g "status") != "erledigt"
+            if (get g "status") != "done"
                 out: out ++ "  - " ++ (get g "goal_text") ++ "\n"
     ev: mem.recent_events h 3
     if (len ev) > 0
