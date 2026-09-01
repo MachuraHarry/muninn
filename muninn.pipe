@@ -181,7 +181,7 @@ fn greeting_text _
 
 --! Hilfetext.
 fn help_text _
-    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/costs      — KI-Betriebskosten zusammengefasst (Sessions, Tokens, $)\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/learn      — Dokument lernen (z.B. /learn https://... oder eine .txt/.md-Datei schicken)\n/graph      — Wissensgraph abfragen (z.B. /graph Harry)\n/remind     — Erinnerung planen (z.B. /remind in 10 Minuten an die Pause)\n/reminders  — offene Erinnerungen/Briefings anzeigen\n/briefing   — tägliches Morgen-Briefing aktivieren (/briefing stop zum Abbestellen)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen"
+    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/costs      — KI-Betriebskosten zusammengefasst (Sessions, Tokens, $)\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/learn      — Dokument lernen (z.B. /learn https://... oder eine .txt/.md-Datei schicken)\n/graph      — Wissensgraph abfragen (z.B. /graph Harry)\n/remind     — Erinnerung planen (z.B. /remind in 10 Minuten an die Pause)\n/reminders  — offene Erinnerungen/Briefings anzeigen\n/briefing   — tägliches Morgen-Briefing aktivieren (/briefing stop zum Abbestellen)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen\n/settings   — Antwortstil, Sprache, proaktive Nachrichten, Gedächtnis-Aggressivität einstellen"
 
 --! Status-Text (Statistiken aus der Seele).
 fn status_text dbh
@@ -482,8 +482,12 @@ fn handle_message token cid text dbh
         return nil
     if low == "/consolidate"
         tel.tel_send_chat_action token cid "typing"
-        res: mem.consolidate dbh
+        cdays: mem.setting_consolidate_days dbh (to_str cid)
+        res: mem.consolidate dbh (get cdays "decay") (get cdays "forget")
         tel.tel_send_message token cid ("Konsolidierung: " ++ (to_str (get res "threads_summarized")) ++ " Threads verdichtet, " ++ (to_str (get res "memories_decayed")) ++ " Erinnerungen gealtert, " ++ (to_str (get res "memories_forgotten")) ++ " vergessen.")
+        return nil
+    if low == "/settings"
+        tel.tel_send_message_kb token cid (settings_menu_text dbh cid) (settings_kb dbh cid)
         return nil
     if low == "/graph"
         tel.tel_send_message token cid "Bitte gib eine Entität an: /graph <Name>"
@@ -551,6 +555,7 @@ fn handle_message token cid text dbh
     task: tnorm
     if (len hist) > 0
         task: "Bisheriger Gespraechsverlauf (aeltester zuerst, ungekuerzt):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
+    task: (mem.settings_prompt_prefix dbh (to_str cid)) ++ task
     mem.log_event dbh (to_str cid) tnorm "chat"
     --! Live-Status: EINE Platzhalter-Nachricht senden und per editMessageText
     --! immer wieder aktualisieren, statt neuer Nachrichtenbloecke oder
@@ -901,6 +906,43 @@ fn remind_query low tnorm
         return tnorm
     ""
 
+--! /settings-Menue: Anzeigetext + Inline-Tastatur, die aktuellen Werte
+--! stehen direkt auf den Buttons (Antippen rotiert zum naechsten Wert, siehe
+--! handle_callback unten "settings_*"). Beide Funktionen lesen dieselben vier
+--! Chat-Einstellungen (siehe setting_get/setting_cycle/setting_label in
+--! memory.pipe) — bei jeder Aenderung wird die Nachricht per
+--! tel_edit_message_text_kb neu aufgebaut, damit der Button sofort den neuen
+--! Wert zeigt.
+fn settings_menu_text dbh cid
+    style: mem.setting_get dbh (to_str cid) "style" "normal"
+    sprache: mem.setting_get dbh (to_str cid) "sprache" "de"
+    proaktiv: mem.setting_get dbh (to_str cid) "proaktiv" "on"
+    gedaechtnis: mem.setting_get dbh (to_str cid) "gedaechtnis" "normal"
+    "⚙️ Einstellungen\n\nStil: " ++ (mem.setting_label "style" style) ++ "\nSprache: " ++ (mem.setting_label "sprache" sprache) ++ "\nProaktive Nachrichten: " ++ (mem.setting_label "proaktiv" proaktiv) ++ "\nGedächtnis: " ++ (mem.setting_label "gedaechtnis" gedaechtnis) ++ "\n\nAuf einen Wert tippen, um ihn zu ändern."
+
+fn settings_kb dbh cid
+    style: mem.setting_get dbh (to_str cid) "style" "normal"
+    sprache: mem.setting_get dbh (to_str cid) "sprache" "de"
+    proaktiv: mem.setting_get dbh (to_str cid) "proaktiv" "on"
+    gedaechtnis: mem.setting_get dbh (to_str cid) "gedaechtnis" "normal"
+    kb: []
+    r1: []
+    push r1 (tel.tel_button ("Stil: " ++ (mem.setting_label "style" style)) "settings_style")
+    push kb r1
+    r2: []
+    push r2 (tel.tel_button ("Sprache: " ++ (mem.setting_label "sprache" sprache)) "settings_sprache")
+    push kb r2
+    r3: []
+    push r3 (tel.tel_button ("Proaktiv: " ++ (mem.setting_label "proaktiv" proaktiv)) "settings_proaktiv")
+    push kb r3
+    r4: []
+    push r4 (tel.tel_button ("Gedächtnis: " ++ (mem.setting_label "gedaechtnis" gedaechtnis)) "settings_gedaechtnis")
+    push kb r4
+    r5: []
+    push r5 (tel.tel_button "Fertig" "settings_done")
+    push kb r5
+    kb
+
 --! Verarbeitet einen Inline-Button-Druck (callback_query).
 fn handle_callback token dbh cbq
     cbid: get cbq "id"
@@ -908,6 +950,7 @@ fn handle_callback token dbh cbq
     msg: get cbq "message"
     chat: get msg "chat"
     cid: get chat "id"
+    message_id: get msg "message_id"
     txt: get msg "text"
     tel.tel_answer_callback token cbid ""
     if data == "save"
@@ -924,7 +967,7 @@ fn handle_callback token dbh cbq
                 message_id: get (get ph "result") "message_id"
             on_update: make_swarm_updater token cid message_id
             setup_sandbox all_mcp_servers
-            res: grm.run_gremium_stream dbh cid ("Vertiefe bitte diesen Sachverhalt: " ++ txt) on_update
+            res: grm.run_gremium_stream dbh cid ((mem.settings_prompt_prefix dbh (to_str cid)) ++ "Vertiefe bitte diesen Sachverhalt: " ++ txt) on_update
             a: get res "content"
             if a != nil && a != ""
                 tid: mem.active_thread dbh cid
@@ -946,6 +989,28 @@ fn handle_callback token dbh cbq
         if txt != nil
             mem.adjust_by_content dbh txt (-1)
             tel.tel_send_message token cid "Notiert — ich werte das ab."
+        return nil
+    --! /settings-Menue (siehe settings_menu_text/settings_kb oben): jeder
+    --! Button rotiert seine EIGENE Einstellung zum naechsten Wert (setting_cycle
+    --! in memory.pipe) und baut das Menue direkt in derselben Nachricht neu auf
+    --! (editMessageText statt neuer Nachricht) — fuehlt sich wie ein echter
+    --! Umschalter an, kein wachsender Nachrichtenverlauf pro Klick.
+    if data == "settings_style" || data == "settings_sprache" || data == "settings_proaktiv" || data == "settings_gedaechtnis"
+        key: substring data 9 (len data)
+        cid_str: to_str cid
+        deflt: "normal"
+        if key == "sprache"
+            deflt: "de"
+        else
+            if key == "proaktiv"
+                deflt: "on"
+        cur: mem.setting_get dbh cid_str key deflt
+        nxt: mem.setting_cycle key cur
+        mem.setting_set dbh cid_str key nxt
+        tel.tel_edit_message_text_kb token cid message_id (settings_menu_text dbh cid) (settings_kb dbh cid)
+        return nil
+    if data == "settings_done"
+        tel.tel_delete_message token cid message_id
         return nil
     tel.tel_send_message token cid "Unbekannte Aktion."
 
@@ -1082,7 +1147,8 @@ fn sched_tick token
                 if (len (parse_calendar_events evt)) > 0
                     msg: msg ++ "\n\n📅 Termine heute:\n" ++ evt
         if kind == "calendar_check"
-            calendar_notify_new token dbh cid user_google_email calendar_reminder_minutes
+            if mem.setting_proaktiv_enabled dbh (to_str cid)
+                calendar_notify_new token dbh cid user_google_email calendar_reminder_minutes
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
             continue
         if kind == "goal_tick"
@@ -1111,7 +1177,7 @@ fn sched_tick token
             --! ausserhalb des normalen Nachrichtenflusses, hat also noch
             --! kein aktuelles Sandbox-Profil fuer DIESE Anfrage.
             setup_sandbox all_mcp_servers
-            continuation: "Ein zuvor im Hintergrund gestartetes Docker-Setup ist abgeschlossen. Beschreibung: " ++ beschreibung ++ ". Ergebnis: " ++ ergebnis ++ ". Berichte dem Nutzer knapp und sauber formatiert, was passiert ist. Braucht die urspruengliche Aufgabe noch einen naechsten Schritt, stosse ihn direkt an (z.B. erneuter Aufruf von 'docker_hintergrund_setup')."
+            continuation: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "Ein zuvor im Hintergrund gestartetes Docker-Setup ist abgeschlossen. Beschreibung: " ++ beschreibung ++ ". Ergebnis: " ++ ergebnis ++ ". Berichte dem Nutzer knapp und sauber formatiert, was passiert ist. Braucht die urspruengliche Aufgabe noch einen naechsten Schritt, stosse ihn direkt an (z.B. erneuter Aufruf von 'docker_hintergrund_setup')."
             res: grm.run_gremium dbh (to_num cid) continuation
             tel.tel_send_message token (to_num cid) (get res "content")
             sched.cancel dbh (get item "id")
@@ -1131,7 +1197,7 @@ fn sched_tick token
                 sched.cancel dbh (get item "id")
                 continue
             setup_sandbox all_mcp_servers
-            continuation2: "Du arbeitest an einer zuvor zurueckgestellten Aufgabe weiter. Urspruengliche Aufgabe: " ++ (get t "task") ++ ". Bisheriger Fortschritt: " ++ (get t "progress") ++ ". Setze die Arbeit fort. Bist du JETZT fertig, teile dem Nutzer das Endergebnis klar mit. Bist du NOCH NICHT fertig, rufe 'hintergrund_fortsetzen' erneut auf mit dem aktualisierten Fortschritt."
+            continuation2: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "Du arbeitest an einer zuvor zurueckgestellten Aufgabe weiter. Urspruengliche Aufgabe: " ++ (get t "task") ++ ". Bisheriger Fortschritt: " ++ (get t "progress") ++ ". Setze die Arbeit fort. Bist du JETZT fertig, teile dem Nutzer das Endergebnis klar mit. Bist du NOCH NICHT fertig, rufe 'hintergrund_fortsetzen' erneut auf mit dem aktualisierten Fortschritt."
             res2: grm.run_gremium dbh (to_num cid) continuation2
             tel.tel_send_message token (to_num cid) (get res2 "content")
             sched.cancel dbh (get item "id")
@@ -1141,13 +1207,18 @@ fn sched_tick token
             --! das Gremium entscheidet selbst, ob sich eine Nachricht lohnt.
             --! Schweigen ist hier ein vollwertiges Ergebnis ("NICHTS"), sonst
             --! spammt der taegliche Tick den Nutzer mit Leermeldungen zu.
-            setup_sandbox all_mcp_servers
-            prompt_proaktiv: "PROAKTIVER IMPULS (du wurdest NICHT angesprochen — entscheide selbst, ob sich eine Nachricht an den Nutzer lohnt): Sieh mit 'erinnerungen_suchen' in dein Gedaechtnis: gibt es offene/angefangene Aufgaben, unterbrochene Arbeiten, bald faellige Termine oder wichtige Entwicklungen zu Themen, die den Nutzer beschaeftigen — etwas, das der Nutzer selbst ansprechen wuerde? Gibt es etwas WICHTIGES: schreibe die kurze, konkrete Nachricht an den Nutzer; findest du eine Aufgabe, die du zu einem bestimmten Zeitpunkt wieder aufgreifen solltest, plane das selbst mit 'erinnerung_planen' bzw. 'hintergrund_fortsetzen'. Gibt es NICHTS Nennenswertes: antworte AUSSCHLIESSLICH mit dem einzelnen Wort NICHTS, ohne weitere Zeichen."
-            res_proaktiv: grm.run_gremium dbh (to_num cid) prompt_proaktiv
+            --! Per /settings abschaltbar ("Proaktive Nachrichten") — der
+            --! Scheduler-Eintrag selbst laeuft trotzdem weiter (naechster Tag
+            --! wird normal erneut geplant), nur der eigentliche Gremiums-Lauf
+            --! + Versand entfaellt, solange die Einstellung aus ist.
+            if mem.setting_proaktiv_enabled dbh (to_str cid)
+                setup_sandbox all_mcp_servers
+                prompt_proaktiv: "PROAKTIVER IMPULS (du wurdest NICHT angesprochen — entscheide selbst, ob sich eine Nachricht an den Nutzer lohnt): Sieh mit 'erinnerungen_suchen' in dein Gedaechtnis: gibt es offene/angefangene Aufgaben, unterbrochene Arbeiten, bald faellige Termine oder wichtige Entwicklungen zu Themen, die den Nutzer beschaeftigen — etwas, das der Nutzer selbst ansprechen wuerde? Gibt es etwas WICHTIGES: schreibe die kurze, konkrete Nachricht an den Nutzer; findest du eine Aufgabe, die du zu einem bestimmten Zeitpunkt wieder aufgreifen solltest, plane das selbst mit 'erinnerung_planen' bzw. 'hintergrund_fortsetzen'. Gibt es NICHTS Nennenswertes: antworte AUSSCHLIESSLICH mit dem einzelnen Wort NICHTS, ohne weitere Zeichen."
+                res_proaktiv: grm.run_gremium dbh (to_num cid) prompt_proaktiv
+                content_proaktiv: get res_proaktiv "content"
+                if content_proaktiv != nil && (lower (trim content_proaktiv)) != "nichts" && (trim content_proaktiv) != ""
+                    tel.tel_send_message token (to_num cid) (shorten (trim content_proaktiv))
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
-            content_proaktiv: get res_proaktiv "content"
-            if content_proaktiv != nil && (lower (trim content_proaktiv)) != "nichts" && (trim content_proaktiv) != ""
-                tel.tel_send_message token (to_num cid) (shorten (trim content_proaktiv))
             continue
         if cid != nil && cid != ""
             try
@@ -1336,7 +1407,7 @@ if consolidate_mode
     set_sandbox "consolidate"
     setup_ai deepseek_key
     hl: mem.open_locked nil
-    res: mem.consolidate (get hl "h")
+    res: mem.consolidate (get hl "h") 14 30
     print ("Konsolidierung: " ++ (to_str (get res "threads_summarized")) ++ " Threads verdichtet, " ++ (to_str (get res "memories_decayed")) ++ " Erinnerungen gealtert, " ++ (to_str (get res "memories_forgotten")) ++ " vergessen.")
     mem.close_locked hl
 else
@@ -1415,6 +1486,7 @@ else
                 push cmds {command: "briefing", description: "Tägliches Briefing an/aus"}
                 push cmds {command: "reset", description: "Gesprächsverlauf zurücksetzen"}
                 push cmds {command: "consolidate", description: "Traum: Gedächtnis verdichten"}
+                push cmds {command: "settings", description: "Stil, Sprache, Proaktivität, Gedächtnis einstellen"}
                 tel.tel_set_my_commands tok cmds
             catch
                 nil

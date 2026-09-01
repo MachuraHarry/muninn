@@ -679,7 +679,8 @@ fn dashboard_reply h text
         mem.close_thread h DASH_CHAT_ID
         return "Gespraechsverlauf zurueckgesetzt."
     if low == "/consolidate"
-        res: mem.consolidate h
+        cdays: mem.setting_consolidate_days h DASH_CHAT_ID
+        res: mem.consolidate h (get cdays "decay") (get cdays "forget")
         return ("Konsolidierung: " ++ (to_str (get res "threads_summarized")) ++ " Threads verdichtet, " ++ (to_str (get res "memories_decayed")) ++ " Erinnerungen gealtert, " ++ (to_str (get res "memories_forgotten")) ++ " vergessen.")
     gname: dash_graph_query low tnorm
     if gname != ""
@@ -721,6 +722,7 @@ fn dashboard_reply h text
     task: tnorm
     if (len hist) > 0
         task: "Bisheriger Gespraechsverlauf (aeltester zuerst):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
+    task: (mem.settings_prompt_prefix h DASH_CHAT_ID) ++ task
     answer: ""
     try
         r: grm.run_gremium h DASH_CHAT_ID task

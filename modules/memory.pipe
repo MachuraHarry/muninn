@@ -97,6 +97,142 @@ export fn next_session_id h
     meta_set h "session_counter" (to_str n)
     n
 
+--! Nutzer-Einstellungen (/settings in muninn.pipe): pro Chat ueber die
+--! bestehende meta-Tabelle gespeichert (eigener Schluessel-Namensraum
+--! "settings:<chat_id>:<key>") statt einer neuen Tabelle — spart eine
+--! Migration, meta ist schon fuer genau sowas (beliebige Key-Value-Paare) da.
+--! Unbekannter/leerer Wert -> default statt Fehler, damit ein Chat ohne
+--! jemals gesetzte Einstellungen ganz normal mit den Standardwerten laeuft.
+export fn setting_get h chat_id key default
+    v: meta_get h ("settings:" ++ (to_str chat_id) ++ ":" ++ key)
+    if v == nil || v == ""
+        default
+    else
+        v
+
+export fn setting_set h chat_id key value
+    meta_set h ("settings:" ++ (to_str chat_id) ++ ":" ++ key) value
+
+--! Naechster Wert beim Durchklicken eines Einstellungswertes im Telegram-
+--! Menue (siehe handle_callback in muninn.pipe). Reine Werte-Rotation ohne
+--! DB-Zugriff, damit sie auch fuers Bauen der Anzeige-Labels wiederverwendbar
+--! bleibt.
+export fn setting_cycle key cur
+    if key == "style"
+        if cur == "knapp"
+            "normal"
+        else
+            if cur == "normal"
+                "ausfuehrlich"
+            else
+                "knapp"
+    else
+        if key == "sprache"
+            if cur == "de"
+                "en"
+            else
+                "de"
+        else
+            if key == "proaktiv"
+                if cur == "on"
+                    "off"
+                else
+                    "on"
+            else
+                if key == "gedaechtnis"
+                    if cur == "locker"
+                        "normal"
+                    else
+                        if cur == "normal"
+                            "streng"
+                        else
+                            "locker"
+                else
+                    cur
+
+--! Anzeige-Text fuer einen Einstellungswert im Telegram-Menue.
+export fn setting_label key value
+    if key == "style"
+        if value == "knapp"
+            "Knapp"
+        else
+            if value == "ausfuehrlich"
+                "Ausführlich"
+            else
+                "Normal"
+    else
+        if key == "sprache"
+            if value == "en"
+                "English"
+            else
+                "Deutsch"
+        else
+            if key == "proaktiv"
+                if value == "on"
+                    "An"
+                else
+                    "Aus"
+            else
+                if key == "gedaechtnis"
+                    if value == "locker"
+                        "Locker (vergisst langsam)"
+                    else
+                        if value == "streng"
+                            "Streng (vergisst schnell)"
+                        else
+                            "Normal"
+                else
+                    value
+
+--! Baut einen "[SYSTEM]"-Hinweis fuer Stil/Sprache aus den Chat-Einstellungen,
+--! der dem Gremiums-Task vorangestellt wird (siehe run_gremium(_stream)-
+--! Aufrufstellen in muninn.pipe/dashboard.pipe) — Agenten-Prompts selbst sind
+--! statisch (init_gremium laeuft nur EINMAL beim Start), daher hier statt dort
+--! injiziert, nach demselben Muster wie der bestehende Rundenbudget-Hinweis
+--! in swarm.go. Leer ("") bei reinen Standardeinstellungen, kein Rauschen.
+export fn settings_prompt_prefix h chat_id
+    style: setting_get h chat_id "style" "normal"
+    sprache: setting_get h chat_id "sprache" "de"
+    p: ""
+    if sprache == "en"
+        p: p ++ "[SYSTEM] Antworte in dieser gesamten Konversation auf ENGLISCH statt Deutsch, unabhaengig von der Sprache der Nutzeranfrage. "
+    if style == "knapp"
+        p: p ++ "[SYSTEM] Der Nutzer wuenscht knappe Antworten — fasse dich kurz, nur das Wesentliche, keine langen Erklaerungen. "
+    else
+        if style == "ausfuehrlich"
+            p: p ++ "[SYSTEM] Der Nutzer wuenscht ausfuehrliche Antworten — erklaere Hintergrund/Kontext, wo sinnvoll, statt nur der knappen Kernaussage. "
+    if p == ""
+        p
+    else
+        p ++ "\n\n"
+
+--! Ob proaktive (unaufgeforderte) Nachrichten fuer diesen Chat erlaubt sind
+--! (Eigenimpuls, proaktive Kalender-Erinnerungen — siehe sched_tick in
+--! muninn.pipe). Das taegliche Briefing ist davon bewusst AUSGENOMMEN: das
+--! hat der Nutzer per /briefing explizit selbst aktiviert, ist also schon
+--! opt-in und keine unaufgeforderte Ueberraschung.
+export fn setting_proaktiv_enabled h chat_id
+    (setting_get h chat_id "proaktiv" "on") == "on"
+
+--! decay/forget-Tage fuer consolidate_memories, gesteuert ueber die
+--! "gedaechtnis"-Einstellung. "normal" entspricht den bisherigen festen
+--! Werten (14/30) — bewusst mit dieser Funktion unveraendert, damit sich
+--! am Standardverhalten nichts aendert, wenn niemand die Einstellung anfasst.
+export fn setting_consolidate_days h chat_id
+    g: setting_get h chat_id "gedaechtnis" "normal"
+    out: {}
+    if g == "locker"
+        set out "decay" 30
+        set out "forget" 60
+    else
+        if g == "streng"
+            set out "decay" 7
+            set out "forget" 14
+        else
+            set out "decay" 14
+            set out "forget" 30
+    out
+
 --! Schreibt einen Kosten-Schnappschuss (kumulierte Werte des laufenden
 --! Prozesses laut ai_cost/ai_tokens, nicht als Delta). Nur aufrufen, wenn
 --! sich seit dem letzten Schnappschuss etwas geaendert hat (Aufrufer-
@@ -511,11 +647,14 @@ export fn consolidate_memories h decay_after_days forget_after_days
     out
 
 --! Haupt-Einstieg der Konsolidierung: Threads nach 3 Tagen Inaktivitaet
---! verdichten, nicht-permanente Erinnerungen ab 14 Tagen um 1 Stufe altern
---! lassen, ab 30 Tagen bei Importance 0 endgueltig vergessen.
-export fn consolidate h
+--! verdichten, nicht-permanente Erinnerungen ab decay_days um 1 Stufe altern
+--! lassen, ab forget_days bei Importance 0 endgueltig vergessen. Bisheriger
+--! fester Standard war 14/30 — jetzt ueber die "gedaechtnis"-Einstellung
+--! steuerbar (siehe setting_consolidate_days), Aufrufer ohne Chat-Kontext
+--! (z.B. der CLI-Cron-Modus) uebergeben weiterhin einfach 14/30 direkt.
+export fn consolidate h decay_days forget_days
     threads_summarized: consolidate_threads h 3
-    mres: consolidate_memories h 14 30
+    mres: consolidate_memories h decay_days forget_days
     out: {}
     set out "threads_summarized" threads_summarized
     set out "memories_decayed" (get mres "decayed")

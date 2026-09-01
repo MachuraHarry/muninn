@@ -77,6 +77,9 @@ ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
   Übersicht, das Dashboard hat einen eigenen Kosten-Tab.
 - **Telegram-Bot** — Long-Polling, Inline-Buttons, natives Befehlsmenü (`/`-Aufklapp-Menü über
   `setMyCommands`), Foto-Verständnis (`ai_vision`).
+- **Einstellungen** — `/settings` als Inline-Menü: Antwortstil (knapp/normal/ausführlich),
+  Sprache (Deutsch/Englisch), proaktive Nachrichten an/aus, Gedächtnis-Aggressivität
+  (wie schnell Erinnerungen bei `/consolidate` altern/verblassen) — pro Chat gespeichert.
 - **Deterministische Tests** — Kernlogik ohne KI/Netz testbar.
 
 ## Stand der Entwicklung
@@ -252,6 +255,7 @@ neben dem Eingabefeld.
 | `/reminders` | offene Erinnerungen/Briefings anzeigen |
 | `/briefing` | tägliches Morgen-Briefing aktivieren (`/briefing stop` zum Abbestellen) |
 | `/learn <URL>` | Dokument lernen (oder direkt eine `.txt`/`.md`-Datei schicken) |
+| `/settings` | Antwortstil, Sprache, proaktive Nachrichten und Gedächtnis-Aggressivität einstellen (Inline-Menü, siehe [Architektur → Einstellungen](#einstellungen-settings-memorypipe-muninnpipe)) |
 
 ### Natürliche Sprache
 
@@ -454,10 +458,49 @@ Ein periodischer Aufräum-/Verdichtungsjob, ausführbar per `pipe muninn.pipe co
 - **`consolidate_memories`** senkt die Importance alter, nicht-`permanent`er
   Erinnerungen pro Lauf um 1 und vergisst sie endgültig, sobald sie bei Importance 0
   angekommen und alt genug sind. Explizit gemerkte (`permanent`) Erinnerungen bleiben
-  unangetastet.
+  unangetastet. Die decay/forget-Tage (Standard 14/30) sind pro Chat über
+  `/settings` → „Gedächtnis" einstellbar (siehe
+  [Einstellungen](#einstellungen-settings-memorypipe-muninnpipe)) — der CLI-Cron-Modus
+  ohne Chat-Kontext nutzt weiterhin fest 14/30.
 - **Bug gefixt**: das externe, reine-Pipe-`sqlite`-Modul wertet `datetime('now')`
   nicht aus (speichert wörtlich `"now"`) — `mem.now_ts` baut Zeitstempel seither
   selbst aus Pipes `now`/`format_time`.
+
+### Einstellungen (`/settings`, `memory.pipe`, `muninn.pipe`)
+
+Pro Chat einstellbar über ein Telegram-Inline-Menü (`/settings` — Antippen
+eines Buttons rotiert direkt zum nächsten Wert und baut dieselbe Nachricht
+per `editMessageText` neu auf, kein wachsender Nachrichtenverlauf):
+
+| Einstellung | Werte | Standard | Wirkung |
+|---|---|---|---|
+| Stil | knapp / normal / ausführlich | normal | Wird dem Gremiums-Task als `[SYSTEM]`-Hinweis vorangestellt |
+| Sprache | Deutsch / English | Deutsch | dito — weist das Gremium an, komplett auf Englisch zu antworten |
+| Proaktive Nachrichten | an / aus | an | steuert Eigenimpuls + proaktive Kalender-Erinnerungen (siehe unten) |
+| Gedächtnis | locker / normal / streng | normal | decay/forget-Tage für `/consolidate` (locker: 30/60, normal: 14/30, streng: 7/14) |
+
+Gespeichert werden die Werte **pro `chat_id`** über die bestehende
+`meta`-Tabelle (eigener Schlüssel-Namensraum `settings:<chat_id>:<key>`,
+`mem.setting_get`/`setting_set`) — keine neue Tabelle nötig, `meta` ist schon
+für genau sowas da. Ein Chat ohne je gesetzte Werte läuft einfach mit den
+Standardwerten weiter.
+
+**Warum ein `[SYSTEM]`-Präfix statt eines eigenen Prompt-Bausteins pro
+Agent?** `init_gremium` (siehe unten) baut alle Agenten-System-Prompts nur
+**einmal** beim Start — zu diesem Zeitpunkt ist noch gar nicht bekannt, für
+welchen Chat/welche Nachricht sie gleich gebraucht werden. Stil/Sprache
+werden stattdessen dem `task`-String jedes einzelnen `run_gremium`/
+`run_gremium_stream`-Aufrufs vorangestellt (`mem.settings_prompt_prefix`) —
+nach demselben Muster wie der bestehende `[SYSTEM] Only N of M rounds
+remain`-Hinweis (siehe Inneres Gremium unten). Bei Standardeinstellungen ist
+der Präfix leer, kein Rauschen im Prompt.
+
+Proaktive Nachrichten (Eigenimpuls, Kalender-Erinnerungen) prüfen
+`mem.setting_proaktiv_enabled` direkt in `sched_tick`, bevor sie überhaupt
+das Gremium anstoßen bzw. senden — der Scheduler-Eintrag selbst feuert
+trotzdem normal weiter (kein separates Deaktivieren nötig, es passiert
+einfach nichts). Das tägliche Briefing ist bewusst **nicht** betroffen: das
+hat der Nutzer per `/briefing` schon explizit selbst aktiviert.
 
 ### Inneres Gremium (`swarm.pipe`)
 
@@ -748,6 +791,10 @@ Ziele, jüngste Ereignisse), ganz ohne externe Datenquelle. Jetzt:
   siehe [Google Workspace](#google-workspace-google_creds) zum
   7-Tage-Testing-Mode-Ablauf) lässt die Prüfung einfach ausfallen, ohne den
   Scheduler-Tick oder andere Nachrichten zu stören.
+- Über `/settings` → „Proaktive Nachrichten" abschaltbar (siehe
+  [Einstellungen](#einstellungen-settings-memorypipe-muninnpipe)) — der
+  15-Minuten-Scheduler-Eintrag läuft dabei normal weiter, nur der eigentliche
+  Versand entfällt.
 
 ### Präsentationen & Dokumente (`praesentation`/`dokument`)
 
@@ -865,7 +912,9 @@ Tool-Bediener zum selbstorganisierenden Agenten"):
   gleich den nächsten Wiedervorlage-Termin setzen. Gibt es nichts, antwortet
   es AUSSCHLIESSLICH mit dem Wort „NICHTS" — und `sched_tick` sendet dann
   bewusst nichts (Schweigen ist ein vollwertiges Ergebnis, kein
-  Leermeldungs-Spam).
+  Leermeldungs-Spam). Über `/settings` → „Proaktive Nachrichten" ganz
+  abschaltbar (siehe
+  [Einstellungen](#einstellungen-settings-memorypipe-muninnpipe)).
 - **Selbstreflexion**: der Registrator speichert nach einem Lauf — nur wenn
   es wirklich etwas Nennenswertes gab — eine wiederverwendbare
   Lern-Erfahrung („Was hat funktioniert, was nicht, warum") als knappe

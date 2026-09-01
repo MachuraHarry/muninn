@@ -39,6 +39,56 @@ test "meta_set/meta_get Roundtrip"
     expect_eq (mem.meta_get h "bot_name") "Muninn" "roundtrip"
     mem.close h
 
+--! /settings (P6): setting_get/setting_set-Roundtrip + Default ohne
+--! gesetzten Wert, getrennt pro Chat (zwei Chats teilen sich NICHT dieselbe
+--! Einstellung).
+test "setting_get/setting_set Roundtrip mit Default und Chat-Trennung"
+    h: mem.init_db ":memory:"
+    expect_eq (mem.setting_get h "1" "style" "normal") "normal" "unbekannt -> default"
+    mem.setting_set h "1" "style" "knapp"
+    expect_eq (mem.setting_get h "1" "style" "normal") "knapp" "roundtrip"
+    expect_eq (mem.setting_get h "2" "style" "normal") "normal" "anderer Chat unbeeinflusst"
+
+--! setting_cycle: jeder Einstellungswert rotiert deterministisch durch alle
+--! seine erlaubten Werte und kommt am Ende wieder beim Start an.
+test "setting_cycle rotiert durch alle Werte und kommt zurueck zum Start"
+    expect_eq (mem.setting_cycle "style" "knapp") "normal" "style knapp -> normal"
+    expect_eq (mem.setting_cycle "style" "normal") "ausfuehrlich" "style normal -> ausfuehrlich"
+    expect_eq (mem.setting_cycle "style" "ausfuehrlich") "knapp" "style ausfuehrlich -> knapp"
+    expect_eq (mem.setting_cycle "sprache" "de") "en" "sprache de -> en"
+    expect_eq (mem.setting_cycle "sprache" "en") "de" "sprache en -> de"
+    expect_eq (mem.setting_cycle "proaktiv" "on") "off" "proaktiv on -> off"
+    expect_eq (mem.setting_cycle "proaktiv" "off") "on" "proaktiv off -> on"
+    expect_eq (mem.setting_cycle "gedaechtnis" "locker") "normal" "gedaechtnis locker -> normal"
+    expect_eq (mem.setting_cycle "gedaechtnis" "normal") "streng" "gedaechtnis normal -> streng"
+    expect_eq (mem.setting_cycle "gedaechtnis" "streng") "locker" "gedaechtnis streng -> locker"
+
+test "settings_prompt_prefix ist leer bei Standardeinstellungen, sonst mit Hinweis"
+    h: mem.init_db ":memory:"
+    expect_eq (mem.settings_prompt_prefix h "1") "" "Standard -> kein Hinweis"
+    mem.setting_set h "1" "sprache" "en"
+    expect_eq (contains (mem.settings_prompt_prefix h "1") "ENGLISCH") true "Sprache-Hinweis enthalten"
+
+test "setting_proaktiv_enabled folgt der Einstellung, Standard ist an"
+    h: mem.init_db ":memory:"
+    expect_eq (mem.setting_proaktiv_enabled h "1") true "Standard: proaktiv an"
+    mem.setting_set h "1" "proaktiv" "off"
+    expect_eq (mem.setting_proaktiv_enabled h "1") false "nach Abschalten: aus"
+
+test "setting_consolidate_days liefert die richtigen Tage je Stufe"
+    h: mem.init_db ":memory:"
+    normal: mem.setting_consolidate_days h "1"
+    expect_eq (get normal "decay") 14 "normal decay"
+    expect_eq (get normal "forget") 30 "normal forget"
+    mem.setting_set h "1" "gedaechtnis" "locker"
+    locker: mem.setting_consolidate_days h "1"
+    expect_eq (get locker "decay") 30 "locker decay"
+    expect_eq (get locker "forget") 60 "locker forget"
+    mem.setting_set h "1" "gedaechtnis" "streng"
+    streng: mem.setting_consolidate_days h "1"
+    expect_eq (get streng "decay") 7 "streng decay"
+    expect_eq (get streng "forget") 14 "streng forget"
+
 test "add_memory und top_memories nach Importance"
     h: mem.init_db ":memory:"
     mem.add_memory h "Espresso-Vorliebe" "permanent" 4 "test" "persoenlich"
@@ -234,7 +284,7 @@ test "consolidate fasst Thread- und Memory-Konsolidierung zusammen"
     tid: mem.active_thread h "9"
     mem.add_message h tid "9" "user" "Test"
     mem.close_thread h "9"
-    res: mem.consolidate h
+    res: mem.consolidate h 14 30
     expect_eq (get res "threads_summarized") 1 "ein Thread verdichtet"
     expect_eq (get res "memories_decayed") 0 "nichts zu altern"
     expect_eq (get res "memories_forgotten") 0 "nichts zu vergessen"
