@@ -673,25 +673,25 @@ test "next_hhmm respektiert einen Zeitzonen-Offset"
     due: sched.next_hhmm 8 0 1788048000 7200
     expect_eq due 1788069600 "08:00 lokal (UTC+2) = 06:00 UTC"
 
-test "parse_reminder_rule erkennt 'in N Minuten'"
-    r: sched.parse_reminder_rule "Erinnere mich in 5 Minuten an die Pause" 1000 0
+test "parse_reminder_rule erkennt 'in N minutes'"
+    r: sched.parse_reminder_rule "Remind me in 5 minutes about the break" 1000 0
     expect_eq (get r "due") 1300 "1000 + 5*60"
     expect_eq (get r "repeat") "" "einmalig"
 
-test "parse_reminder_rule erkennt 'in N Stunden'"
-    r: sched.parse_reminder_rule "Erinnere mich in 2 Stunden ans Meeting" 1000 0
+test "parse_reminder_rule erkennt 'in N hours'"
+    r: sched.parse_reminder_rule "Remind me in 2 hours about the meeting" 1000 0
     expect_eq (get r "due") 8200 "1000 + 2*3600"
 
-test "parse_reminder_rule erkennt 'um HH:MM'"
-    r: sched.parse_reminder_rule "Erinnere mich um 8:30 an den Zahnarzt" 1788048000 0
+test "parse_reminder_rule erkennt 'at HH:MM'"
+    r: sched.parse_reminder_rule "Remind me at 8:30 about the dentist" 1788048000 0
     expect_eq (get r "due") 1788078600 "2026-08-30 08:30:00 UTC"
 
-test "parse_reminder_rule erkennt 'morgen'"
-    r: sched.parse_reminder_rule "Erinnere mich morgen an den Bericht" 1000 0
+test "parse_reminder_rule erkennt 'tomorrow'"
+    r: sched.parse_reminder_rule "Remind me tomorrow about the report" 1000 0
     expect_eq (get r "due") 87400 "1000 + 86400"
 
-test "parse_reminder_rule faellt auf 'in einer Stunde' zurueck"
-    r: sched.parse_reminder_rule "Erinnere mich an den Bericht" 1000 0
+test "parse_reminder_rule faellt auf 'in one hour' zurueck"
+    r: sched.parse_reminder_rule "Remind me about the report" 1000 0
     expect_eq (get r "due") 4600 "1000 + 3600"
 
 test "schedule/due/mark_fired: einmalige Aufgabe wird erledigt"
@@ -821,7 +821,7 @@ test "compose_briefing nennt Erinnerungen und offene Ziele"
     mem.add_memory h "Der Nutzer liebt Espresso" "permanent" 4 "test" "x"
     mem.add_goal h "Pipe lernen"
     b: sched.compose_briefing h
-    expect_contains b "Guten Morgen" "Begruessung"
+    expect_contains b "Good morning" "Begruessung"
     expect_contains b "Espresso" "wichtigste Erinnerung"
     expect_contains b "Pipe lernen" "offenes Ziel"
     mem.close h

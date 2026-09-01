@@ -1,41 +1,41 @@
---! scheduler.pipe — Proaktivität (Plan.md P4): geplante Erinnerungen + tägliches
---! Briefing. Kein eigener Scheduler in Pipe (der kommt laut Roadmap erst mit P4) —
---! der Tick läuft stattdessen im Telegram-Long-Polling-Loop (muninn.pipe), der
---! seinen Timeout dynamisch auf "Zeit bis zur nächsten fälligen Aufgabe" kappt.
---! Dadurch bleibt Muninn single-threaded (kein Goroutine-/DB-Konflikt, siehe
---! Plan.md zur Nebenläufigkeit) und erinnert trotzdem mit Sekunden-Präzision.
---! Zeit-/Wiederholungslogik ist rein (kein KI/Netz) und deterministisch testbar.
+--! scheduler.pipe — proactivity (Plan.md P4): scheduled reminders + daily
+--! briefing. No dedicated scheduler in Pipe (that only arrives with P4 per
+--! the roadmap) — the tick instead runs inside the Telegram long-polling
+--! loop (muninn.pipe), which dynamically caps its timeout at "time until the
+--! next due task". This keeps Muninn single-threaded (no goroutine/DB
+--! conflict, see Plan.md on concurrency) while still reminding with
+--! second-level precision. Time/repeat logic is pure (no AI/network) and
+--! deterministically testable.
 import "sqlite"
 import "modules/memory.pipe" as mem
 
---! Legt die scheduled-Tabelle an (idempotent). due_ts ist ein INTEGER mit
---! Unix-Sekunden (bewusst numerisch statt formatierter String: sortierbar und
---! für Wiederholungs-Arithmetik trivial).
+--! Creates the scheduled table (idempotent). due_ts is an INTEGER in Unix
+--! seconds (deliberately numeric rather than a formatted string: sortable
+--! and trivial for repeat-interval arithmetic).
 export fn init_scheduler h
     db_exec h "CREATE TABLE IF NOT EXISTS scheduled (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, chat_id TEXT, note TEXT, due_ts INTEGER, repeat TEXT, state TEXT, created TEXT, last_fired TEXT)"
     nil
 
---! background_tasks: generischer Checkpoint fuer EINE beliebige, vom
---! Gremium selbst als "dauert zu lange" eingeschaetzte Aufgabe — nicht nur
---! Docker (siehe docker_tools.pipe fuer den SPEZIFISCHEN, guenstiger zu
---! prüfenden Fall "Docker-Container laeuft noch"). Hier gibt es keinen
---! billigen externen Status-Check wie bei Docker — "fertig?" kann nur die
---! KI selbst beim naechsten task_check-Tick beurteilen, indem sie mit
---! frischem Rundenbudget an der Aufgabe weiterarbeitet (siehe muninn.pipe
---! sched_tick, Zweig "task_check").
+--! background_tasks: a generic checkpoint for ANY task the swarm itself
+--! judged as "taking too long" — not just Docker (see docker_tools.pipe for
+--! the SPECIFIC, cheaper-to-check "Docker container still running" case).
+--! There's no cheap external status check here like with Docker — "done
+--! yet?" can only be judged by the AI itself on the next task_check tick, by
+--! continuing to work on the task with a fresh round budget (see sched_tick
+--! in muninn.pipe, branch "task_check").
 export fn init_background_tasks h
     db_exec h "CREATE TABLE IF NOT EXISTS background_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, task TEXT, progress TEXT, created TEXT, updated TEXT)"
     nil
 
---! Legt einen neuen Hintergrund-Checkpoint an. task: die urspruengliche
---! Aufgabe (kurz zusammengefasst). progress: was bisher erledigt ist / was
---! noch fehlt (von der KI selbst formuliert). Liefert die id.
+--! Creates a new background checkpoint. task: the original task (briefly
+--! summarized). progress: what's been done so far / what's still missing
+--! (worded by the AI itself). Returns the id.
 export fn create_background_task h chat_id task progress
     init_background_tasks h
     db_exec h ("INSERT INTO background_tasks (chat_id, task, progress, created, updated) VALUES ('" ++ (mem.sql_escape (to_str chat_id)) ++ "', '" ++ (mem.sql_escape task) ++ "', '" ++ (mem.sql_escape progress) ++ "', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "')")
     get (at (db_query h "SELECT max(id) AS mid FROM background_tasks") 0) "mid"
 
---! Liest einen Checkpoint (nil wenn nicht gefunden).
+--! Reads a checkpoint (nil if not found).
 export fn get_background_task h id
     rows: db_query h ("SELECT id, chat_id, task, progress FROM background_tasks WHERE id = " ++ (to_str id))
     if (len rows) > 0
@@ -43,7 +43,7 @@ export fn get_background_task h id
     else
         nil
 
---! Reine Hilfsfunktion: erste Ziffernfolge in einem String (0 wenn keine).
+--! Pure helper: first run of digits in a string (0 if none).
 fn leading_int s
     out: ""
     started: false
@@ -61,7 +61,7 @@ fn leading_int s
         return 0
     to_num out
 
---! Reine Hilfsfunktion: letzte Ziffernfolge in einem String (0 wenn keine).
+--! Pure helper: last run of digits in a string (0 if none).
 fn trailing_int s
     out: ""
     i: (len s) - 1
@@ -77,10 +77,10 @@ fn trailing_int s
         return 0
     to_num out
 
---! Reine Funktion: Unix-Sekunden des nächsten Auftretens einer Uhrzeit HH:MM.
---! "Lokale" Zeit = UTC + offset_sec (das Environment läuft sonst in UTC, siehe
---! format_time — es gibt keinen Timezone-Builtin; der Offset kommt aus .env).
---! Liegt die Zielzeit heute schon in der Vergangenheit, wird morgen geliefert.
+--! Pure function: Unix seconds of the next occurrence of a HH:MM time.
+--! "Local" time = UTC + offset_sec (the environment otherwise runs in UTC,
+--! see format_time — there's no timezone builtin; the offset comes from
+--! .env). If the target time today is already in the past, returns tomorrow.
 export fn next_hhmm hh mm now_sec offset_sec
     shifted: now_sec + offset_sec
     day: shifted - (shifted % 86400)
@@ -89,27 +89,26 @@ export fn next_hhmm hh mm now_sec offset_sec
         target: target + 86400
     target - offset_sec
 
---! Plant eine Aufgabe/Erinnerung ein. kind: "reminder" | "briefing" | "goal_tick"
---! | "calendar_check" | "job_check" (Hintergrund-Docker-Setup, note = Job-ID
---! aus docker_tools.pipe) | "task_check" (generische Gremium-Fortsetzung,
---! note = Checkpoint-ID aus create_background_task oben — siehe muninn.pipe
---! sched_tick fuer beide). due_sec: Unix-Sekunden. repeat: "" (einmalig,
---! auch fuer task_check — jede erneute Zurueckstellung legt einen NEUEN
---! Eintrag an) | "daily" | "weekly" | "15min" (Kalender-Check-Takt) |
---! "5min" (Docker-Job-Check-Takt). Liefert id.
+--! Schedules a task/reminder. kind: "reminder" | "briefing" | "goal_tick" |
+--! "calendar_check" | "job_check" (background Docker setup, note = job id
+--! from docker_tools.pipe) | "task_check" (generic swarm continuation,
+--! note = checkpoint id from create_background_task above — see sched_tick
+--! in muninn.pipe for both). due_sec: Unix seconds. repeat: "" (one-off,
+--! also for task_check — every re-deferral creates a NEW entry) | "daily" |
+--! "weekly" | "15min" (calendar-check cadence) | "5min" (Docker-job-check
+--! cadence). Returns id.
 export fn schedule h kind chat_id text due_sec repeat
     init_scheduler h
     db_exec h ("INSERT INTO scheduled (kind, chat_id, note, due_ts, repeat, state, created) VALUES ('" ++ (mem.sql_escape kind) ++ "', '" ++ (mem.sql_escape (to_str chat_id)) ++ "', '" ++ (mem.sql_escape text) ++ "', " ++ (to_str due_sec) ++ ", '" ++ (mem.sql_escape repeat) ++ "', 'pending', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "')")
     get (at (db_query h "SELECT max(id) AS mid FROM scheduled") 0) "mid"
 
---! Alle fälligen, noch offenen Einträge (due_ts <= now_sec), älteste zuerst.
+--! All due, still-open entries (due_ts <= now_sec), oldest first.
 export fn due h now_sec
     init_scheduler h
     db_query h ("SELECT id, kind, chat_id, note, due_ts, repeat FROM scheduled WHERE state = 'pending' AND due_ts <= " ++ (to_str now_sec) ++ " ORDER BY due_ts ASC")
 
---! Markiert einen Eintrag als erledigt — bzw. schiebt ihn bei
---! daily/weekly/15min/5min auf den naechsten Termin
---! (+86400/+604800/+900/+300) statt ihn zu schliessen.
+--! Marks an entry as done — or, for daily/weekly/15min/5min, pushes it to
+--! the next occurrence (+86400/+604800/+900/+300) instead of closing it.
 export fn mark_fired h id repeat due_sec
     if repeat == "daily" || repeat == "weekly" || repeat == "15min" || repeat == "5min"
         inc: 86400
@@ -124,8 +123,8 @@ export fn mark_fired h id repeat due_sec
         db_exec h ("UPDATE scheduled SET state = 'done', last_fired = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
     "ok"
 
---! Millisekunden bis zum nächsten fälligen Eintrag (nil wenn keiner offen) —
---! für den dynamischen Long-Poll-Timeout des Bot-Loops.
+--! Milliseconds until the next due entry (nil if none pending) — for the
+--! bot loop's dynamic long-poll timeout.
 export fn next_due_ms h now_sec
     init_scheduler h
     rows: db_query h "SELECT MIN(due_ts) AS d FROM scheduled WHERE state = 'pending'"
@@ -139,23 +138,23 @@ export fn next_due_ms h now_sec
         ms: 0
     ms
 
---! Offene Einträge eines Chats (für /reminders), älteste zuerst.
+--! Open entries for a chat (for /reminders), oldest first.
 export fn list h chat_id
     init_scheduler h
     db_query h ("SELECT id, kind, note, due_ts, repeat FROM scheduled WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND state = 'pending' ORDER BY due_ts ASC")
 
---! Bricht einen Eintrag ab (state = cancelled statt löschen — Auditierbarkeit).
+--! Cancels an entry (state = cancelled rather than deleting — auditability).
 export fn cancel h id
     init_scheduler h
     db_exec h ("UPDATE scheduled SET state = 'cancelled' WHERE id = " ++ (to_str id))
     "ok"
 
---! Reiner Fallback-Parser (ohne KI) für Erinnerungs-Anweisungen. Erkennt:
---!   "in N minuten/stunden/tagen" -> now + N*60/3600/86400
---!   "um HH:MM"                  -> nächstes Auftreten von HH:MM
---!   "morgen"                    -> now + 86400
---!   sonst                       -> now + 3600 (in einer Stunde)
---! Liefert {due, repeat, text} — due in Unix-Sekunden, repeat "" (einmalig).
+--! Pure fallback parser (no AI) for reminder instructions. Recognizes:
+--!   "in N minutes/hours/days" -> now + N*60/3600/86400
+--!   "at HH:MM"                -> next occurrence of HH:MM
+--!   "tomorrow"                -> now + 86400
+--!   otherwise                 -> now + 3600 (in one hour)
+--! Returns {due, repeat, text} — due in Unix seconds, repeat "" (one-off).
 export fn parse_reminder_rule text now_sec offset_sec
     t: lower (trim text)
     due: now_sec + 3600
@@ -163,16 +162,19 @@ export fn parse_reminder_rule text now_sec offset_sec
     if contains t "in "
         n: leading_int t
         if n > 0
-            if contains t "sekund" || contains t "sek "
+            if contains t "sec"
                 due: now_sec + n
             else
-                if contains t "minut" || contains t "min "
+                --! "minute" (not bare "min") — "remind"/"reminder" themselves
+                --! contain "min" as a substring and would otherwise always
+                --! win here, since every realistic input starts with "remind".
+                if contains t "minute"
                     due: now_sec + (n * 60)
                 else
-                    if contains t "stund" || contains t "std"
+                    if contains t "hour"
                         due: now_sec + (n * 3600)
                     else
-                        if contains t "tag"
+                        if contains t "day"
                             due: now_sec + (n * 86400)
     else
         if contains t ":"
@@ -183,7 +185,7 @@ export fn parse_reminder_rule text now_sec offset_sec
                 if hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59
                     due: next_hhmm hh mm now_sec offset_sec
         else
-            if contains t "morgen"
+            if contains t "tomorrow"
                 due: now_sec + 86400
     out: {}
     set out "due" due
@@ -191,21 +193,21 @@ export fn parse_reminder_rule text now_sec offset_sec
     set out "text" rtext
     out
 
---! Erinnerungs-Anweisung zerlegen: bevorzugt per KI (relative Sekunden, damit
---! Zeitzonen keine Rolle spielen), Fallback deterministisch per Regel. Liefert
---! {due, repeat, text} — due in Unix-Sekunden.
---! WICHTIG: "Jetzt" wird der KI in LOKALER Zeit (now_sec + offset_sec) genannt,
---! nicht in UTC — sonst rechnet die KI bei absoluten Uhrzeiten ("um 20 Uhr")
---! relativ zur falschen Referenz und die Erinnerung feuert um offset_sec
---! Sekunden zu spaet/frueh. due_in_seconds ist eine reine Differenz (jetzt ->
---! Zielzeit), die bleibt bei konsistenter Referenz korrekt, egal ob lokal
---! oder UTC gerechnet wird — nur "jetzt" und die vom Nutzer genannte Uhrzeit
---! muessen im selben Bezugsrahmen stehen.
+--! Parses a reminder instruction: prefers AI (relative seconds, so
+--! timezones don't matter), falls back deterministically to the rule-based
+--! parser. Returns {due, repeat, text} — due in Unix seconds.
+--! IMPORTANT: the AI is told "now" in LOCAL time (now_sec + offset_sec), not
+--! UTC — otherwise the AI would compute absolute times ("at 8pm") relative
+--! to the wrong reference and the reminder would fire offset_sec seconds too
+--! late/early. due_in_seconds is a pure difference (now -> target time),
+--! which stays correct under a consistent reference regardless of whether
+--! it's computed locally or in UTC — only "now" and the time the user
+--! mentioned need to be in the same frame of reference.
 export fn parse_reminder text now_sec offset_sec
     out: {}
     try
         local_now: now_sec + offset_sec
-        j: ai_chat_json ("Du zerlegst eine Erinnerungs-Anweisung. Antworte ausschliesslich als JSON-Objekt mit 'text' (die eigentliche Erinnerung, ohne die Zeitangabe), 'due_in_seconds' (Ganzzahl: wie viele Sekunden ab jetzt, bis erinnert werden soll) und 'repeat' (eines von: once, daily, weekly). Ist keine eindeutige Zeit erkennbar, nimm 3600 und repeat 'once'. Jetzt ist es " ++ (format_time local_now "2006-01-02 15:04:05") ++ " (lokale Zeit des Nutzers — von ihm genannte Uhrzeiten wie 'um 20 Uhr' beziehen sich auf diese lokale Zeit).") text
+        j: ai_chat_json ("You parse a reminder instruction. Respond ONLY as a JSON object with 'text' (the actual reminder, without the time reference), 'due_in_seconds' (integer: how many seconds from now the reminder should fire) and 'repeat' (one of: once, daily, weekly). If no clear time is recognizable, use 3600 and repeat 'once'. Right now it is " ++ (format_time local_now "2006-01-02 15:04:05") ++ " (the user's local time — times they mention like 'at 8pm' refer to this local time).") text
         t: get j "text"
         d: get j "due_in_seconds"
         r: get j "repeat"
@@ -224,14 +226,14 @@ export fn parse_reminder text now_sec offset_sec
         out: parse_reminder_rule text now_sec offset_sec
     out
 
---! Baut den täglichen Briefing-Text deterministisch aus der Seele auf
---! (wichtigste Erinnerungen + offene Ziele + jüngste Ereignisse). Kein KI-Call
---! nötig — die Rohdaten sprechen für sich; Muninn kann sie später verfeinern.
+--! Builds the daily briefing text deterministically from the soul (top
+--! memories + open goals + recent events). No AI call needed — the raw
+--! data speaks for itself; Muninn can refine it later.
 export fn compose_briefing h
-    out: "Guten Morgen! Hier ist dein Muninn-Briefing.\n"
+    out: "Good morning! Here's your Muninn briefing.\n"
     top: mem.top_memories h 5
     if (len top) > 0
-        out: out ++ "\n• Wichtige Erinnerungen:\n"
+        out: out ++ "\n• Important memories:\n"
         for r in top
             out: out ++ "  - " ++ (get r "content") ++ "\n"
     goals: mem.list_goals h 5
@@ -240,13 +242,13 @@ export fn compose_briefing h
         if (get g "status") != "erledigt"
             open: open + 1
     if open > 0
-        out: out ++ "\n• Offene Ziele:\n"
+        out: out ++ "\n• Open goals:\n"
         for g in goals
             if (get g "status") != "erledigt"
                 out: out ++ "  - " ++ (get g "goal_text") ++ "\n"
     ev: mem.recent_events h 3
     if (len ev) > 0
-        out: out ++ "\n• Zuletzt:\n"
+        out: out ++ "\n• Recent:\n"
         for e in ev
             out: out ++ "  - " ++ (get e "msg") ++ "\n"
     out
