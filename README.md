@@ -8,6 +8,10 @@ der sich Dinge **mit Quellen merkt**, Antworten über ein **inneres Gremium** ve
 Aufgaben **autonom ausführt** und **im Web recherchiert und lernt** — der Rabe, der
 ausfliegt und Wissen zurückbringt. Alle Daten bleiben auf deiner Maschine.
 
+Dieses README deckt Installation und Architektur ab. Für eine ausführliche
+Anleitung, wie man Muninn im Alltag benutzt und was es alles kann, siehe
+[GUIDE.md](GUIDE.md).
+
 ---
 
 ## Features
