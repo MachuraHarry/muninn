@@ -1,10 +1,10 @@
---! telegram.pipe — Telegram Bot API client (Long-Polling), rein HTTP.
---! Basis: https://core.telegram.org/bots/api
---! Token wird nie im Code abgelegt — immer als Parameter durchgereicht.
---! Pipe-Map-Literale erlauben nur bare Identifier als Keys; Telegram braucht
---! String-Keys (chat_id, text, ...), daher wird jeder Request-Body mit `set` aufgebaut.
+--! telegram.pipe — Telegram Bot API client (long-polling), pure HTTP.
+--! Reference: https://core.telegram.org/bots/api
+--! The token is never stored in code — always passed through as a parameter.
+--! Pipe map literals only allow bare identifiers as keys; Telegram needs
+--! string keys (chat_id, text, ...), so every request body is built with `set`.
 
---! Baut eine Fehler-Rückgabe-Map auf (ok: false).
+--! Builds an error-return map (ok: false).
 fn err_map status body
     m: {}
     set m "ok" false
@@ -12,7 +12,7 @@ fn err_map status body
     set m "body" body
     m
 
---! Generischer POST: liefert das parse_json-Ergebnis (Map mit "ok").
+--! Generic POST: returns the parse_json result (map with "ok").
 export fn tel_post token method body_map
     url: "https://api.telegram.org/bot" ++ token ++ "/" ++ method
     hdrs: {}
@@ -31,8 +31,8 @@ export fn tel_post token method body_map
         return (err_map status j)
     j
 
---! Generischer GET mit Query-Parametern (query ist eine Liste von [key, value]-Paaren).
---! Listenliterale als Funktionsargument werden in Klammern gesetzt: ([]).
+--! Generic GET with query parameters (query is a list of [key, value] pairs).
+--! List literals as function arguments are wrapped in parens: ([]).
 export fn tel_get token method query
     qs: ""
     for pair in query
@@ -53,7 +53,7 @@ export fn tel_get token method query
         return (err_map (get r "status") (get r "body"))
     j
 
---! Primitive URL-Encoding für Query-Parameter.
+--! Primitive URL encoding for query parameters.
 fn urlencode s
     s: replace_all s "%" "%25"
     s: replace_all s "&" "%26"
@@ -62,16 +62,15 @@ fn urlencode s
     s: replace_all s " " "%20"
     s
 
---! Bot-Info: {"ok": true, "result": {...}}
+--! Bot info: {"ok": true, "result": {...}}
 export fn tel_get_me token
     tel_get token "getMe" ([])
 
---! Registriert das native Telegram-Befehlsmenue (das "/"-Aufklapp-Menue mit
---! Beschreibungen, sichtbar auch ueber den Menue-Button neben dem
---! Eingabefeld). cmds: Liste von {command, description} — command OHNE
---! fuehrenden Schraegstrich (Telegram-Vorgabe), description max. 256
---! Zeichen. Einmalig beim Start aufzurufen; Telegram merkt sich das
---! serverseitig, bis es erneut gesetzt wird.
+--! Registers Telegram's native command menu (the "/" pop-up menu with
+--! descriptions, also visible via the menu button next to the input field).
+--! cmds: list of {command, description} — command WITHOUT a leading slash
+--! (Telegram's requirement), description max 256 characters. Call once at
+--! startup; Telegram remembers this server-side until it's set again.
 export fn tel_set_my_commands token cmds
     list: []
     for c in cmds
@@ -83,7 +82,7 @@ export fn tel_set_my_commands token cmds
     set m "commands" list
     tel_post token "setMyCommands" m
 
---! Offene Updates (Long-Polling). Liefert die result-Liste (oder []).
+--! Pending updates (long-polling). Returns the result list (or []).
 export fn tel_get_updates token offset timeout
     query: [["timeout", (to_str timeout)]]
     if offset != nil
@@ -94,18 +93,17 @@ export fn tel_get_updates token offset timeout
     else
         []
 
---! Wandelt CommonMark-Stil (wie das LLM ihn natuerlich erzeugt: **fett**,
---! *kursiv*, `code`, [text](url)) in Telegrams HTML-Parse-Mode um.
---! BEWUSST HTML statt Telegrams eigenem "Markdown"-Modus: dessen Parser ist
---! sehr streng bei unausgewogenen/verschachtelten Entities und scheiterte in
---! der Praxis haeufig, wonach die Antwort STILLSCHWEIGEND auf reinen
---! Klartext zurueckfiel (Nutzer sah dann nie Formatierung, ohne dass ein
---! Fehler sichtbar wurde) — HTML braucht nur 3 escapte Zeichen (&, <, >)
---! und ist viel nachsichtiger. Einzelnes Unterstrich-Kursiv (_wort_) wird
---! ABSICHTLICH NICHT umgewandelt: kollidiert zu haeufig mit technischen
---! Begriffen wie snake_case-Variablennamen, die im Bot-Kontext oft vorkommen.
---! Reihenfolge wichtig: erst escapen, DANACH eigene Tags einfuegen — sonst
---! wuerden die eigenen Tags mit-escaped.
+--! Converts CommonMark-style formatting (as the LLM naturally produces it:
+--! **bold**, *italic*, `code`, [text](url)) into Telegram's HTML parse mode.
+--! DELIBERATELY HTML instead of Telegram's own "Markdown" mode: that parser
+--! is very strict about unbalanced/nested entities and failed often in
+--! practice, silently falling back to plain text (the user then never saw
+--! any formatting, with no visible error) — HTML only needs 3 characters
+--! escaped (&, <, >) and is far more forgiving. Single-underscore italics
+--! (_word_) is DELIBERATELY NOT converted: it collides too often with
+--! technical terms like snake_case variable names, which come up a lot in
+--! this bot's context. Order matters: escape first, THEN insert our own
+--! tags — otherwise our own tags would get escaped too.
 fn tg_html text
     t: regex_replace "&" "&amp;" text
     t: regex_replace "<" "&lt;" t
@@ -117,10 +115,10 @@ fn tg_html text
     t: regex_replace "\\[([^\\]]+)\\]\\(([^)]+)\\)" "<a href=\"$2\">$1</a>" t
     t
 
---! Sendet mit parse_mode "HTML" (siehe tg_html); scheitert das trotzdem
---! (z.B. durch eine von der Normalisierung nicht abgedeckte Kante), wird als
---! Klartext nachgesendet — so geht nie eine Antwort wegen eines
---! Formatierungsfehlers verloren, nur die Formatierung faellt in dem Fall weg.
+--! Sends with parse_mode "HTML" (see tg_html); if that still fails (e.g. an
+--! edge case the normalization doesn't cover), retries as plain text — a
+--! reply never gets lost due to a formatting error, only the formatting
+--! itself is dropped in that case.
 fn tel_post_with_markdown token method m
     orig_text: get m "text"
     md: {}
@@ -133,14 +131,14 @@ fn tel_post_with_markdown token method m
         res: tel_post token method m
     res
 
---! Sende eine Textnachricht in einen Chat.
+--! Send a text message to a chat.
 export fn tel_send_message token chat_id text
     m: {}
     set m "chat_id" chat_id
     set m "text" text
     tel_post_with_markdown token "sendMessage" m
 
---! Kuerzt einen String fuer Log-Ausgaben (Telegram-Antworten koennen lang sein).
+--! Truncates a string for log output (Telegram responses can be long).
 export fn shorten_body s
     if s == nil
         return "nil"
@@ -149,17 +147,16 @@ export fn shorten_body s
     else
         s
 
---! Laedt eine lokale Datei per multipart/form-data an einen Telegram-Endpoint
---! hoch (sendPhoto/sendDocument brauchen echten Datei-Upload, JSON reicht
---! dafuer nicht). Pipe-Strings sind byte-safe (read_file ohne "bytes"-Modus
---! liefert die Rohbytes verlustfrei als String, verifiziert), daher laesst
---! sich der Multipart-Body als reiner String zusammenbauen und ueber
---! http_request(..., body_string) senden — Pipe hat keinen dedizierten
---! Multipart-Helper.
+--! Uploads a local file via multipart/form-data to a Telegram endpoint
+--! (sendPhoto/sendDocument need a real file upload, JSON isn't enough for
+--! that). Pipe strings are byte-safe (read_file without "bytes" mode
+--! returns the raw bytes losslessly as a string, verified), so the
+--! multipart body can be assembled as a plain string and sent via
+--! http_request(..., body_string) — Pipe has no dedicated multipart helper.
 fn tel_upload token method field_name chat_id file_path caption
     content: read_file file_path
     if content == nil || content == ""
-        return (err_map 0 ("Datei leer oder nicht lesbar: " ++ file_path))
+        return (err_map 0 ("File empty or unreadable: " ++ file_path))
     filename: file_path
     parts: split file_path "/"
     if (len parts) > 0
@@ -178,10 +175,10 @@ fn tel_upload token method field_name chat_id file_path caption
     url: "https://api.telegram.org/bot" ++ token ++ "/" ++ method
     hdrs: {}
     set hdrs "Content-Type" ("multipart/form-data; boundary=" ++ boundary)
-    print ("tel_upload " ++ method ++ " datei=" ++ file_path ++ " groesse=" ++ (to_str (len content)) ++ " chat=" ++ (to_str chat_id))
+    print ("tel_upload " ++ method ++ " file=" ++ file_path ++ " size=" ++ (to_str (len content)) ++ " chat=" ++ (to_str chat_id))
     r: http_request "POST" url hdrs body
     status: get r "status"
-    print ("tel_upload " ++ method ++ " http_status=" ++ (to_str status) ++ " antwort=" ++ (shorten_body (get r "body")))
+    print ("tel_upload " ++ method ++ " http_status=" ++ (to_str status) ++ " response=" ++ (shorten_body (get r "body")))
     j: nil
     try
         j: parse_json (get r "body")
@@ -191,21 +188,21 @@ fn tel_upload token method field_name chat_id file_path caption
         return (err_map status (get r "body"))
     j
 
---! Sendet ein Foto (JPEG/PNG/...) aus einer lokalen Datei, optional mit Bildunterschrift.
+--! Sends a photo (JPEG/PNG/...) from a local file, optionally with a caption.
 export fn tel_send_photo token chat_id file_path caption
     tel_upload token "sendPhoto" "photo" chat_id file_path caption
 
---! Sendet eine beliebige Datei aus dem lokalen Dateisystem, optional mit Bildunterschrift.
+--! Sends an arbitrary file from the local filesystem, optionally with a caption.
 export fn tel_send_document token chat_id file_path caption
     tel_upload token "sendDocument" "document" chat_id file_path caption
 
---! Sendet eine echte Sprachnachrichten-Blase (nicht als Datei-Anhang). file_path
---! MUSS Opus-in-OGG sein — Telegrams einziges Format fuer sendVoice.
+--! Sends a real voice-message bubble (not as a file attachment). file_path
+--! MUST be Opus-in-OGG — Telegram's only format for sendVoice.
 export fn tel_send_voice token chat_id file_path caption
     tel_upload token "sendVoice" "voice" chat_id file_path caption
 
---! Bearbeite eine gesendete Nachricht (mit Markdown, gleiches
---! Fallback-Verhalten wie tel_send_message — siehe tel_post_with_markdown).
+--! Edits a sent message (with markdown, same fallback behavior as
+--! tel_send_message — see tel_post_with_markdown).
 export fn tel_edit_message_text token chat_id message_id text
     m: {}
     set m "chat_id" chat_id
@@ -213,8 +210,8 @@ export fn tel_edit_message_text token chat_id message_id text
     set m "text" text
     tel_post_with_markdown token "editMessageText" m
 
---! Wie tel_edit_message_text, aber mit Inline-Tastatur (kb = Liste von
---! Button-Reihen, siehe tel_send_message_kb).
+--! Like tel_edit_message_text, but with an inline keyboard (kb = list of
+--! button rows, see tel_send_message_kb).
 export fn tel_edit_message_text_kb token chat_id message_id text kb
     m: {}
     set m "chat_id" chat_id
@@ -226,28 +223,28 @@ export fn tel_edit_message_text_kb token chat_id message_id text kb
         set m "reply_markup" rm
     tel_post_with_markdown token "editMessageText" m
 
---! Lösche eine Nachricht.
+--! Delete a message.
 export fn tel_delete_message token chat_id message_id
     m: {}
     set m "chat_id" chat_id
     set m "message_id" message_id
     tel_post token "deleteMessage" m
 
---! "Schreibt gerade"-Status.
+--! "Typing..." status.
 export fn tel_send_chat_action token chat_id action
     m: {}
     set m "chat_id" chat_id
     set m "action" action
     tel_post token "sendChatAction" m
 
---! Baut einen Inline-Keyboard-Button.
+--! Builds an inline keyboard button.
 export fn tel_button text data
     b: {}
     set b "text" text
     set b "callback_data" data
     b
 
---! Sendet Text mit Inline-Tastatur (kb = Liste von Button-Reihen).
+--! Sends text with an inline keyboard (kb = list of button rows).
 export fn tel_send_message_kb token chat_id text kb
     m: {}
     set m "chat_id" chat_id
@@ -258,7 +255,7 @@ export fn tel_send_message_kb token chat_id text kb
         set m "reply_markup" rm
     tel_post_with_markdown token "sendMessage" m
 
---! Beantwortet einen Callback-Query (schließt den Lade-Spinner).
+--! Answers a callback query (closes the loading spinner).
 export fn tel_answer_callback token cbid text
     m: {}
     set m "callback_query_id" cbid
@@ -266,7 +263,7 @@ export fn tel_answer_callback token cbid text
         set m "text" text
     tel_post token "answerCallbackQuery" m
 
---! Löst eine file_id zu einem herunterladbaren file_path auf (oder nil).
+--! Resolves a file_id to a downloadable file_path (or nil).
 export fn tel_get_file token file_id
     j: tel_get token "getFile" ([["file_id", file_id]])
     if get j "ok"
@@ -274,7 +271,7 @@ export fn tel_get_file token file_id
     else
         nil
 
---! Lädt eine Datei über Telegrams File-API herunter (Rohinhalt als String).
+--! Downloads a file via Telegram's File API (raw content as a string).
 export fn tel_download_file token file_path
     url: "https://api.telegram.org/file/bot" ++ token ++ "/" ++ file_path
     r: http_request "GET" url
