@@ -108,7 +108,24 @@ fn setup_sandbox servers
     --! (viele Fehlversuche/Praezisierungen), WOVOR ueberhaupt ein Kapitel ins
     --! Dokument geschrieben wurde — das Limit schlug dann mitten in der
     --! Dokument-Erstellung zu, das Dokument blieb nur teilweise befuellt.
-    sandbox_profile name {fs: "full", network: true, exec: allow_exec, exec_whitelist: wl, ai: true, max_tool_calls: 150, audit_log: true}
+    --! timeout: 180 — WATCHDOG gegen einen exec()-Aufruf, der nie zurueckkehrt.
+    --! Live reproduziert: die KI versuchte auf Nutzerwunsch, per exec() einen
+    --! HTTP-Server im VORDERGRUND zu starten — exec() wartet aber, bis der
+    --! Befehl SELBST beendet ist, und ein dauerhaft laufender Server beendet
+    --! sich nie. Ohne Timeout blockierte das den GESAMTEN Bot fuer immer
+    --! (Pipe ist bewusst single-threaded), UND weil der Telegram-Offset erst
+    --! NACH erfolgreicher Verarbeitung gespeichert wird, haengte sich Muninn
+    --! bei jedem Neustart sofort wieder an derselben Nachricht auf. Der
+    --! Interpreter selbst kennt bereits einen exec()-Timeout
+    --! (sandbox.go/buildExecCommand, context.WithTimeout) — er war nur nie
+    --! aktiviert (Timeout: 0 = unbegrenzt ohne dieses Feld). 180s deckt den
+    --! langsamsten legitimen Fall (docker_pull_image bei einem grossen, noch
+    --! nicht gecachten Image) grosszuegig ab, garantiert aber, dass KEIN
+    --! exec()-Aufruf mehr unbegrenzt haengen kann. MCP-Werkzeugaufrufe (z.B.
+    --! whisper) haben bereits eigenstaendig einen 120s-Timeout im
+    --! MCP-Client selbst (pkg/mcp/client.go, defaultCallTimeout) — nur
+    --! exec() hatte diese Luecke.
+    sandbox_profile name {fs: "full", network: true, exec: allow_exec, exec_whitelist: wl, ai: true, max_tool_calls: 150, timeout: 180, audit_log: true}
     set_sandbox name
     nil
 
