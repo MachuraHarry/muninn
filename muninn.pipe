@@ -566,7 +566,12 @@ fn handle_message token cid text dbh
     try
         res: grm.run_gremium_stream dbh cid task on_update
         answer: get res "content"
-    catch
+    catch e
+        --! Ohne dieses Log sah ein ECHTER Gremium-Absturz (z.B. max rounds
+        --! exceeded, ein Interpreter-Fehler) identisch aus wie "die KI weiss
+        --! es nicht" — beides landete stillschweigend im selben do_search-
+        --! Fallback darunter. Journal-Log macht den Unterschied sichtbar.
+        print ("run_gremium_stream fehlgeschlagen: " ++ (to_str e))
         answer: ""
     mem.add_message dbh tid cid "user" tnorm
     if question_needs_research answer
@@ -580,7 +585,8 @@ fn handle_message token cid text dbh
             reply: ""
             try
                 reply: ai_chat ((grm.self_context 0) ++ "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des folgenden Kontexts knapp und faktentreu. Wenn der Kontext nichts Passendes enthaelt, sage ehrlich, dass du es nicht weisst. Gib nur die Antwort aus, kein internes Reasoning.") ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx_text)
-            catch
+            catch e3
+                print ("Kontext-Fallback-ai_chat fehlgeschlagen: " ++ (to_str e3))
                 reply: ""
             if reply == nil || reply == ""
                 reply: "Dazu erinnere ich mich an:\n"
@@ -601,7 +607,8 @@ fn handle_message token cid text dbh
                 answer2: ""
                 try
                     answer2: ai_chat ((grm.self_context 0) ++ "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des recherchierten Kontexts knapp und faktentreu — der Kontext stammt aus einer WEB-Recherche zum Thema der Frage, NICHT aus einer Recherche ueber Muninn selbst. Geht es in der Frage um Muninns eigene Faehigkeiten/Werkzeuge, nutze dafuer das Selbstwissen oben, nicht den Web-Kontext. WICHTIG: Dieser Aufruf hier ist reine Textzusammenfassung OHNE Werkzeugzugriff — behaupte NIEMALS, gerade etwas zu tun/recherchieren/einzurichten oder Schritte einzuleiten. Ist die Anfrage eine AKTION (z.B. 'richte X ein', 'lege einen Container an') statt einer Wissensfrage, erklaere knapp, dass du das ueber deine echten Werkzeuge tun kannst, und bitte den Nutzer, es nochmal als direkte Aufforderung zu senden. Gib nur die Antwort aus, kein internes Reasoning.") ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx2)
-                catch
+                catch e4
+                    print ("Web-Recherche-Fallback-ai_chat fehlgeschlagen: " ++ (to_str e4))
                     answer2: ctx2
                 if answer2 == nil || answer2 == ""
                     answer2: ctx2
@@ -831,7 +838,8 @@ fn do_search token cid dbh query
     answer: ""
     try
         answer: ai_chat ((grm.self_context 0) ++ "Du bist ein präziser Recherche-Assistent. Beantworte die Frage anhand des recherchierten Kontexts, kurz und faktentreu. WICHTIG: Dieser Aufruf hier ist reine Textzusammenfassung OHNE Werkzeugzugriff — behaupte NIEMALS, du könntest generell keine Dokumente/Dateien erstellen oder versenden (das kannst du sehr wohl, nur nicht in DIESEM Aufruf); erwähnt die Frage sowas, sag stattdessen nur, dass du dafür direkt (nicht als Recherche-Anfrage) gefragt werden musst.") ("Frage: " ++ query ++ "\n\nKontext:\n" ++ ctx)
-    catch
+    catch e5
+        print ("do_search-ai_chat fehlgeschlagen: " ++ (to_str e5))
         answer: ctx
     mem.add_message dbh tid cid "assistant" answer
     src_text: ""
@@ -1043,8 +1051,12 @@ fn calendar_notify_new token dbh cid email window_minutes
         if (get notified id) == nil
             try
                 tel.tel_send_message token (to_num cid) ("📅 Bald: " ++ (get ev "line"))
-            catch
-                nil
+            catch e6
+                --! Wird trotzdem als "benachrichtigt" markiert (keine
+                --! Wiederholung) — daher wichtig, einen fehlgeschlagenen
+                --! Versand wenigstens zu loggen, statt ihn spurlos zu
+                --! verlieren.
+                print ("Kalender-Erinnerung senden fehlgeschlagen: " ++ (to_str e6))
             set notified id now
             changed: true
     if changed
@@ -1140,8 +1152,11 @@ fn sched_tick token
         if cid != nil && cid != ""
             try
                 tel.tel_send_message token (to_num cid) msg
-            catch
-                nil
+            catch e7
+                --! Wird trotzdem als "erledigt"/verschoben markiert (kein
+                --! Wiederholungsversuch) — daher wichtig, einen fehlgeschlagenen
+                --! Versand wenigstens zu loggen, statt ihn spurlos zu verlieren.
+                print ("Scheduler-Nachricht senden fehlgeschlagen (" ++ kind ++ "): " ++ (to_str e7))
         sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
     mem.close_locked hl
     nil
@@ -1166,7 +1181,11 @@ fn poll_once token offset allowed timeout
     updates: []
     try
         updates: tel.tel_get_updates token offset timeout
-    catch
+    catch e8
+        --! Kernstueck des Poll-Loops — schlaegt das dauerhaft fehl (z.B.
+        --! ungueltiger Token, Telegram nicht erreichbar), bekommt Muninn
+        --! sonst ohne jeden Hinweis KEINE Nachrichten mehr.
+        print ("tel_get_updates fehlgeschlagen: " ++ (to_str e8))
         updates: []
     hl2: mem.open_locked nil
     dbh2: get hl2 "h"
@@ -1182,8 +1201,14 @@ fn poll_once token offset allowed timeout
                 if is_allowed cid allowed
                     try
                         handle_update token cid msg dbh2
-                    catch
-                        nil
+                    catch e9
+                        --! Faengt JEDEN unerwarteten Fehler aus der GESAMTEN
+                        --! Nachrichtenverarbeitung ab (Foto/Sprache/Dokument/
+                        --! Gremium/...) — ohne dieses Log sah ein echter
+                        --! Absturz irgendwo darin identisch aus wie
+                        --! "Muninn antwortet einfach nicht", ganz ohne
+                        --! Hinweis worauf.
+                        print ("handle_update fehlgeschlagen: " ++ (to_str e9))
         cq: get upd "callback_query"
         if cq != nil
             chat2: get (get cq "message") "chat"
@@ -1192,8 +1217,8 @@ fn poll_once token offset allowed timeout
                 if is_allowed cid2 allowed
                     try
                         handle_callback token dbh2 cq
-                    catch
-                        nil
+                    catch e10
+                        print ("handle_callback fehlgeschlagen: " ++ (to_str e10))
     if offset != nil
         mem.meta_set dbh2 "telegram_offset" (to_str offset)
     mem.close_locked hl2

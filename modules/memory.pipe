@@ -6,6 +6,21 @@ import "sqlite"
 DB_PATH: "muninn.db"
 LOCK_PATH: "muninn.db.lock"
 
+--! Nur EINMAL pro Modul-INSTANZ loggen, ob embed() grundsaetzlich fehlschlaegt
+--! (z.B. weil embed() zwingend OPENAI_API_KEY braucht, das Muninn bewusst
+--! nicht setzt — DeepSeek-only-Policy) — sonst wuerde das bei JEDEM
+--! add_memory/retrieve_context erneut geloggt (haeufigster Pfad im ganzen
+--! System), reine Log-Blaehung ohne neue Information nach dem ersten Mal.
+--! Achtung: jede Datei, die "modules/memory.pipe" importiert, bekommt ihre
+--! EIGENE Modulinstanz mit eigenem EMBED_STATE (bestaetigte Pipe-Eigenheit,
+--! siehe sqlite-Shadowing-Bug weiter oben in dieser Session) — im echten
+--! Prozess importieren 6 Dateien memory.pipe direkt oder indirekt
+--! (muninn.pipe, swarm.pipe, docker_tools.pipe, scheduler.pipe,
+--! dashboard.pipe, executor.pipe), die Warnung kann also bis zu ~6x statt
+--! exakt 1x erscheinen — immer noch weit weniger als bei jedem einzelnen
+--! add_memory-Aufruf.
+EMBED_STATE: {warned: false}
+
 --! Öffnet die Datenbank und legt das Schema an (idempotent).
 --! path: optionaler Dateipfad (z.B. ":memory:"); nil = DB_PATH.
 export fn init_db path
@@ -210,6 +225,14 @@ export fn add_memory h content kind importance source tags
     try
         vec: embed content
     catch e
+        --! Degradiert stillschweigend auf Keyword-only-Suche (siehe
+        --! retrieve_context) — funktioniert, aber schlechter. EINMAL pro
+        --! Prozesslauf loggen (siehe EMBED_STATE oben), damit ein dauerhaft
+        --! kaputtes Embedding nicht unbemerkt bleibt, ohne bei jedem
+        --! add_memory erneut zu spammen.
+        if (get EMBED_STATE "warned") == false
+            print ("embed() fehlgeschlagen (Erinnerungen werden ab jetzt ohne Embedding gespeichert, nur Keyword-Suche): " ++ (to_str e))
+            set EMBED_STATE "warned" true
         vec: nil
     if vec != nil
         db_exec h ("INSERT INTO embeddings (memory_id, vec) VALUES (" ++ (to_str rid) ++ ", '" ++ (sql_escape (to_json vec)) ++ "')")

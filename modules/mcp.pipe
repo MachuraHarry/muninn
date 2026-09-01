@@ -22,7 +22,10 @@ export fn parse_mcp_config raw
             j: parse_json raw
             if (type_of j) == "LIST"
                 out: j
+            else
+                print "WARNUNG: MCP-Server-Konfiguration ist kein JSON-Array — ignoriert."
         catch e
+            print ("WARNUNG: MCP-Server-Konfiguration ist ungueltiges JSON, ignoriert: " ++ (to_str e))
             out: []
     out
 
