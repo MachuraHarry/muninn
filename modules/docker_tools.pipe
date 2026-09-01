@@ -1,68 +1,64 @@
---! docker_tools.pipe — bewusst eingeschraenkte Docker-Erweiterung (Image
---! ziehen, Container anlegen), zusaetzlich zum MCP-Server "docker" (der nur
---! BESTEHENDE Container/Images verwaltet, siehe swarm.pipe-Kommentar).
+--! docker_tools.pipe — deliberately restricted Docker extension (pull an
+--! image, create a container), in addition to the "docker" MCP server
+--! (which only manages EXISTING containers/images, see swarm.pipe comment).
 --!
---! Sicherheits-Entscheidung (mit dem Nutzer abgestimmt): volle Docker-MCP-
---! Server mit pull_image/create_container existieren (z.B. afstanton/
---! docker_mcp), kommen aber mit der Warnung der Autoren, dass sie
---! "inherently unsafe" sind — Host-Volume-Mounts in einem Container sind
---! faktisch Root-Zugriff auf den Host. Dieses Modul deckt den konkreten
---! Bedarf (Webserver-Container aufsetzen) OHNE diese Faehigkeit ab:
---!   - KEINE Volume-Mounts moeglich (kein Parameter dafuer, nicht mal
---!     optional) — ein Container kann also nie auf das Host-Dateisystem
---!     zugreifen.
---!   - KEIN --privileged, KEIN --network=host, KEINE frei waehlbaren
---!     zusaetzlichen Docker-Flags — das Kommando wird aus einem FESTEN
---!     Template gebaut, nur validierte Werte werden eingesetzt.
---!   - Port-Bindung standardmaessig NUR auf 127.0.0.1 (nicht oeffentlich
---!     erreichbar) — bewusster sicherer Default, damit ein frisch
---!     aufgesetzter Webserver nicht sofort ungeschuetzt im Netz haengt.
---!   - Image-Name/Container-Name/Ports werden gegen strikte, VERANKERTE
---!     Regex geprueft (^...$, nicht nur "enthaelt"), bevor sie in den
---!     exec()-Befehl eingesetzt werden. exec() tokenisiert ueber
---!     splitShellWords und ruft das Programm DIREKT auf (kein "sh -c",
---!     siehe pipe/pkg/object/builtins_sandbox.go) — die Regex-Pruefung ist
---!     trotzdem noetig, um Argument-Injection zu verhindern (z.B. ein
---!     "Image-Name" wie "nginx --privileged", der sonst als zusaetzliches
---!     Docker-Flag durchgereicht wuerde).
---! Braucht "docker" im Sandbox-exec_whitelist (kommt automatisch dazu, da
---! der MCP-Server "docker" per npx laeuft und "docker" selbst nicht ueber
---! MCP, sondern hier direkt per exec() aufgerufen wird — daher zusaetzlich
---! in setup_sandbox eingetragen, siehe muninn.pipe).
---! WICHTIG: "sqlite" wird hier BEWUSST NICHT importiert (weder bare noch
---! aliasiert) — zwei Gruende, beide live reproduziert:
---! 1) Das sqlite-Modul exportiert selbst eine Funktion 'exec(handle, sql)',
---!    die den globalen exec()-Builtin (Prozessausfuehrung) STILLSCHWEIGEND
---!    ueberschreibt, sobald "sqlite" im selben Dateiscope importiert wird
---!    ("at: Index must be a number" — der Kommando-String wurde faelschlich
---!    als Datenbank-Handle interpretiert). docker_tools.pipe ruft exec()
---!    intensiv auf, darf das also nicht riskieren.
---! 2) Ein EIGENER (auch aliasierter) "sqlite"-Import erzeugt eine eigene,
---!    zum Rest der App inkompatible Handle-Registry — ein hier erzeugter
---!    Handle waere im Rest der App ungueltig und umgekehrt ("Invalid
+--! Security decision (agreed with the user): full Docker MCP servers with
+--! pull_image/create_container exist (e.g. afstanton/docker_mcp), but ship
+--! with their authors' own warning that they're "inherently unsafe" — host
+--! volume mounts in a container are effectively root access to the host.
+--! This module covers the concrete need (spin up a web server container)
+--! WITHOUT that capability:
+--!   - NO volume mounts possible (no parameter for it at all, not even
+--!     optional) — a container can therefore never reach the host filesystem.
+--!   - NO --privileged, NO --network=host, NO freely choosable extra Docker
+--!     flags — the command is built from a FIXED template, only validated
+--!     values get substituted in.
+--!   - Port binding defaults to 127.0.0.1 ONLY (not publicly reachable) —
+--!     a deliberately safe default, so a freshly set-up web server doesn't
+--!     immediately hang unprotected on the network.
+--!   - Image name/container name/ports are checked against strict, ANCHORED
+--!     regexes (^...$, not just "contains") before being inserted into the
+--!     exec() command. exec() tokenizes via splitShellWords and calls the
+--!     program DIRECTLY (no "sh -c", see pipe/pkg/object/builtins_sandbox.go)
+--!     — the regex check is still needed to prevent argument injection
+--!     (e.g. an "image name" like "nginx --privileged", which would
+--!     otherwise be passed through as an extra Docker flag).
+--! Needs "docker" in the sandbox exec_whitelist (added automatically, since
+--! the "docker" MCP server runs via npx and "docker" itself isn't called
+--! through MCP but directly here via exec() — hence added separately in
+--! setup_sandbox, see muninn.pipe).
+--! IMPORTANT: "sqlite" is DELIBERATELY NOT imported here (neither bare nor
+--! aliased) — two reasons, both reproduced live:
+--! 1) The sqlite module itself exports a function 'exec(handle, sql)',
+--!    which SILENTLY SHADOWS the global exec() builtin (process execution)
+--!    as soon as "sqlite" is imported in the same file scope
+--!    ("at: Index must be a number" — the command string got wrongly
+--!    interpreted as a database handle). docker_tools.pipe calls exec()
+--!    heavily, so it can't risk that.
+--! 2) A SEPARATE (even aliased) "sqlite" import creates its own handle
+--!    registry, incompatible with the rest of the app — a handle created
+--!    here would be invalid in the rest of the app and vice versa ("Invalid
 --!    database handle").
---! Stattdessen: mem.raw_exec/mem.raw_query (duenne Durchreichen in
---! memory.pipe, das "sqlite" bereits bare importiert und selbst nie
---! exec() aufruft — dort also unproblematisch, und alle DB-Handles bleiben
---! kompatibel, da es DIESELBE sqlite-Modul-Instanz ist wie ueberall sonst
---! in der App).
+--! Instead: mem.raw_exec/mem.raw_query (thin pass-throughs in memory.pipe,
+--! which already bare-imports "sqlite" and never calls exec() itself —
+--! unproblematic there, and all DB handles stay compatible since it's the
+--! SAME sqlite module instance as everywhere else in the app).
 import "modules/memory.pipe" as mem
 
---! Docker-Image-Name: registry/namespace/name:tag, nur uebliche Zeichen.
---! Bewusst einfach gehalten (lieber ein paar exotische, gueltige Image-Namen
---! ablehnen als eine komplexe Regex mit einem uebersehenen Schlupfloch).
---! Kein Leerzeichen, kein fuehrender Bindestrich (koennte sonst als
---! zusaetzliches Docker-Flag durchgehen) — das ist der sicherheitsrelevante
---! Teil, nicht die volle Docker-Namensgrammatik.
+--! Docker image name: registry/namespace/name:tag, common characters only.
+--! Deliberately kept simple (better to reject a few exotic, valid image
+--! names than a complex regex with an overlooked loophole). No spaces, no
+--! leading hyphen (could otherwise pass as an extra Docker flag) — that's
+--! the security-relevant part, not the full Docker naming grammar.
 export fn valid_image_name s
     regex_match "^[a-z0-9][a-z0-9._/-]*(:[a-zA-Z0-9._-]+)?$" s
 
---! Container-/Ressourcen-Name: Docker-uebliche Zeichen, muss mit
---! alphanumerisch beginnen.
+--! Container/resource name: common Docker characters, must start
+--! alphanumeric.
 export fn valid_identifier s
     regex_match "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$" s
 
---! Portnummer als reiner String, 1-65535.
+--! Port number as a plain string, 1-65535.
 export fn valid_port s
     if !(regex_match "^[0-9]{1,5}$" s)
         return false
@@ -73,34 +69,34 @@ fn docker_exec cmd_str
     r: exec cmd_str
     out: get r "output"
     if (get r "status") != 0
-        "Fehler (Status " ++ (to_str (get r "status")) ++ "): " ++ out
+        "Error (status " ++ (to_str (get r "status")) ++ "): " ++ out
     else
         if out == "" || out == nil
             "OK"
         else
             out
 
---! Job-Tracking fuer lange Hintergrund-Setups (siehe tool_docker_setup_starten
---! unten): 'docker run -d' liefert zurueck, sobald der Container GESTARTET
---! ist, nicht wenn dessen Setup-Skript fertig ist. Diese Tabelle haelt fest,
---! welcher Container zu welcher Nutzeranfrage gehoert, damit der Scheduler
---! (job_check, siehe muninn.pipe sched_tick) periodisch nachschauen kann, ob
---! die eigentliche Arbeit inzwischen fertig ist.
+--! Job tracking for long background setups (see tool_docker_setup_starten
+--! below): 'docker run -d' returns as soon as the container has STARTED,
+--! not when its setup script finishes. This table tracks which container
+--! belongs to which user request, so the scheduler (job_check, see
+--! sched_tick in muninn.pipe) can periodically check whether the actual
+--! work is done yet.
 export fn init_docker_jobs h
     mem.raw_exec h "CREATE TABLE IF NOT EXISTS docker_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, container_name TEXT, description TEXT, status TEXT, created TEXT, finished TEXT, result TEXT)"
     nil
 
---! Legt einen neuen Job an (status 'running'). Liefert die id.
+--! Creates a new job (status 'running'). Returns the id.
 export fn create_job h chat_id container_name description
     init_docker_jobs h
     mem.raw_exec h ("INSERT INTO docker_jobs (chat_id, container_name, description, status, created, finished, result) VALUES ('" ++ (mem.sql_escape (to_str chat_id)) ++ "', '" ++ (mem.sql_escape container_name) ++ "', '" ++ (mem.sql_escape description) ++ "', 'running', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "', '', '')")
     get (at (mem.raw_query h "SELECT max(id) AS mid FROM docker_jobs") 0) "mid"
 
---! Aktualisiert einen Job auf 'done'/'failed' inkl. Ergebnis/Logs.
+--! Updates a job to 'done'/'failed' including result/logs.
 export fn update_job h id status result
     mem.raw_exec h ("UPDATE docker_jobs SET status = '" ++ (mem.sql_escape status) ++ "', result = '" ++ (mem.sql_escape result) ++ "', finished = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
 
---! Liest einen Job (nil wenn nicht gefunden).
+--! Reads a job (nil if not found).
 export fn get_job h id
     rows: mem.raw_query h ("SELECT id, chat_id, container_name, description, status, result FROM docker_jobs WHERE id = " ++ (to_str id))
     if (len rows) > 0
@@ -108,32 +104,32 @@ export fn get_job h id
     else
         nil
 
---! Tool: Status der zuletzt gestarteten Hintergrund-Docker-Jobs dieses Chats
---! anzeigen. IMMER vor einem erneuten docker_hintergrund_setup-Aufruf fuer
---! eine Aufgabe pruefen, fuer die schon ein Job laufen KOENNTE — live
---! beobachtet: die KI startete auf jede Rueckfrage/jeden Fehlschlag hin
---! einfach einen weiteren Versuch, teils zwei parallel laufende Jobs fuer
---! dieselbe Aufgabe gleichzeitig (siehe swarm.pipe-Prompt-Hinweis).
+--! Tool: shows the status of this chat's most recently started background
+--! Docker jobs. ALWAYS check this before calling docker_hintergrund_setup
+--! again for a task that a job COULD already be running for — live
+--! observed: the AI would start another attempt on every follow-up
+--! question/failure, sometimes running two jobs for the same task in
+--! parallel (see the prompt hint in swarm.pipe).
 export fn tool_docker_job_status h chat_id
     rows: mem.raw_query h ("SELECT container_name, description, status, created FROM docker_jobs WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' ORDER BY id DESC LIMIT 5")
     if (len rows) == 0
-        return "Keine Hintergrund-Docker-Jobs bisher gestartet."
-    out: "Letzte Hintergrund-Docker-Jobs (neueste zuerst):\n"
+        return "No background Docker jobs started yet."
+    out: "Recent background Docker jobs (newest first):\n"
     for r in rows
         out: out ++ "- " ++ (get r "container_name") ++ " (" ++ (get r "created") ++ "): " ++ (get r "status") ++ " — " ++ (get r "description") ++ "\n"
     out
 
---! Bricht EINEN laufenden Hintergrund-Job aktiv ab: entfernt den Container
---! (best-effort per 'docker rm -f', egal ob er noch existiert) und markiert
---! den Job als 'cancelled'. KRITISCH: erst DAMIT gibt es ueberhaupt einen
---! echten Abbruch-Mechanismus — vorher konnte die KI nur ueber die rohen
---! MCP-Docker-Werkzeuge (docker_remove_container) einen Container loeschen,
---! OHNE dass job_check je davon erfuhr: der naechste Tick fand dann "Container
---! nicht mehr auffindbar", meldete das als Fehlschlag UND schlug einen
---! Fortsetzungsversuch vor — obwohl der Nutzer explizit abgebrochen hatte
---! (live beobachtet, siehe Kommentar bei cancel_all_running unten). Der
---! Status 'cancelled' wird von refresh_job_status/sched_tick als Endzustand
---! erkannt (kein Fehlschlag, keine Fortsetzungsfrage, keine Nutzernachricht).
+--! Actively cancels ONE running background job: removes the container
+--! (best-effort via 'docker rm -f', regardless of whether it still exists)
+--! and marks the job as 'cancelled'. CRITICAL: this is what FIRST provides
+--! a real cancellation mechanism at all — before, the AI could only delete
+--! a container via the raw MCP Docker tools (docker_remove_container),
+--! WITHOUT job_check ever finding out: the next tick would then find
+--! "container no longer found", report that as a failure AND suggest
+--! trying again — even though the user had explicitly cancelled (observed
+--! live, see the comment at cancel_all_running below). The 'cancelled'
+--! status is recognized by refresh_job_status/sched_tick as a terminal
+--! state (no failure, no follow-up question, no message to the user).
 export fn cancel_job h id
     job: get_job h id
     if job == nil
@@ -141,20 +137,18 @@ export fn cancel_job h id
     if (get job "status") == "running"
         name: get job "container_name"
         exec ("docker rm -f " ++ name)
-        update_job h id "cancelled" "Vom Nutzer abgebrochen."
+        update_job h id "cancelled" "Cancelled by the user."
     true
 
---! Bricht ALLE laufenden Hintergrund-Docker-Jobs eines Chats ab (siehe
---! /stop in muninn.pipe UND das KI-Werkzeug 'docker_jobs_abbrechen' in
---! swarm.pipe — /stop ist der ZUVERLAESSIGE, deterministische Weg, der NIE
---! von einer KI-Entscheidung abhaengt; das KI-Werkzeug ist nur ein
---! Sicherheitsnetz fuer natuerlichsprachliche Bitten mitten im Gespraech).
---! Live beobachtet: auf "Breche alle Aufgaben ab" behauptete die KI
---! zweimal, alles sei abgebrochen — startete aber jeweils SOFORT im selben
---! Zug einen neuen Hintergrund-Job weiter, weil es schlicht kein Werkzeug
---! gab, das eine echte, verifizierbare Abbruch-Aktion ausfuehrt; die KI
---! konnte nur BEHAUPTEN abzubrechen. Liefert die Liste der abgebrochenen
---! Job-IDs.
+--! Cancels ALL running background Docker jobs of a chat (see /stop in
+--! muninn.pipe AND the AI tool 'docker_jobs_abbrechen' in swarm.pipe —
+--! /stop is the RELIABLE, deterministic path that NEVER depends on an AI
+--! decision; the AI tool is only a safety net for natural-language requests
+--! mid-conversation). Observed live: on "cancel all tasks", the AI claimed
+--! twice that everything was cancelled — but immediately started a new
+--! background job right in the same breath, because there simply was no
+--! tool that performed a real, verifiable cancellation action; the AI could
+--! only CLAIM to cancel. Returns the list of cancelled job ids.
 export fn cancel_all_running h chat_id
     rows: mem.raw_query h ("SELECT id FROM docker_jobs WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND status = 'running'")
     ids: []
@@ -164,69 +158,68 @@ export fn cancel_all_running h chat_id
         push ids jid
     ids
 
---! docker_environments: dauerhafte, WIEDERVERWENDBARE Docker-Umgebungen —
---! bewusstes Gegenstueck zu docker_jobs, das EINMALIGE Hintergrund-
---! Aufgaben trackt (Repo testen, Paket installieren — die sollen fertig
---! werden und aufgeraeumt werden). Ohne dieses Register wusste die KI
---! nicht, was in einem bereits laufenden Container installiert ist bzw.
---! wofuer er gedacht ist, und legte fuer jede Anfrage, die "irgendein
---! Linux" braucht, reflexartig einen NEUEN Container an, statt einen
---! bestehenden wiederzuverwenden (Nutzerbeobachtung).
+--! docker_environments: durable, REUSABLE Docker environments — the
+--! deliberate counterpart to docker_jobs, which tracks ONE-OFF background
+--! tasks (test a repo, install a package — meant to finish and get cleaned
+--! up). Without this registry, the AI had no way of knowing what's
+--! installed in an already-running container or what it's for, and would
+--! reflexively spin up a NEW container for every request that needed "some
+--! Linux" instead of reusing an existing one (user observation).
 export fn init_docker_environments h
     mem.raw_exec h "CREATE TABLE IF NOT EXISTS docker_environments (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, container_name TEXT, purpose TEXT, installed TEXT, created TEXT, status TEXT)"
     nil
 
---! Tool: registriert einen Container als dauerhafte, wiederverwendbare
---! Umgebung — NICHT fuer einmalige Test-/Build-Jobs ueber
---! docker_hintergrund_setup (die docker_jobs-Tabelle trackt die bereits;
---! diese Faelle sollen NICHT wiederverwendet werden, siehe Kommentar oben).
+--! Tool: registers a container as a durable, reusable environment — NOT for
+--! one-off test/build jobs via docker_hintergrund_setup (the docker_jobs
+--! table already tracks those; those cases should NOT be reused, see the
+--! comment above).
 export fn tool_docker_environment_registrieren h chat_id container_name purpose installed
     if !(valid_identifier container_name)
-        return "Abgelehnt: '" ++ container_name ++ "' ist kein gueltiger Container-Name."
+        return "Rejected: '" ++ container_name ++ "' is not a valid container name."
     init_docker_environments h
     mem.raw_exec h ("INSERT INTO docker_environments (chat_id, container_name, purpose, installed, created, status) VALUES ('" ++ (mem.sql_escape (to_str chat_id)) ++ "', '" ++ (mem.sql_escape container_name) ++ "', '" ++ (mem.sql_escape purpose) ++ "', '" ++ (mem.sql_escape installed) ++ "', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "', 'active')")
-    "Umgebung '" ++ container_name ++ "' registriert: " ++ purpose
+    "Environment '" ++ container_name ++ "' registered: " ++ purpose
 
---! Tool: listet aktive registrierte dauerhafte Umgebungen dieses Chats —
---! VOR dem Anlegen eines neuen Containers fuer eine Anfrage, die eine
---! Linux-/Docker-Umgebung braucht, IMMER zuerst pruefen, ob schon eine
---! passende existiert.
+--! Tool: lists this chat's active registered durable environments — always
+--! check this FIRST before creating a new container for a request that
+--! needs a Linux/Docker environment, to see whether a suitable one already
+--! exists.
 export fn tool_docker_environments_auflisten h chat_id
     init_docker_environments h
     rows: mem.raw_query h ("SELECT container_name, purpose, installed FROM docker_environments WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND status = 'active' ORDER BY id DESC")
     if (len rows) == 0
-        return "Keine dauerhaften Docker-Umgebungen registriert."
-    out: "Registrierte dauerhafte Docker-Umgebungen:\n"
+        return "No durable Docker environments registered."
+    out: "Registered durable Docker environments:\n"
     for r in rows
-        out: out ++ "- " ++ (get r "container_name") ++ ": " ++ (get r "purpose") ++ " (installiert: " ++ (get r "installed") ++ ")\n"
+        out: out ++ "- " ++ (get r "container_name") ++ ": " ++ (get r "purpose") ++ " (installed: " ++ (get r "installed") ++ ")\n"
     out
 
---! Tool: entfernt eine registrierte Umgebung (Container UND Registrierung)
---! — z.B. wenn der Nutzer explizit sagt, eine dauerhafte Umgebung nicht
---! mehr zu brauchen.
+--! Tool: removes a registered environment (container AND registration) —
+--! e.g. when the user explicitly says they no longer need a durable
+--! environment.
 export fn tool_docker_environment_entfernen h chat_id container_name
     if !(valid_identifier container_name)
-        return "Abgelehnt: '" ++ container_name ++ "' ist kein gueltiger Container-Name."
+        return "Rejected: '" ++ container_name ++ "' is not a valid container name."
     init_docker_environments h
     rows: mem.raw_query h ("SELECT id FROM docker_environments WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND container_name = '" ++ (mem.sql_escape container_name) ++ "' AND status = 'active'")
     if (len rows) == 0
-        return "Keine aktive Umgebung mit dem Namen '" ++ container_name ++ "' registriert."
+        return "No active environment named '" ++ container_name ++ "' is registered."
     exec ("docker rm -f " ++ container_name)
     mem.raw_exec h ("UPDATE docker_environments SET status = 'removed' WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND container_name = '" ++ (mem.sql_escape container_name) ++ "'")
-    "Umgebung '" ++ container_name ++ "' entfernt."
+    "Environment '" ++ container_name ++ "' removed."
 
---! Prueft den ECHTEN Docker-Container-Zustand und aktualisiert den Job auf
---! 'done'/'failed' inkl. Logs, sobald der Container tatsaechlich beendet ist
---! — 'docker run -d' liefert nur den START zurueck (siehe Datei-Kommentar
---! oben zu init_docker_jobs), OHNE diese aktive Pruefung bliebe der Status
---! fuer immer 'running' (update_job wurde vor diesem Fix nirgends
---! aufgerufen — jeder Hintergrund-Job haette sich NIE als fertig gemeldet).
---! Von sched_tick (job_check in muninn.pipe) bei JEDEM Tick aufgerufen,
---! solange der Job noch 'running' ist. container_name kommt ausschliesslich
---! aus bereits bei der Erstellung validierten Namen (valid_identifier in
---! tool_docker_setup_starten) — sicher direkt in exec() einzusetzen, wie an
---! den anderen Docker-Tool-Stellen in dieser Datei. Liefert den (ggf.
---! aktualisierten) Job zurueck, oder nil wenn nicht gefunden.
+--! Checks the REAL Docker container state and updates the job to
+--! 'done'/'failed' including logs once the container has actually finished
+--! — 'docker run -d' only returns the START (see the init_docker_jobs file
+--! comment above), WITHOUT this active check the status would stay
+--! 'running' forever (update_job was never called anywhere before this
+--! fix — every background job would NEVER have reported itself done).
+--! Called by sched_tick (job_check in muninn.pipe) on EVERY tick, as long
+--! as the job is still 'running'. container_name comes exclusively from
+--! names already validated at creation time (valid_identifier in
+--! tool_docker_setup_starten) — safe to insert directly into exec(), as
+--! elsewhere in this file. Returns the (possibly updated) job, or nil if
+--! not found.
 export fn refresh_job_status h id
     job: get_job h id
     if job == nil
@@ -236,9 +229,9 @@ export fn refresh_job_status h id
     name: get job "container_name"
     ins: exec ("docker inspect --format {{.State.Running}}|{{.State.ExitCode}} " ++ name)
     if (get ins "status") != 0
-        --! Container nicht (mehr) auffindbar (z.B. von Hand entfernt) — als
-        --! fehlgeschlagen abschliessen statt fuer immer 'running' zu bleiben.
-        update_job h id "failed" ("Container '" ++ name ++ "' nicht mehr auffindbar: " ++ (trim (get ins "output")))
+        --! Container no longer found (e.g. removed by hand) — close it out
+        --! as failed instead of staying 'running' forever.
+        update_job h id "failed" ("Container '" ++ name ++ "' no longer found: " ++ (trim (get ins "output")))
         return get_job h id
     parts: split (trim (get ins "output")) "|"
     running: (len parts) > 0 && (at parts 0) == "true"
@@ -247,105 +240,102 @@ export fn refresh_job_status h id
     exit_code: "0"
     if (len parts) > 1
         exit_code: at parts 1
-    --! Auf die letzten 200 Zeilen begrenzt — reine Lesbarkeits-/Kosten-
-    --! Entscheidung fuer die Anzeige (der Testlauf SELBST laeuft komplett
-    --! unbeschraenkt durch), keine Sicherheits-Beschraenkung.
+    --! Capped at the last 200 lines — a pure readability/cost decision for
+    --! display (the test run ITSELF runs to completion fully unrestricted),
+    --! not a security restriction.
     logs_r: exec ("docker logs --tail 200 " ++ name)
     logs: trim (get logs_r "output")
     if logs == ""
-        logs: "(keine Ausgabe)"
+        logs: "(no output)"
     status: "done"
     if exit_code != "0"
-        status: "failed (Exit-Code " ++ exit_code ++ ")"
+        status: "failed (exit code " ++ exit_code ++ ")"
     update_job h id status logs
-    --! Logs/Ergebnis sind bereits in docker_jobs gesichert — kein Grund,
-    --! den gestoppten Container liegen zu lassen.
+    --! Logs/result are already saved in docker_jobs — no reason to leave
+    --! the stopped container lying around.
     exec ("docker rm " ++ name)
     get_job h id
 
---! Tool: ein Image von Docker Hub (oder anderer Registry) herunterladen.
+--! Tool: download an image from Docker Hub (or another registry).
 export fn tool_docker_pull_image image
     if !(valid_image_name image)
-        return "Abgelehnt: '" ++ image ++ "' ist kein gueltiger Image-Name."
+        return "Rejected: '" ++ image ++ "' is not a valid image name."
     docker_exec ("docker pull " ++ image)
 
---! Tool: einen neuen, laufenden Container aus einem (ggf. vorher gezogenen)
---! Image starten. KEINE Volume-Mounts, KEIN --privileged, KEIN
---! --network=host — siehe Datei-Kommentar oben. host_port/container_port
---! sind PFLICHT (kein Container ohne explizite, bewusste Port-Zuordnung).
---! public: "true" bindet auf alle Interfaces, sonst (Default, auch bei
---! jedem anderen Wert) nur auf 127.0.0.1.
+--! Tool: starts a new, running container from a (possibly previously
+--! pulled) image. NO volume mounts, NO --privileged, NO --network=host —
+--! see the file comment above. host_port/container_port are REQUIRED (no
+--! container without an explicit, deliberate port mapping). public: "true"
+--! binds to all interfaces, otherwise (default, and for any other value)
+--! 127.0.0.1 only.
 export fn tool_docker_create_container image name host_port container_port public
     if !(valid_image_name image)
-        return "Abgelehnt: '" ++ image ++ "' ist kein gueltiger Image-Name."
+        return "Rejected: '" ++ image ++ "' is not a valid image name."
     if !(valid_identifier name)
-        return "Abgelehnt: '" ++ name ++ "' ist kein gueltiger Container-Name."
+        return "Rejected: '" ++ name ++ "' is not a valid container name."
     if !(valid_port host_port)
-        return "Abgelehnt: '" ++ host_port ++ "' ist kein gueltiger Host-Port (1-65535)."
+        return "Rejected: '" ++ host_port ++ "' is not a valid host port (1-65535)."
     if !(valid_port container_port)
-        return "Abgelehnt: '" ++ container_port ++ "' ist kein gueltiger Container-Port (1-65535)."
+        return "Rejected: '" ++ container_port ++ "' is not a valid container port (1-65535)."
     bind: "127.0.0.1:"
     if public == "true"
         bind: ""
     cmd: "docker run -d --name " ++ name ++ " -p " ++ bind ++ host_port ++ ":" ++ container_port ++ " " ++ image
     res: docker_exec cmd
-    hint: " (nur auf localhost erreichbar — 127.0.0.1:" ++ host_port ++ ")"
+    hint: " (only reachable on localhost — 127.0.0.1:" ++ host_port ++ ")"
     if public == "true"
-        hint: " (oeffentlich erreichbar auf Port " ++ host_port ++ " — bewusst gewaehlt!)"
+        hint: " (publicly reachable on port " ++ host_port ++ " — deliberately chosen!)"
     res ++ hint
 
---! Escaped einen freien Text sicher als EIN einzelnes argv-Token fuer
---! 'sh -c "<...>"' ein. WICHTIG: exec() tokenisiert per splitShellWords
---! (siehe pipe/pkg/object/sandbox.go) direkt zu argv, OHNE echte Shell —
---! ein doppeltes Anfuehrungszeichen im Nutzertext koennte das Token sonst
---! vorzeitig beenden und den Rest als ZUSAETZLICHE, eigene argv-Elemente
---! auf HOST-Ebene einschleusen (z.B. weitere 'docker run'-Flags). Erst
---! Backslashes verdoppeln, DANACH Anfuehrungszeichen escapen — Reihenfolge
---! wichtig, sonst werden frisch eingefuegte Escape-Backslashes selbst
---! nochmal escaped.
+--! Safely escapes free text as ONE single argv token for 'sh -c "<...>"'.
+--! IMPORTANT: exec() tokenizes via splitShellWords (see
+--! pipe/pkg/object/sandbox.go) directly into argv, WITHOUT a real shell — a
+--! double quote in user text could otherwise end the token early and smuggle
+--! the rest in as ADDITIONAL, separate argv elements at the HOST level (e.g.
+--! extra 'docker run' flags). Double backslashes FIRST, THEN escape quotes —
+--! order matters, otherwise freshly inserted escape backslashes would
+--! themselves get escaped again.
 fn shell_quote s
     s: replace_all s "\\" "\\\\"
     s: replace_all s "\"" "\\\""
     s
 
---! Tool: einen Container starten und darin EINEN freien Setup-/Install-
---! Befehl ausfuehren, der laenger dauern darf (z.B. Paketinstallation) —
---! im Gegensatz zu tool_docker_create_container, das nur ein FERTIGES
---! Image direkt startet. 'docker run -d' liefert zurueck, sobald der
---! Container GESTARTET ist, NICHT wenn setup_command fertig ist — das
---! Setup laeuft im Hintergrund beim Docker-Daemon weiter, unabhaengig vom
---! Muninn-Prozess (uebersteht sogar einen Neustart). Der Aufrufer
---! (swarm.pipe tool_docker_hintergrund_setup) legt dafuer einen Job-
---! Tracking-Eintrag an und plant eine spaetere Pruefung per Scheduler ein.
---! setup_command ist zwangslaeufig freier Text (Installationsbefehle
---! brauchen && / ; — das ist gewollt, laeuft aber ISOLIERT IM CONTAINER,
---! nicht auf dem Host) — shell_quote verhindert nur, dass er aus seinem
---! EINEN Host-seitigen argv-Token ausbricht. Dieselben Grenzen wie
---! tool_docker_create_container: KEINE Volume-Mounts, KEIN --privileged,
---! KEIN --network=host, alles ueber ein festes Kommando-Template.
---! Der angeforderte Name bekommt IMMER automatisch einen Zeitstempel-Suffix
---! angehaengt — live beobachtet: bei einer Namenskollision (Retry nach
---! Fehlschlag) erfand die KI selbst immer neue Namen ("v3", "v4",
---! "pipe-test-neu", "v5", ...), teils sogar zwei parallel laufende Jobs fuer
---! dieselbe Aufgabe. Kollisionen sind mit dem Suffix strukturell
---! ausgeschlossen, die KI muss sich keine eindeutigen Namen mehr ausdenken.
---! Liefert {ok, name, message} statt nur einem String — der Aufrufer
---! (swarm.pipe tool_docker_hintergrund_setup) braucht den ECHTEN
---! (suffigierten) Namen fuers Job-Tracking, nicht den urspruenglich
---! angeforderten.
+--! Tool: starts a container and runs ONE free-form setup/install command
+--! inside it that may take longer (e.g. package installation) — unlike
+--! tool_docker_create_container, which only starts a FINISHED image
+--! directly. 'docker run -d' returns as soon as the container has STARTED,
+--! NOT when setup_command is done — the setup keeps running in the
+--! background on the Docker daemon, independent of the Muninn process
+--! (survives even a restart). The caller (swarm.pipe
+--! tool_docker_hintergrund_setup) creates a job-tracking entry for this and
+--! schedules a later check via the scheduler. setup_command is inevitably
+--! free text (install commands need && / ; — that's intentional, but it
+--! runs ISOLATED INSIDE THE CONTAINER, not on the host) — shell_quote only
+--! prevents it from breaking out of its ONE host-side argv token. Same
+--! limits as tool_docker_create_container: NO volume mounts, NO
+--! --privileged, NO --network=host, everything via a fixed command
+--! template. The requested name ALWAYS automatically gets a timestamp
+--! suffix appended — observed live: on a name collision (retry after a
+--! failure), the AI kept inventing new names itself ("v3", "v4",
+--! "pipe-test-new", "v5", ...), sometimes even running two jobs in parallel
+--! for the same task. Collisions are structurally ruled out by the suffix;
+--! the AI no longer has to invent unique names itself. Returns {ok, name,
+--! message} instead of just a string — the caller (swarm.pipe
+--! tool_docker_hintergrund_setup) needs the REAL (suffixed) name for job
+--! tracking, not the originally requested one.
 export fn tool_docker_setup_starten image name setup_command
     if !(valid_image_name image)
-        return {ok: false, name: nil, message: "Abgelehnt: '" ++ image ++ "' ist kein gueltiger Image-Name."}
+        return {ok: false, name: nil, message: "Rejected: '" ++ image ++ "' is not a valid image name."}
     if !(valid_identifier name)
-        return {ok: false, name: nil, message: "Abgelehnt: '" ++ name ++ "' ist kein gueltiger Container-Name."}
+        return {ok: false, name: nil, message: "Rejected: '" ++ name ++ "' is not a valid container name."}
     if setup_command == nil || (trim setup_command) == ""
-        return {ok: false, name: nil, message: "Abgelehnt: kein setup_command angegeben."}
+        return {ok: false, name: nil, message: "Rejected: no setup_command given."}
     base: name
     if (len base) > 50
         base: substring base 0 50
     final_name: base ++ "-" ++ (to_str now)
     cmd: "docker run -d --name " ++ final_name ++ " " ++ image ++ " sh -c \"" ++ (shell_quote setup_command) ++ "\""
     res: docker_exec cmd
-    if contains res "Fehler"
+    if contains res "Error"
         return {ok: false, name: final_name, message: res}
     {ok: true, name: final_name, message: res}
