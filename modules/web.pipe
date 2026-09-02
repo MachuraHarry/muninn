@@ -212,3 +212,71 @@ export fn research query
     set out "context" ctx
     set out "sources" sources
     out
+
+--! Creates a new Telegraph (telegra.ph) account and returns its
+--! access_token, or nil on any error. Call once and persist the token
+--! (see tool_bericht_veroeffentlichen in swarm.pipe) — every subsequent
+--! page publishes under the same account. short_name/author_name are
+--! shown on telegra.ph itself, not to Muninn's users. Takes an unused
+--! argument (Pipe convention for a callable with no real parameters, see
+--! e.g. cur_dbh in swarm.pipe — calling a function with zero arguments
+--! only references its value, it doesn't invoke it).
+export fn web_telegraph_account _
+    hdrs: {}
+    r: nil
+    try
+        r: http_request "GET" "https://api.telegra.ph/createAccount?short_name=Muninn&author_name=Muninn" hdrs
+    catch
+        return nil
+    j: nil
+    try
+        j: parse_json (get r "body")
+    catch
+        return nil
+    if j == nil || (get j "ok") != true
+        return nil
+    get (get j "result") "access_token"
+
+--! Publishes a Telegraph page and returns its URL, or nil on any error.
+--! Telegraph (telegra.ph) is Telegram's own simple publishing platform —
+--! every page it hosts automatically gets Instant View (Telegram's fast,
+--! native-feeling in-app reader) when linked in a chat, unlike regular
+--! web pages, which only get Instant View if the target SITE has a
+--! registered template (out of a bot's control). Text is split into
+--! paragraphs on blank lines, each becoming one <p> node (see Telegraph's
+--! Node content format) — no other formatting is attempted, so **/*
+--! markdown-style emphasis shows up literally rather than rendered.
+export fn web_telegraph_publish access_token title text
+    nodes: []
+    for para in (split text "\n\n")
+        p: trim para
+        if p != ""
+            node: {}
+            set node "tag" "p"
+            set node "children" ([p])
+            push nodes node
+    if (len nodes) == 0
+        return nil
+    body: {}
+    set body "access_token" access_token
+    set body "title" title
+    set body "author_name" "Muninn"
+    set body "content" nodes
+    hdrs: {}
+    set hdrs "Content-Type" "application/json"
+    r: nil
+    try
+        r: http_request "POST" "https://api.telegra.ph/createPage" hdrs (to_json body)
+    catch e
+        print ("Telegraph publish request failed: " ++ (to_str e))
+        return nil
+    j: nil
+    try
+        j: parse_json (get r "body")
+    catch e2
+        print ("Telegraph publish: bad response: " ++ (to_str (get r "body")))
+        return nil
+    if j == nil || (get j "ok") != true
+        print ("Telegraph publish rejected: " ++ (to_str j))
+        return nil
+    get (get j "result") "url"
