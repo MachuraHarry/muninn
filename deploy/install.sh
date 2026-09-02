@@ -21,12 +21,96 @@ PIPE_DIR="/root/pipe"
 GO_VERSION="1.25.0"
 PIPER_RELEASE="2023.11.14-2"
 
+# ---- visuals -------------------------------------------------------------
+# Colors are defined with $'...' (ANSI-C quoting) so the variables hold the
+# real ESC byte, not the four literal characters "\033" -- that way both
+# printf '%s' and heredoc variable substitution (used in the closing
+# summary boxes) emit working escape sequences without needing `echo -e`
+# or `printf %b` anywhere (which would also wrongly reinterpret backslashes
+# that happen to appear inside user-entered values, e.g. a token).
+# Disabled outright when stdout isn't a terminal (piped to a log file,
+# redirected, etc.) so log files don't fill up with raw escape codes.
+if [ -t 1 ]; then
+    C_RESET=$'\033[0m';  C_BOLD=$'\033[1m';  C_DIM=$'\033[2m'
+    C_BLUE=$'\033[38;5;39m'; C_CYAN=$'\033[38;5;51m'; C_GREEN=$'\033[38;5;42m'
+    C_YELLOW=$'\033[38;5;220m'; C_RED=$'\033[38;5;203m'
+else
+    C_RESET=''; C_BOLD=''; C_DIM=''
+    C_BLUE=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''
+fi
+
+banner() {
+    [ -t 1 ] || return 0
+    printf '\n  %s%sM U N I N N%s\n' "$C_BOLD" "$C_CYAN" "$C_RESET"
+    printf '  %sself-hosted AI companion for Telegram — installer%s\n' "$C_DIM" "$C_RESET"
+    printf '  %s%s%s\n\n' "$C_CYAN" "────────────────────────────────────────" "$C_RESET"
+}
+
+log()  { printf '\n%s%s▸ %s%s\n' "$C_BOLD" "$C_BLUE" "$1" "$C_RESET"; }
+ok()   { printf '  %s✓%s %s\n' "$C_GREEN" "$C_RESET" "$1"; }
+info() { printf '  %s·%s %s\n' "$C_DIM" "$C_RESET" "$1"; }
+warn() { printf '  %s!%s %s\n' "$C_YELLOW" "$C_RESET" "$1"; }
+
+# Runs "$@" in the background with a spinner next to $1's message, capturing
+# its output so the screen stays clean on success and only spills the log on
+# failure. Falls back to plain start/end lines (no animation) when stdout
+# isn't a terminal. Propagates the wrapped command's exit status, so a
+# failing step still stops the script under `set -e` exactly like running
+# it inline would have.
+spin() {
+    local msg="$1"; shift
+    local logfile status
+    logfile="$(mktemp)"
+
+    if [ ! -t 1 ]; then
+        printf '  · %s...\n' "$msg"
+        if "$@" >"$logfile" 2>&1; then
+            printf '  OK %s\n' "$msg"
+            rm -f "$logfile"
+            return 0
+        fi
+        status=$?
+        printf '  FAILED %s\n' "$msg"
+        cat "$logfile" >&2
+        rm -f "$logfile"
+        return "$status"
+    fi
+
+    "$@" >"$logfile" 2>&1 &
+    local pid=$! frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf '\r  %s%s%s %s' "$C_CYAN" "${frames:$i:1}" "$C_RESET" "$msg"
+        i=$(( (i + 1) % ${#frames} ))
+        sleep 0.08
+    done
+    wait "$pid"
+    status=$?
+    if [ "$status" -eq 0 ]; then
+        printf '\r  %s✓%s %s        \n' "$C_GREEN" "$C_RESET" "$msg"
+    else
+        printf '\r  %s✗%s %s\n' "$C_RED" "$C_RESET" "$msg"
+        cat "$logfile" >&2
+    fi
+    rm -f "$logfile"
+    return "$status"
+}
+
+banner
+
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Please run as root (e.g. with sudo)." >&2
+    printf '%s✗ Please run as root (e.g. with sudo).%s\n' "$C_RED" "$C_RESET" >&2
     exit 1
 fi
 
-log() { echo -e "\n\033[1;34m==> $1\033[0m"; }
+# Architecture detection
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64)  GO_ARCH="amd64";  PIPER_ARCH="x86_64" ;;
+    aarch64) GO_ARCH="arm64";  PIPER_ARCH="aarch64" ;;
+    armv7l)  GO_ARCH="armv6l"; PIPER_ARCH="armv7l" ;;
+    *)       printf '%s✗ Unsupported architecture: %s%s\n' "$C_RED" "$ARCH" "$C_RESET" >&2; exit 1 ;;
+esac
+info "Detected architecture: $ARCH (Go: $GO_ARCH, Piper: $PIPER_ARCH)"
 
 # Prompts "$1 [Y/n]" (default="y") or "$1 [y/N]" (default="n") and prints
 # "y" or "n" to stdout — call as `answer=$(ask_yn "..." y)`. Reads from the
@@ -35,8 +119,8 @@ log() { echo -e "\n\033[1;34m==> $1\033[0m"; }
 # already be consumed/redirected by the time it runs.
 ask_yn() {
     local prompt="$1" default="$2" ans suffix
-    if [ "$default" = "n" ]; then suffix="[y/N]"; else suffix="[Y/n]"; fi
-    read -r -p "$prompt $suffix: " ans </dev/tty
+    if [ "$default" = "n" ]; then suffix="y/N"; else suffix="Y/n"; fi
+    read -r -p "$(printf '%s?%s %s %s[%s]%s ' "$C_CYAN" "$C_RESET" "$prompt" "$C_DIM" "$suffix" "$C_RESET")" ans </dev/tty
     ans="${ans:-$default}"
     case "$ans" in
         y|Y|yes|Yes|j|J|ja|Ja) echo "y" ;;
@@ -62,34 +146,31 @@ run_env_wizard() {
     # any error) is the only reliable way to tell whether it's really usable.
     if ! { true < /dev/tty; } 2>/dev/null; then
         cp "$example_file" "$env_file"
-        echo "→ Not running interactively (no terminal available) — .env created from"
-        echo "  .env.example instead. Fill it in by hand (see checklist below), or re-run"
-        echo "  this script in an interactive shell for the guided setup."
+        warn "Not running interactively (no terminal available) — .env created from"
+        printf '    .env.example instead. Fill it in by hand (see checklist below), or re-run\n'
+        printf '    this script in an interactive shell for the guided setup.\n'
         ENV_WIZARD_RAN=0
         return
     fi
 
-    echo
-    echo "════════════════════════════════════════════════════════════════"
-    echo " Muninn setup — a few questions, then .env gets written for you."
-    echo " Press Enter to accept a [default] where one is shown."
-    echo "════════════════════════════════════════════════════════════════"
+    printf '\n  %s%s%s\n' "$C_CYAN" "════════════════════════════════════════════════════════════════" "$C_RESET"
+    printf '  %s Muninn setup — a few questions, then .env gets written for you.%s\n' "$C_BOLD" "$C_RESET"
+    printf '   Press Enter to accept a %s[default]%s where one is shown.\n' "$C_DIM" "$C_RESET"
+    printf '  %s%s%s\n' "$C_CYAN" "════════════════════════════════════════════════════════════════" "$C_RESET"
 
-    echo
-    echo "--- Required ---"
+    printf '\n  %sRequired%s\n' "$C_BOLD" "$C_RESET"
     local telegram_token="" telegram_chat_id="" deepseek_key=""
     while [ -z "$telegram_token" ]; do
-        read -r -p "Telegram bot token (from @BotFather, /newbot): " telegram_token </dev/tty
+        read -r -p "$(printf '  %s?%s Telegram bot token (from @BotFather, /newbot): ' "$C_CYAN" "$C_RESET")" telegram_token </dev/tty
     done
     while [ -z "$telegram_chat_id" ]; do
-        read -r -p "Your Telegram chat ID (from @userinfobot): " telegram_chat_id </dev/tty
+        read -r -p "$(printf '  %s?%s Your Telegram chat ID (from @userinfobot): ' "$C_CYAN" "$C_RESET")" telegram_chat_id </dev/tty
     done
     while [ -z "$deepseek_key" ]; do
-        read -r -p "DeepSeek API key (platform.deepseek.com): " deepseek_key </dev/tty
+        read -r -p "$(printf '  %s?%s DeepSeek API key (platform.deepseek.com): ' "$C_CYAN" "$C_RESET")" deepseek_key </dev/tty
     done
 
-    echo
-    echo "--- Optional capabilities (MCP tools, no extra setup needed) ---"
+    printf '\n  %sOptional capabilities%s %s(MCP tools, no extra setup needed)%s\n' "$C_BOLD" "$C_RESET" "$C_DIM" "$C_RESET"
     local want_filesystem want_memory want_thinking want_browser want_docker want_whisper want_ppt want_word
     want_filesystem=$(ask_yn "  Filesystem access (read/write files in mcp_data/)" y)
     want_memory=$(ask_yn "  Persistent memory / knowledge graph tools" y)
@@ -100,13 +181,12 @@ run_env_wizard() {
     want_ppt=$(ask_yn "  PowerPoint presentation creation" y)
     want_word=$(ask_yn "  Word document creation (incl. PDF export)" y)
 
-    echo
-    echo "--- Web dashboard ---"
+    printf '\n  %sWeb dashboard%s\n' "$C_BOLD" "$C_RESET"
     local want_dashboard dashboard_bind="127.0.0.1:8787" dashboard_token=""
     want_dashboard=$(ask_yn "  Enable the web dashboard (chat/memories/goals in a browser)" n)
     if [ "$want_dashboard" = "y" ]; then
         local bind_in=""
-        read -r -p "    Bind address [127.0.0.1:8787]: " bind_in </dev/tty
+        read -r -p "$(printf '    %s?%s Bind address [127.0.0.1:8787]: ' "$C_CYAN" "$C_RESET")" bind_in </dev/tty
         dashboard_bind="${bind_in:-127.0.0.1:8787}"
         local want_token
         want_token=$(ask_yn "    Protect it with a random access token (?token=...)" y)
@@ -115,11 +195,10 @@ run_env_wizard() {
         fi
     fi
 
-    echo
-    echo "--- Schedule ---"
+    printf '\n  %sSchedule%s\n' "$C_BOLD" "$C_RESET"
     local tz_offset_in="" briefing_time_in=""
-    read -r -p "  Timezone offset from UTC in seconds, e.g. 7200 for UTC+2 [0]: " tz_offset_in </dev/tty
-    read -r -p "  Daily briefing time, HH:MM [08:00]: " briefing_time_in </dev/tty
+    read -r -p "$(printf '  %s?%s Timezone offset from UTC in seconds, e.g. 7200 for UTC+2 [0]: ' "$C_CYAN" "$C_RESET")" tz_offset_in </dev/tty
+    read -r -p "$(printf '  %s?%s Daily briefing time, HH:MM [08:00]: ' "$C_CYAN" "$C_RESET")" briefing_time_in </dev/tty
     local tz_offset="${tz_offset_in:-0}" briefing_time="${briefing_time_in:-08:00}"
 
     # Build the MCP_AUTO_SERVERS JSON array from the selected toggles — each
@@ -170,50 +249,69 @@ MUNINN_TZ_OFFSET=$tz_offset
 ENVEOF
 
     echo
-    echo "→ .env written to $env_file."
+    ok ".env written to $env_file."
     if [ "$want_dashboard" = "y" ]; then
         if [ -n "$dashboard_token" ]; then
-            echo "  Dashboard (once running): http://$dashboard_bind/?token=$dashboard_token"
+            info "Dashboard (once running): http://$dashboard_bind/?token=$dashboard_token"
         else
-            echo "  Dashboard (once running): http://$dashboard_bind/"
+            info "Dashboard (once running): http://$dashboard_bind/"
         fi
     fi
     ENV_WIZARD_RAN=1
 }
 
 log "System packages (git, curl, ffmpeg, ca-certificates, make, poppler-utils)"
-apt-get update -qq
-apt-get install -y -qq git curl ffmpeg ca-certificates make poppler-utils >/dev/null
+spin "Updating package index" apt-get update -qq
+spin "Installing system packages" apt-get install -y -qq git curl ffmpeg ca-certificates make poppler-utils
 
 log "Go ${GO_VERSION}+ (Ubuntu's apt package is too old for pipe's go.mod)"
 current_go=""
-if [ -x /usr/local/go/bin/go ]; then
-    current_go="$(/usr/local/go/bin/go version | awk '{print $3}' | sed 's/go//')"
-fi
+current_go_dir=""
+# Check multiple possible Go locations (skip binaries that can't execute,
+# e.g. wrong architecture left behind by a previous install)
+for go_bin in /usr/local/go/bin/go "$HOME/go-sdk/go/bin/go" /home/droid/go-sdk/go/bin/go; do
+    if [ -x "$go_bin" ]; then
+        current_go="$("$go_bin" version 2>/dev/null | awk '{print $3}' | sed 's/go//')" || true
+        if [ -n "$current_go" ]; then
+            current_go_dir="$(dirname "$(dirname "$go_bin")")"
+            break
+        fi
+    fi
+done
 if [ "$current_go" != "$GO_VERSION" ]; then
     tmp_tar="$(mktemp --suffix=.tar.gz)"
-    curl -LsSf -o "$tmp_tar" "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+    spin "Downloading Go ${GO_VERSION}" curl -LsSf -o "$tmp_tar" "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
     rm -rf /usr/local/go
-    tar -C /usr/local -xzf "$tmp_tar"
+    spin "Extracting Go" tar -C /usr/local -xzf "$tmp_tar"
     rm "$tmp_tar"
+    ok "Go ${GO_VERSION} installed"
 else
-    echo "Go ${GO_VERSION} already installed, skipping."
+    info "Go ${GO_VERSION} already installed, skipping."
+    # If the working Go binary is not at /usr/local/go (e.g. broken
+    # x86_64 leftover from a previous install), remove the broken
+    # directory and point PATH to the actual Go installation.
+    if [ "$current_go_dir" != "/usr/local/go" ] && [ -d /usr/local/go ]; then
+        warn "Removing broken /usr/local/go (wrong arch), Go is at $current_go_dir"
+        rm -rf /usr/local/go
+    fi
 fi
-export PATH="/usr/local/go/bin:$PATH"
+export PATH="/usr/local/go/bin:${current_go_dir:+$current_go_dir/bin:}$PATH"
 
 log "Node.js 20.x (for the npx-based MCP servers)"
 if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1)" != "v20" ]; then
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null
-    apt-get install -y -qq nodejs >/dev/null
+    spin "Adding NodeSource repository" bash -c 'set -o pipefail; curl -fsSL https://deb.nodesource.com/setup_20.x | bash -'
+    spin "Installing Node.js" apt-get install -y -qq nodejs
+    ok "Node.js $(node --version) installed"
 else
-    echo "Node.js $(node --version) already installed, skipping."
+    info "Node.js $(node --version) already installed, skipping."
 fi
 
 log "Docker Engine (for the restricted Docker extension + mcp-docker-server)"
 if ! command -v docker >/dev/null 2>&1; then
-    curl -fsSL https://get.docker.com | sh >/dev/null
+    spin "Installing Docker" bash -c 'set -o pipefail; curl -fsSL https://get.docker.com | sh'
+    ok "Docker $(docker --version) installed"
 else
-    echo "Docker $(docker --version) already installed, skipping."
+    info "Docker $(docker --version) already installed, skipping."
 fi
 # The package installing successfully doesn't mean the daemon is actually
 # running (e.g. restricted/nested virtualization on some budget VPS
@@ -221,18 +319,19 @@ fi
 # instead of silently completing while Muninn's Docker features would be
 # broken.
 if docker info >/dev/null 2>&1; then
-    echo "Docker daemon is up and responding."
+    ok "Docker daemon is up and responding."
 else
-    echo "WARNING: Docker is installed but the daemon isn't responding (checked 'docker info')." >&2
-    echo "         Muninn's Docker features (docker_tools.pipe, mcp-docker-server) won't work" >&2
-    echo "         until this is fixed. Check: systemctl status docker" >&2
+    warn "Docker is installed but the daemon isn't responding (checked 'docker info')."
+    printf '    Muninn'"'"'s Docker features (docker_tools.pipe, mcp-docker-server) won'"'"'t work\n' >&2
+    printf '    until this is fixed. Check: systemctl status docker\n' >&2
 fi
 
 log "uv/uvx (for the Python-based MCP servers: Google Workspace, PowerPoint, Word)"
 if [ ! -x "$HOME/.local/bin/uvx" ]; then
-    curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
+    spin "Installing uv" bash -c 'set -o pipefail; curl -LsSf https://astral.sh/uv/install.sh | sh'
+    ok "uv/uvx installed"
 else
-    echo "uv/uvx already installed, skipping."
+    info "uv/uvx already installed, skipping."
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -240,32 +339,41 @@ log "Piper TTS + German voice (for voice messages, see tts_synth.sh)"
 mkdir -p /opt/piper/voices
 if [ ! -x /opt/piper/piper/piper ]; then
     tmp_tar="$(mktemp --suffix=.tar.gz)"
-    curl -LsSf -o "$tmp_tar" "https://github.com/rhasspy/piper/releases/download/${PIPER_RELEASE}/piper_linux_x86_64.tar.gz"
-    tar -C /opt/piper -xzf "$tmp_tar"
+    spin "Downloading Piper" curl -LsSf -o "$tmp_tar" "https://github.com/rhasspy/piper/releases/download/${PIPER_RELEASE}/piper_linux_${PIPER_ARCH}.tar.gz"
+    spin "Extracting Piper" tar -C /opt/piper -xzf "$tmp_tar"
     rm "$tmp_tar"
+    ok "Piper installed"
 else
-    echo "Piper binary already present, skipping."
+    info "Piper binary already present, skipping."
 fi
 if [ ! -f /opt/piper/voices/de_DE-thorsten-high.onnx ]; then
-    curl -LsSf -o /opt/piper/voices/de_DE-thorsten-high.onnx \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx"
-    curl -LsSf -o /opt/piper/voices/de_DE-thorsten-high.onnx.json \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json"
+    spin "Downloading German voice model" bash -c "
+        curl -LsSf -o /opt/piper/voices/de_DE-thorsten-high.onnx \
+            'https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx' &&
+        curl -LsSf -o /opt/piper/voices/de_DE-thorsten-high.onnx.json \
+            'https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json'
+    "
+    ok "Voice model installed"
 else
-    echo "Voice model already present, skipping."
+    info "Voice model already present, skipping."
 fi
 
 log "Build the Pipe interpreter (${PIPE_DIR})"
 if [ ! -d "$PIPE_DIR" ]; then
-    git clone https://github.com/MachuraHarry/pipe "$PIPE_DIR"
+    spin "Cloning pipe" git clone -q https://github.com/MachuraHarry/pipe "$PIPE_DIR"
+else
+    info "$PIPE_DIR already present, skipping clone."
 fi
-(cd "$PIPE_DIR" && PATH="/usr/local/go/bin:$PATH" make build)
+spin "Building pipe (make build)" bash -c "cd '$PIPE_DIR' && PATH='/usr/local/go/bin:$PATH' make build"
 cp "$PIPE_DIR/bin/pipe" /usr/local/bin/pipe.new
 mv /usr/local/bin/pipe.new /usr/local/bin/pipe
+ok "pipe installed to /usr/local/bin/pipe"
 
 log "Muninn itself (${MUNINN_DIR})"
 if [ ! -d "$MUNINN_DIR" ]; then
-    git clone https://github.com/MachuraHarry/muninn "$MUNINN_DIR"
+    spin "Cloning muninn" git clone -q https://github.com/MachuraHarry/muninn "$MUNINN_DIR"
+else
+    info "$MUNINN_DIR already present, skipping clone."
 fi
 mkdir -p "$MUNINN_DIR/mcp_data" "$MUNINN_DIR/google_creds" "$MUNINN_DIR/tts_tmp"
 chmod 700 "$MUNINN_DIR/google_creds"
@@ -275,22 +383,22 @@ ENV_WIZARD_RAN=0
 if [ ! -f "$MUNINN_DIR/.env" ]; then
     run_env_wizard "$MUNINN_DIR/.env" "$MUNINN_DIR/.env.example"
 else
-    echo ".env already exists, not overwriting."
+    info ".env already exists, not overwriting."
 fi
 
 log "Set up the systemd service"
 cp "$MUNINN_DIR/deploy/muninn.service" /etc/systemd/system/muninn.service
 systemctl daemon-reload
-echo "Service installed (not started yet — see checklist below)."
+ok "Service installed (not started yet — see checklist below)."
 
 if [ "$ENV_WIZARD_RAN" = "1" ]; then
 cat <<EOF
 
-════════════════════════════════════════════════════════════════
- Installation complete. .env is fully filled in — ready to start:
-════════════════════════════════════════════════════════════════
+${C_GREEN}════════════════════════════════════════════════════════════════${C_RESET}
+${C_BOLD} Installation complete. .env is fully filled in — ready to start:${C_RESET}
+${C_GREEN}════════════════════════════════════════════════════════════════${C_RESET}
 
-  systemctl enable --now muninn
+  ${C_BOLD}systemctl enable --now muninn${C_RESET}
   journalctl -u muninn -f      # follow logs live
 
 Optional, not covered by the setup wizard:
@@ -303,14 +411,14 @@ Optional, not covered by the setup wizard:
 
 To test manually without systemd:
      cd $MUNINN_DIR && pipe muninn.pipe
-════════════════════════════════════════════════════════════════
+${C_GREEN}════════════════════════════════════════════════════════════════${C_RESET}
 EOF
 else
 cat <<EOF
 
-════════════════════════════════════════════════════════════════
- Installation complete. Before the first start, by hand:
-════════════════════════════════════════════════════════════════
+${C_YELLOW}════════════════════════════════════════════════════════════════${C_RESET}
+${C_BOLD} Installation complete. Before the first start, by hand:${C_RESET}
+${C_YELLOW}════════════════════════════════════════════════════════════════${C_RESET}
 
 1. Fill in $MUNINN_DIR/.env (required):
    - TELEGRAM_BOT_TOKEN       from @BotFather (/newbot)
@@ -336,6 +444,6 @@ cat <<EOF
 
 To test manually without systemd:
      cd $MUNINN_DIR && pipe muninn.pipe
-════════════════════════════════════════════════════════════════
+${C_YELLOW}════════════════════════════════════════════════════════════════${C_RESET}
 EOF
 fi
