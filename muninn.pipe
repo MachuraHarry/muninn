@@ -186,7 +186,7 @@ fn greeting_text _
 
 --! Help text.
 fn help_text _
-    "/start      — greeting\n/help       — this help\n/status     — Muninn's state\n/costs      — AI running-cost summary (sessions, tokens, $)\n/list       — your most important memories\n/search     — search the web (e.g. /search Huginn and Muninn)\n/learn      — learn a document (e.g. /learn https://... or send me a .txt/.md file)\n/graph      — query the knowledge graph (e.g. /graph Harry)\n/remind     — schedule a reminder (e.g. /remind in 10 minutes about the break)\n/reminders  — show open reminders/briefings\n/briefing   — activate the daily morning briefing (/briefing stop to cancel)\n/reset      — reset conversation history (fresh context for follow-up questions)\n/consolidate — dream: condense old conversations, let memories decay/be forgotten\n/settings   — configure response style, language, proactive messages, memory aggressiveness\n/stop       — IMMEDIATELY cancel all running background Docker jobs and scheduled continuations"
+    "/start      — greeting\n/help       — this help\n/status     — Muninn's state\n/costs      — AI running-cost summary (sessions, tokens, $)\n/list       — your most important memories\n/search     — search the web (e.g. /search Huginn and Muninn)\n/learn      — learn a document (e.g. /learn https://... or send me a .txt/.md file)\n/graph      — query the knowledge graph (e.g. /graph Harry)\n/remind     — schedule a reminder (e.g. /remind in 10 minutes about the break)\n/reminders  — show open reminders/briefings\n/goals      — show open goals, tap to mark done\n/briefing   — activate the daily morning briefing (/briefing stop to cancel)\n/reset      — reset conversation history (fresh context for follow-up questions)\n/consolidate — dream: condense old conversations, let memories decay/be forgotten\n/settings   — configure response style, language, proactive messages, memory aggressiveness\n/stop       — IMMEDIATELY cancel all running background Docker jobs and scheduled continuations"
 
 --! Status text (statistics from the soul).
 fn status_text dbh
@@ -516,6 +516,22 @@ fn handle_message token cid text dbh
         return nil
     if low == "/list"
         tel.tel_send_message token cid (list_text dbh)
+        return nil
+    if low == "/goals"
+        rows: mem.list_goals dbh 20
+        open_rows: []
+        for r in rows
+            if (get r "status") != "done"
+                push open_rows r
+        if (len open_rows) == 0
+            tel.tel_send_message token cid "No open goals right now. Muninn creates one automatically when you mention a genuine long-term objective (not a one-off task)."
+        else
+            kb: []
+            for r in open_rows
+                row: []
+                push row (tel.tel_button ("✓ " ++ (truncate_status (get r "goal_text") 60)) ("goal_done:" ++ (to_str (get r "id"))))
+                push kb row
+            tel.tel_send_message_kb token cid "Open goals — tap one to mark it done:" kb
         return nil
     if low == "/reminders"
         rows: sched.list dbh cid
@@ -1140,6 +1156,29 @@ fn handle_callback token dbh cbq
         if txt != nil
             mem.adjust_by_content dbh txt (-1)
             tel.tel_send_message token cid "Noted — I'll lower its importance."
+        return nil
+    --! /goals: a tapped goal is removed from the inline keyboard in place
+    --! (not just a plain confirmation) — an already-answered callback_query
+    --! (see tel_answer_callback above) can't be answered a second time, so
+    --! the visual feedback here has to be the message edit itself.
+    if (len data) > 10 && (substring data 0 10) == "goal_done:"
+        gid: to_num (substring data 10 (len data))
+        if gid != nil
+            mem.set_goal_status dbh gid "done"
+        old_kb: get (get msg "reply_markup") "inline_keyboard"
+        new_kb: []
+        if old_kb != nil
+            for row in old_kb
+                keep_row: []
+                for btn in row
+                    if (get btn "callback_data") != data
+                        push keep_row btn
+                if (len keep_row) > 0
+                    push new_kb keep_row
+        if (len new_kb) == 0
+            tel.tel_edit_message_text token cid message_id "All goals done! 🎉"
+        else
+            tel.tel_edit_message_text_kb token cid message_id "Open goals — tap one to mark it done:" new_kb
         return nil
     --! /settings menu (see settings_menu_text/settings_kb above): each
     --! button rotates its OWN setting to the next value (setting_cycle in
