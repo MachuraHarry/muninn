@@ -1,9 +1,9 @@
---! muninn.pipe — Einstiegspunkt: Muninn, der Langzeit-KI-Agent.
---! Telegram-Bot (Long-Polling) + persistente sqlite-"Seele".
---! Aufruf:  pipe muninn.pipe             (Produktions-Loop, Telegram)
---!          pipe muninn.pipe once        (ein Polling-Zyklus, dann exit — zum Testen)
---!          pipe muninn.pipe consolidate (Konsolidierung, z.B. per Cron)
---!          pipe muninn.pipe web         (Web-Dashboard, siehe DASHBOARD_BIND/-TOKEN in .env)
+--! muninn.pipe — entry point: Muninn, the long-term AI agent.
+--! Telegram bot (long-polling) + persistent sqlite "soul".
+--! Usage:   pipe muninn.pipe             (production loop, Telegram)
+--!          pipe muninn.pipe once        (one polling cycle, then exit — for testing)
+--!          pipe muninn.pipe consolidate (consolidation, e.g. via cron)
+--!          pipe muninn.pipe web         (web dashboard, see DASHBOARD_BIND/-TOKEN in .env)
 import "modules/telegram.pipe" as tel
 import "modules/memory.pipe" as mem
 import "modules/swarm.pipe" as grm
@@ -14,9 +14,9 @@ import "modules/dashboard.pipe" as dash
 import "modules/scheduler.pipe" as sched
 import "modules/docker_tools.pipe" as dt
 
---! Lädt KEY=VALUE-Zeilen aus einer .env-Datei in eine Map.
---! Werte werden am ERSTEN "=" getrennt (nicht bei jedem), damit Werte, die selbst
---! "=" enthalten (z.B. MCP_SERVERS-JSON mit URL-Query-Strings), nicht abgeschnitten werden.
+--! Loads KEY=VALUE lines from a .env file into a map.
+--! Values are split at the FIRST "=" (not every one), so values that themselves
+--! contain "=" (e.g. MCP_SERVERS JSON with URL query strings) aren't truncated.
 fn load_env path
     env_map: {}
     if file_exists path
@@ -32,110 +32,108 @@ fn load_env path
                         set env_map key (trim val)
     env_map
 
---! Wert-Lookup: zuerst echte Umgebungsvariable, dann .env.
+--! Value lookup: real environment variable first, then .env.
 fn cfg_get cfg key
     v: env key
     if v != nil && v != ""
         return v
     get cfg key
 
---! Richtet den AI-Provider ein (DeepSeek). Muninn soll nur DeepSeek nutzen;
---! andere Provider-Varianten sind hier bewusst nicht erlaubt. Sobald die
---! Sandbox aktiv ist, blockiert `env()` sicherheitshalber jeden Namen, der
---! wie ein Secret aussieht (*KEY*/*TOKEN*/*SECRET*) — DEEPSEEK_API_KEY muss
---! also VOR set_sandbox gelesen sein.
+--! Sets up the AI provider (DeepSeek). Muninn is meant to use only DeepSeek;
+--! other provider variants are deliberately not allowed here. Once the
+--! sandbox is active, `env()` blocks any name that looks like a secret
+--! (*KEY*/*TOKEN*/*SECRET*) as a safety measure — so DEEPSEEK_API_KEY must
+--! be read BEFORE set_sandbox.
 fn setup_ai key
     ai_provider "deepseek" {thinking: false}
     if key != nil && key != ""
         ai_set_key "deepseek" key
     ai_model "deepseek-chat"
-    --! Hartes Zeitlimit PRO EINZELNEM KI-Aufruf: haengt der Provider (langsamer
-    --! oder stehen gebliebener Stream/Verbindung), blockierte der Aufruf vorher
-    --! UNBEGRENZT — und damit den gesamten single-threaded Bot-Loop (Muninn
-    --! wirkte dann lebendig, antwortete aber auf nichts mehr; ein Restart war
-    --! der einzige Ausweg). Mit Timeout wirft der Aufruf stattdessen einen
-    --! Fehler, den die bestehenden try/catch-Pfade abfangen und ehrlich
-    --! beantworten. 120s ist grosszuegig genug fuer lange Kontext-/Swarm-
-    --! Aufrufe, verhindert aber das ewige Haengen.
+    --! Hard time limit PER INDIVIDUAL AI call: if the provider hangs (a slow
+    --! or stuck stream/connection), the call used to block INDEFINITELY —
+    --! and with it the entire single-threaded bot loop (Muninn then looked
+    --! alive but stopped responding to anything; a restart was the only way
+    --! out). With a timeout, the call instead throws an error that the
+    --! existing try/catch paths catch and answer honestly. 120s is generous
+    --! enough for long context/swarm calls, but prevents hanging forever.
     ai_timeout 120
 
---! Sandbox-Profile sind unveraenderlich und ihr Name ist einmalig vergeben
---! (ein zweiter sandbox_profile-Aufruf mit demselben Namen scheitert mit
---! "already exists") — max_tool_calls zaehlt daher NICHT pro Nachricht oder
---! Gremium-Lauf, sondern kumulativ ueber die GESAMTE Prozess-Laufzeit seit
---! dem letzten Neustart. Live beobachtet: nach genug Nachrichten seit dem
---! letzten Neustart lief eine an sich harmlose Anfrage (Recherche + langes
---! Dokument, viele Werkzeugaufrufe) mitten in echte "E_SANDBOX: max tool
---! calls exceeded"-Fehler, die die KI dann als raetselhaftes "technisches
---! Limit" ausgab und sich in wiederholten, sich selbst widersprechenden
---! Rettungsversuchen verhedderte — nichts davon hatte mit dem KI-Provider
---! zu tun. setup_sandbox bekommt deshalb bei jedem Aufruf einen neuen,
---! durchnummerierten Profilnamen (SANDBOX_STATE.gen), damit ein frischer
---! Aufruf (siehe die beiden run_gremium_stream-Aufrufstellen) das Budget
---! zuverlaessig pro Nachricht statt kumulativ ueber die Prozesslaufzeit
---! zuruecksetzt. Mutable Map statt eines bloßen Zaehlers, weil eine
---! bare Neuzuweisung einer Top-Level-Variable INNERHALB einer Funktion in
---! Pipe nicht nach außen persistiert (siehe COST_STATE fuer dasselbe Muster).
+--! Sandbox profiles are immutable and their name is assigned once (a
+--! second sandbox_profile call with the same name fails with "already
+--! exists") — so max_tool_calls does NOT count per message or gremium run,
+--! but cumulatively over the ENTIRE process runtime since the last
+--! restart. Observed live: after enough messages since the last restart,
+--! an otherwise harmless request (research + a long document, many tool
+--! calls) ran straight into a real "E_SANDBOX: max tool calls exceeded"
+--! error, which the AI then reported as a mysterious "technical limit" and
+--! got tangled up in repeated, self-contradicting recovery attempts — none
+--! of which had anything to do with the AI provider. setup_sandbox
+--! therefore gets a new, numbered profile name on every call
+--! (SANDBOX_STATE.gen), so a fresh call (see the two run_gremium_stream
+--! call sites) reliably resets the budget per message instead of
+--! cumulatively over the process runtime. A mutable map instead of a bare
+--! counter, because a bare reassignment of a top-level variable INSIDE a
+--! function does not persist outward in Pipe (see COST_STATE for the same
+--! pattern).
 SANDBOX_STATE: {gen: 0}
 
---! Aktiviert Muninns Sandbox-Profil (P1: Tool-Sandboxing) frisch (siehe
---! SANDBOX_GEN oben). fs bleibt "full", da die reine-Pipe-sqlite-Persistenz
---! (muninn.db) Dateizugriff braucht; exec ist nur erlaubt, wenn MCP-Server
---! konfiguriert sind, und dann ausschliesslich auf deren Kommandos
---! beschraenkt (Lehre der Sandbox-Audit-Reihe: nie unbeschraenkter exec an
---! die KI). network bleibt offen, da Web-Recherche beliebige Treffer-URLs
---! abruft; eine feste Whitelist wuerde die Recherche brechen.
+--! Activates Muninn's sandbox profile (P1: tool sandboxing) fresh (see
+--! SANDBOX_STATE above). fs stays "full", since pure-Pipe sqlite
+--! persistence (muninn.db) needs file access; exec is only allowed when
+--! MCP servers are configured, and then strictly limited to their
+--! commands (lesson from the sandbox audit series: never give the AI
+--! unrestricted exec). network stays open, since web research fetches
+--! arbitrary result URLs; a fixed whitelist would break research.
 fn setup_sandbox servers
     wl: mcp.exec_whitelist_for servers
-    --! "docker" zusaetzlich zur Whitelist: modules/docker_tools.pipe ruft
-    --! `docker pull`/`docker run` direkt per exec() auf (nicht ueber den
-    --! MCP-Server "docker", der nur bestehende Container verwaltet). Siehe
-    --! Sicherheits-Kommentar in docker_tools.pipe — strikt validierte
-    --! Argumente, kein Volume-Mount, kein --privileged.
+    --! "docker" added to the whitelist: modules/docker_tools.pipe calls
+    --! `docker pull`/`docker run` directly via exec() (not through the
+    --! "docker" MCP server, which only manages existing containers). See
+    --! the security comment in docker_tools.pipe — strictly validated
+    --! arguments, no volume mount, no --privileged.
     push wl "docker"
-    --! "tts_synth.sh" zusaetzlich zur Whitelist: swarm.pipe (tts_synthesize)
-    --! ruft die feste Piper->ffmpeg-Sprachsynthese-Pipeline direkt per exec()
-    --! auf (kein MCP-Server dafuer). Fester Skriptpfad, keine AI-kontrollierbaren
-    --! Flags — nur die beiden Dateipfade werden uebergeben.
+    --! "tts_synth.sh" added to the whitelist: swarm.pipe (tts_synthesize)
+    --! calls the fixed Piper->ffmpeg speech-synthesis pipeline directly via
+    --! exec() (no MCP server for this). Fixed script path, no AI-controllable
+    --! flags — only the two file paths are passed.
     push wl "tts_synth.sh"
-    --! "systemd-notify" zusaetzlich zur Whitelist: der Haupt-Loop (siehe
-    --! unten) meldet sich damit periodisch beim systemd-Watchdog
-    --! (WatchdogSec in muninn.service) — reines Trust-System-Kommando ohne
-    --! AI-kontrollierbare Argumente, kein MCP-Server dafuer noetig.
+    --! "systemd-notify" added to the whitelist: the main loop (see below)
+    --! uses it to periodically check in with the systemd watchdog
+    --! (WatchdogSec in muninn.service) — a purely trusted system command with
+    --! no AI-controllable arguments, no MCP server needed for it.
     push wl "systemd-notify"
-    --! "pdftotext" zusaetzlich zur Whitelist: handle_document ruft Poppler
-    --! direkt per exec() auf, um hochgeladene PDFs ins Gedaechtnis zu lernen
-    --! (siehe extract_pdf_text oben) — kein MCP-Server dafuer noetig, das
-    --! Kommando wird komplett aus einem festen Template gebaut (nur der
-    --! bereits lokal gespeicherte Dateipfad wird eingesetzt, siehe shell_quote).
+    --! "pdftotext" added to the whitelist: handle_document calls Poppler
+    --! directly via exec() to learn uploaded PDFs into memory (see
+    --! extract_pdf_text above) — no MCP server needed for it, the command is
+    --! built entirely from a fixed template (only the already locally saved
+    --! file path is inserted, see shell_quote).
     push wl "pdftotext"
     allow_exec: (len wl) > 0
     set SANDBOX_STATE "gen" ((get SANDBOX_STATE "gen") + 1)
     name: "muninn-" ++ (to_str (get SANDBOX_STATE "gen"))
-    --! max_tool_calls gilt fuer die GESAMTE Gremiums-Anfrage (Recherche +
-    --! evtl. Dokument-Erstellung zusammen), seit obigem Fix pro Nachricht neu.
-    --! 40 war dafuer zu knapp: live beobachtet, dass allein die Recherche zu
-    --! einem schwer im Web dokumentierten Thema schon 40+ Tool-Aufrufe braucht
-    --! (viele Fehlversuche/Praezisierungen), WOVOR ueberhaupt ein Kapitel ins
-    --! Dokument geschrieben wurde — das Limit schlug dann mitten in der
-    --! Dokument-Erstellung zu, das Dokument blieb nur teilweise befuellt.
-    --! timeout: 180 — WATCHDOG gegen einen exec()-Aufruf, der nie zurueckkehrt.
-    --! Live reproduziert: die KI versuchte auf Nutzerwunsch, per exec() einen
-    --! HTTP-Server im VORDERGRUND zu starten — exec() wartet aber, bis der
-    --! Befehl SELBST beendet ist, und ein dauerhaft laufender Server beendet
-    --! sich nie. Ohne Timeout blockierte das den GESAMTEN Bot fuer immer
-    --! (Pipe ist bewusst single-threaded), UND weil der Telegram-Offset erst
-    --! NACH erfolgreicher Verarbeitung gespeichert wird, haengte sich Muninn
-    --! bei jedem Neustart sofort wieder an derselben Nachricht auf. Der
-    --! Interpreter selbst kennt bereits einen exec()-Timeout
-    --! (sandbox.go/buildExecCommand, context.WithTimeout) — er war nur nie
-    --! aktiviert (Timeout: 0 = unbegrenzt ohne dieses Feld). 180s deckt den
-    --! langsamsten legitimen Fall (docker_pull_image bei einem grossen, noch
-    --! nicht gecachten Image) grosszuegig ab, garantiert aber, dass KEIN
-    --! exec()-Aufruf mehr unbegrenzt haengen kann. MCP-Werkzeugaufrufe (z.B.
-    --! whisper) haben bereits eigenstaendig einen 120s-Timeout im
-    --! MCP-Client selbst (pkg/mcp/client.go, defaultCallTimeout) — nur
-    --! exec() hatte diese Luecke.
+    --! max_tool_calls applies to the ENTIRE gremium request (research +
+    --! possible document creation together), reset per message since the fix
+    --! above. 40 was too tight for that: observed live that research alone
+    --! into a topic poorly documented on the web can already need 40+ tool
+    --! calls (many failed attempts/refinements), BEFORE a single chapter was
+    --! even written into the document — the limit then hit mid document
+    --! creation, leaving the document only partially filled.
+    --! timeout: 180 — a WATCHDOG against an exec() call that never returns.
+    --! Reproduced live: at the user's request, the AI tried to start an HTTP
+    --! server in the FOREGROUND via exec() — but exec() waits until the
+    --! command itself finishes, and a permanently running server never
+    --! finishes. Without a timeout this blocked the ENTIRE bot forever (Pipe
+    --! is deliberately single-threaded), AND because the Telegram offset is
+    --! only saved AFTER successful processing, Muninn immediately got stuck
+    --! on the same message again on every restart. The interpreter itself
+    --! already has an exec() timeout (sandbox.go/buildExecCommand,
+    --! context.WithTimeout) — it just was never activated (Timeout: 0 =
+    --! unlimited without this field). 180s generously covers the slowest
+    --! legitimate case (docker_pull_image for a large, not-yet-cached image),
+    --! while guaranteeing that NO exec() call can hang unboundedly anymore.
+    --! MCP tool calls (e.g. whisper) already have their own 120s timeout in
+    --! the MCP client itself (pkg/mcp/client.go, defaultCallTimeout) — only
+    --! exec() had this gap.
     sandbox_profile name {fs: "full", network: true, exec: allow_exec, exec_whitelist: wl, ai: true, max_tool_calls: 150, timeout: 180, audit_log: true}
     set_sandbox name
     nil
@@ -144,9 +142,9 @@ fn ensure_mcp_for_task task dbh
     results: mcp.ensure_for_task mcp_auto_servers task
     for r in results
         if get r "ok"
-            print ("MCP autonom verbunden: " ++ (get r "alias"))
+            print ("MCP auto-connected: " ++ (get r "alias"))
         else
-            print ("MCP autonom fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
+            print ("MCP auto-connect failed (" ++ (get r "alias") ++ "): " ++ (get r "error"))
             mem.log_error dbh ("mcp_autonom:" ++ (get r "alias")) (get r "error")
     if (len results) > 0
         grm.init_gremium 0
@@ -172,7 +170,7 @@ fn connected_mcp_tool_names _
         nil
     out
 
---! Prüft, ob eine Chat-ID bedient werden darf (leere Whitelist = alle erlauben).
+--! Checks whether a chat ID is allowed to be served (empty whitelist = allow all).
 fn is_allowed cid allowed
     if allowed == nil || allowed == ""
         return true
@@ -182,57 +180,57 @@ fn is_allowed cid allowed
             return true
     false
 
---! Begrüßungstext.
+--! Greeting text.
 fn greeting_text _
-    "Muninn ist online.\n\nDu kannst mir etwas sagen, das ich mir merken soll (z.B. \"Merke dir, dass ich Tee mag\"), mir eine Aufgabe geben (z.B. \"Erledige das Reporting\"), eine Frage stellen oder im Web suchen (z.B. \"/search Odin nordische Mythologie\").\n\n/help für alle Befehle."
+    "Muninn is online.\n\nYou can tell me something to remember (e.g. \"Remember that I like tea\"), give me a task (e.g. \"Handle the reporting\"), ask a question, or search the web (e.g. \"/search Odin Norse mythology\").\n\n/help for all commands."
 
---! Hilfetext.
+--! Help text.
 fn help_text _
-    "/start      — Begrüßung\n/help       — diese Hilfe\n/status     — Zustand von Muninn\n/costs      — KI-Betriebskosten zusammengefasst (Sessions, Tokens, $)\n/list       — deine wichtigsten Erinnerungen\n/search     — im Web suchen (z.B. /search Huginn und Muninn)\n/learn      — Dokument lernen (z.B. /learn https://... oder eine .txt/.md-Datei schicken)\n/graph      — Wissensgraph abfragen (z.B. /graph Harry)\n/remind     — Erinnerung planen (z.B. /remind in 10 Minuten an die Pause)\n/reminders  — offene Erinnerungen/Briefings anzeigen\n/briefing   — tägliches Morgen-Briefing aktivieren (/briefing stop zum Abbestellen)\n/reset      — Gesprächsverlauf zurücksetzen (frischer Kontext für Folgefragen)\n/consolidate — Traum: alte Gespräche verdichten, Erinnerungen altern/vergessen lassen\n/settings   — Antwortstil, Sprache, proaktive Nachrichten, Gedächtnis-Aggressivität einstellen\n/stop       — SOFORT alle laufenden Hintergrund-Docker-Jobs und geplanten Fortsetzungen abbrechen"
+    "/start      — greeting\n/help       — this help\n/status     — Muninn's state\n/costs      — AI running-cost summary (sessions, tokens, $)\n/list       — your most important memories\n/search     — search the web (e.g. /search Huginn and Muninn)\n/learn      — learn a document (e.g. /learn https://... or send me a .txt/.md file)\n/graph      — query the knowledge graph (e.g. /graph Harry)\n/remind     — schedule a reminder (e.g. /remind in 10 minutes about the break)\n/reminders  — show open reminders/briefings\n/briefing   — activate the daily morning briefing (/briefing stop to cancel)\n/reset      — reset conversation history (fresh context for follow-up questions)\n/consolidate — dream: condense old conversations, let memories decay/be forgotten\n/settings   — configure response style, language, proactive messages, memory aggressiveness\n/stop       — IMMEDIATELY cancel all running background Docker jobs and scheduled continuations"
 
---! Status-Text (Statistiken aus der Seele).
+--! Status text (statistics from the soul).
 fn status_text dbh
     n: mem.memory_count dbh
     tool_n: len (mcp_tools)
     gc: mem.graph_counts dbh
-    "Muninn-Status:\n• Erinnerungen: " ++ (to_str n) ++ "\n• Wissensgraph: " ++ (to_str (get gc "entities")) ++ " Entitäten, " ++ (to_str (get gc "relations")) ++ " Relationen\n• Provider: DeepSeek\n• Gremium: 4-5 Agenten (mit Web-Recherche + MCP-Werkzeugen)\n• Werkzeuge gesamt (lokal + MCP): " ++ (to_str tool_n) ++ "\n• Executor: aktiv\n• Web: DDG + Wikipedia"
+    "Muninn status:\n• Memories: " ++ (to_str n) ++ "\n• Knowledge graph: " ++ (to_str (get gc "entities")) ++ " entities, " ++ (to_str (get gc "relations")) ++ " relations\n• Provider: DeepSeek\n• Gremium: 4-5 agents (with web research + MCP tools)\n• Total tools (local + MCP): " ++ (to_str tool_n) ++ "\n• Executor: active\n• Web: DDG + Wikipedia"
 
---! /costs: KI-generierte Kosten-Zusammenfassung. Die Zahlen selbst werden
---! DETERMINISTISCH aus cost_log berechnet (mem.cost_summary) — der KI wird
---! nur die Aufgabe gegeben, diese FESTEN Zahlen lesbar zu formulieren, sie
---! soll NICHTS selbst berechnen oder schaetzen (sonst Halluzinationsrisiko
---! bei Zahlen, siehe die Lehren aus dem restlichen Gremium heute).
+--! /costs: AI-generated cost summary. The numbers themselves are computed
+--! DETERMINISTICALLY from cost_log (mem.cost_summary) — the AI is only
+--! given the task of phrasing these FIXED numbers readably; it must NOT
+--! compute or estimate anything itself (otherwise risk of hallucinated
+--! numbers, see the lessons from the rest of the gremium today).
 fn costs_text dbh
     s: mem.cost_summary dbh
     sessions: get s "sessions"
     if (len sessions) == 0
-        return "Noch keine Kosten aufgezeichnet — das sammelt sich waehrend des laufenden Betriebs an."
-    lines: "Gesamt ueber " ++ (to_str (get s "session_count")) ++ " Sessions: $" ++ (to_str (get s "total_cost_usd")) ++ ", " ++ (to_str (get s "total_tokens")) ++ " Tokens, " ++ (to_str (get s "total_calls")) ++ " KI-Aufrufe.\n\nLetzte Sessions (neueste zuerst):\n"
+        return "No costs recorded yet — this accumulates as the bot keeps running."
+    lines: "Total across " ++ (to_str (get s "session_count")) ++ " sessions: $" ++ (to_str (get s "total_cost_usd")) ++ ", " ++ (to_str (get s "total_tokens")) ++ " tokens, " ++ (to_str (get s "total_calls")) ++ " AI calls.\n\nRecent sessions (newest first):\n"
     i: 0
     while i < 10 && i < (len sessions)
         sess: at sessions i
-        lines: lines ++ "- Session " ++ (to_str (get sess "session_id")) ++ " (" ++ (get sess "first_ts") ++ " bis " ++ (get sess "last_ts") ++ "): $" ++ (to_str (get sess "cost_usd")) ++ ", " ++ (to_str (get sess "tokens")) ++ " Tokens, " ++ (to_str (get sess "calls")) ++ " Aufrufe, " ++ (to_str (get sess "cache_hits")) ++ " Cache-Treffer\n"
+        lines: lines ++ "- Session " ++ (to_str (get sess "session_id")) ++ " (" ++ (get sess "first_ts") ++ " to " ++ (get sess "last_ts") ++ "): $" ++ (to_str (get sess "cost_usd")) ++ ", " ++ (to_str (get sess "tokens")) ++ " tokens, " ++ (to_str (get sess "calls")) ++ " calls, " ++ (to_str (get sess "cache_hits")) ++ " cache hits\n"
         i: i + 1
     summary: ""
     try
-        summary: ai_chat "Du bist Muninn und fasst Betriebskosten fuer deinen Nutzer zusammen. Du bekommst FERTIG BERECHNETE Zahlen — uebernimm sie EXAKT und woertlich, berechne oder schaetze NICHTS selbst nach, erfinde keine zusaetzlichen Zahlen. Schreib eine kurze, natuerliche Zusammenfassung in 3-5 Saetzen: Gesamtkosten, wie viele Sessions, grober Trend falls erkennbar (steigt/faellt/stabil), und ob irgendeine Session auffaellig teuer war. Telegram-Formatierung: einfache Sternchen fuer Fettung, keine Ueberschriften." lines
+        summary: ai_chat "You are Muninn and you summarize running costs for your user. You are given ALREADY-COMPUTED numbers — take them over EXACTLY and verbatim, don't compute or estimate anything yourself, don't invent additional numbers. Write a short, natural summary in 3-5 sentences: total cost, how many sessions, a rough trend if visible (rising/falling/stable), and whether any session was noticeably expensive. Telegram formatting: single asterisks for bold, no headings." lines
     catch
         summary: ""
     if summary == nil || summary == ""
         return lines
     summary ++ "\n\n" ++ lines
 
---! Liste der wichtigsten Erinnerungen.
+--! List of the most important memories.
 fn list_text dbh
     rows: mem.top_memories dbh 10
     if (len rows) == 0
-        return "Noch keine Erinnerungen gespeichert."
-    out: "Deine wichtigsten Erinnerungen:\n"
+        return "No memories saved yet."
+    out: "Your most important memories:\n"
     for r in rows
         out: out ++ "• " ++ (get r "content") ++ "\n"
     out
 
---! Verarbeitet ein eingehendes Update (extrahiert Text, behandelt Nicht-Text).
+--! Processes an incoming update (extracts text, handles non-text).
 fn handle_update token cid msg dbh
     txt: get msg "text"
     if txt == nil
@@ -244,7 +242,7 @@ fn handle_update token cid msg dbh
             handle_photo token cid dbh msg
             return nil
         if (get msg "sticker") != nil
-            tel.tel_send_message token cid "Netter Sticker — ich verstehe aber nur Text."
+            tel.tel_send_message token cid "Nice sticker — but I only understand text."
             return nil
         if (get msg "voice") != nil
             handle_voice token cid dbh msg
@@ -252,8 +250,8 @@ fn handle_update token cid msg dbh
         return nil
     handle_message token cid txt dbh
 
---! Prüft anhand Dateiname/Mime-Type, ob ein Dokument reiner Text ist (.txt/.md
---! oder mime "text/..."). PDFs/Binärformate liefern hier false.
+--! Checks by filename/mime type whether a document is plain text (.txt/.md
+--! or mime "text/..."). PDFs/binary formats return false here.
 fn is_text_doc fname mime
     if mime != nil
         if contains mime "text/"
@@ -267,40 +265,40 @@ fn is_text_doc fname mime
         return true
     false
 
---! Prueft anhand Dateiname/Mime-Type, ob ein Dokument eine PDF ist.
+--! Checks by filename/mime type whether a document is a PDF.
 fn is_pdf_doc fname mime
     if mime != nil
         if contains mime "application/pdf"
             return true
     contains (lower fname) ".pdf"
 
---! Escaped einen Pfad fuer die Einbettung als EIN Host-seitiges argv-Token in
---! einen exec()-Kommandostring (siehe splitShellWords in
---! pipe/pkg/object/sandbox.go: nur "\\" und "\"" werden innerhalb doppelter
---! Anfuehrungszeichen entschluesselt) — dieselbe Eskalation wie shell_quote
---! in docker_tools.pipe, hier lokal dupliziert statt importiert (docker_tools.pipe
---! exportiert sie bewusst nicht, siehe dessen Kommentar zum sqlite-Shadowing-Bug,
---! den ein zusaetzlicher Import hier unnoetig riskieren wuerde).
+--! Escapes a path for embedding as ONE host-side argv token in an exec()
+--! command string (see splitShellWords in pipe/pkg/object/sandbox.go: only
+--! "\\" and "\"" are unescaped inside double quotes) — the same escaping
+--! as shell_quote in docker_tools.pipe, duplicated locally here instead of
+--! imported (docker_tools.pipe deliberately doesn't export it, see its
+--! comment on the sqlite shadowing bug that an extra import here would
+--! needlessly risk).
 fn shell_quote s
     s: replace_all s "\\" "\\\\"
     s: replace_all s "\"" "\\\""
     s
 
---! Extrahiert reinen Text aus einer lokalen PDF-Datei per `pdftotext`
---! (Poppler, systemweit installiert, kein API-Key/Cloud-Dienst — siehe
---! setup_sandbox fuer die exec-Whitelist-Eintragung). "-q" unterdrueckt
---! Poppler-Warnungen (z.B. zu fehlenden eingebetteten Fonts) — ohne das
---! landen sie ueber exec()s CombinedOutput MITTEN im extrahierten Text.
---! "-" als Ausgabe-Pfad schreibt den Text nach stdout statt in eine Datei.
---! Liefert nil, wenn die PDF keinen Text-Layer hat (z.B. reine Bild-Scans
---! ohne OCR — Poppler liefert dann leeren Output, kein Fehler) oder
---! pdftotext scheitert (kaputte/verschluesselte Datei).
+--! Extracts plain text from a local PDF file via `pdftotext` (Poppler,
+--! installed system-wide, no API key/cloud service — see setup_sandbox
+--! for the exec whitelist entry). "-q" suppresses Poppler warnings (e.g.
+--! about missing embedded fonts) — without it they end up IN THE MIDDLE
+--! of the extracted text via exec()'s CombinedOutput. "-" as the output
+--! path writes the text to stdout instead of a file. Returns nil if the
+--! PDF has no text layer (e.g. pure image scans without OCR — Poppler
+--! then returns empty output, no error) or pdftotext fails (corrupt/
+--! encrypted file).
 fn extract_pdf_text path dbh
     cmd: "pdftotext -q \"" ++ (shell_quote path) ++ "\" -"
     r: exec cmd
     if (get r "status") != 0
         msg: "Status " ++ (to_str (get r "status")) ++ ": " ++ path
-        print ("pdftotext fehlgeschlagen (" ++ msg ++ ")")
+        print ("pdftotext failed (" ++ msg ++ ")")
         mem.log_error dbh "pdftotext" msg
         return nil
     out: get r "output"
@@ -315,8 +313,8 @@ fn is_mcp_server_question low
         return true
     false
 
---! Nur der Dateiname-Teil, ohne Pfad-Traversal — Telegrams file_name kommt
---! vom Nutzer/Absender und darf niemals ungeprueft in einen Speicherpfad.
+--! Only the filename part, no path traversal — Telegram's file_name comes
+--! from the user/sender and must never go unchecked into a storage path.
 fn safe_filename fname
     base: fname
     parts: split fname "/"
@@ -324,90 +322,90 @@ fn safe_filename fname
         base: at parts ((len parts) - 1)
     base: replace_all base ".." ""
     if base == nil || base == ""
-        base: "datei"
+        base: "file"
     base
 
---! Verarbeitet ein hochgeladenes Dokument (Telegram "document"-Nachricht).
---! JEDE Datei wird roh im mcp_data-Ordner gespeichert (fuer werkzeug_
---! filesystem lesbar/bearbeitbar); reine Textdateien werden zusaetzlich direkt
---! ins Gedaechtnis gelernt (ingest_document), PDFs ueber pdftotext (siehe
---! extract_pdf_text oben) — andere Binaerformate bleiben nur gespeichert.
---! Live-Status wie beim Gremium (siehe tel_finalize/swarm_status_text unten):
---! EINE Platzhalternachricht wird ueber die Verarbeitungsschritte hinweg per
---! editMessageText aktualisiert, statt stillschweigend erst am Ende zu
---! antworten — bei einer PDF (Download + Extraktion + Lernen) kann das
---! spuerbar dauern, ohne Zwischenstand wirkt Muninn dabei wie haengengeblieben.
+--! Processes an uploaded document (Telegram "document" message). EVERY
+--! file is saved raw in the mcp_data folder (readable/editable for
+--! tool_filesystem); plain text files are additionally learned directly
+--! into memory (ingest_document), PDFs via pdftotext (see
+--! extract_pdf_text above) — other binary formats are only saved.
+--! Live status like with the gremium (see tel_finalize/swarm_status_text
+--! below): ONE placeholder message is updated via editMessageText across
+--! the processing steps, instead of silently answering only at the end —
+--! for a PDF (download + extraction + learning) this can take a
+--! noticeable while; without an intermediate status Muninn would look
+--! stuck.
 fn handle_document token cid dbh doc
     fname: get doc "file_name"
     if fname == nil
-        fname: "dokument"
+        fname: "document"
     mime: get doc "mime_type"
     tel.tel_send_chat_action token cid "typing"
     message_id: nil
-    ph: tel.tel_send_message token cid "📄 Lade Dokument herunter..."
+    ph: tel.tel_send_message token cid "📄 Downloading document..."
     if (get ph "ok") == true
         message_id: get (get ph "result") "message_id"
     fpath: tel.tel_get_file token (get doc "file_id")
     if fpath == nil
-        tel_finalize token cid message_id "Datei konnte nicht abgerufen werden." nil
+        tel_finalize token cid message_id "Couldn't retrieve the file." nil
         return nil
     content: tel.tel_download_file token fpath
     if content == nil || content == ""
-        tel_finalize token cid message_id "Datei war leer oder nicht lesbar." nil
+        tel_finalize token cid message_id "File was empty or unreadable." nil
         return nil
     safe_name: safe_filename fname
     save_path: "/root/muninn/mcp_data/" ++ safe_name
     write_file save_path content
-    out: "Gespeichert: " ++ safe_name ++ " (" ++ (to_str (len content)) ++ " Bytes)."
+    out: "Saved: " ++ safe_name ++ " (" ++ (to_str (len content)) ++ " bytes)."
     if is_text_doc fname mime
-        tel.tel_edit_message_text token cid message_id "🧠 Lerne den Inhalt..."
+        tel.tel_edit_message_text token cid message_id "🧠 Learning the content..."
         res: mem.ingest_document dbh content ("telegram-datei:" ++ fname) fname 20
-        out: out ++ "\nZusaetzlich als Wissen gelernt: " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten."
+        out: out ++ "\nAlso learned as knowledge: " ++ (to_str (get res "chunks_ingested")) ++ " of " ++ (to_str (get res "chunks_total")) ++ " chunks."
     else
         if is_pdf_doc fname mime
-            tel.tel_edit_message_text token cid message_id "📄 Extrahiere Text aus der PDF..."
-            --! Frisches Tool-/Exec-Budget noetig (siehe setup_sandbox-Kommentar
-            --! bei handle_voice) — ein vorheriger Nachrichtendurchlauf im selben
-            --! Prozess koennte "pdftotext" sonst nicht (mehr) auf der aktiven
-            --! exec-Whitelist haben.
+            tel.tel_edit_message_text token cid message_id "📄 Extracting text from the PDF..."
+            --! Fresh tool/exec budget needed (see the setup_sandbox comment at
+            --! handle_voice) — a previous message pass in the same process might
+            --! otherwise no longer have "pdftotext" on the active exec whitelist.
             setup_sandbox all_mcp_servers
             pdf_text: extract_pdf_text save_path dbh
             if pdf_text == nil
-                out: out ++ "\nKein Text extrahierbar (evtl. reine Bild-Scans ohne Text-Layer, verschluesselt oder beschaedigt) — nicht ins Gedaechtnis gelernt."
+                out: out ++ "\nNo text could be extracted (possibly pure image scans without a text layer, encrypted, or corrupted) — not learned into memory."
             else
-                tel.tel_edit_message_text token cid message_id "🧠 Lerne den Inhalt..."
+                tel.tel_edit_message_text token cid message_id "🧠 Learning the content..."
                 res: mem.ingest_document dbh pdf_text ("telegram-pdf:" ++ fname) fname 20
-                out: out ++ "\nText extrahiert und als Wissen gelernt: " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten."
+                out: out ++ "\nText extracted and learned as knowledge: " ++ (to_str (get res "chunks_ingested")) ++ " of " ++ (to_str (get res "chunks_total")) ++ " chunks."
     tel_finalize token cid message_id out nil
 
---! Verarbeitet ein hochgeladenes Foto (Telegram "photo"-Nachricht) per ai_vision.
---! "photo" ist eine Liste von Groessen aufsteigend sortiert — das letzte Element
---! ist die hoechste Aufloesung. Die Bytes kommen ueber Telegrams File-API als
---! rohe Bytes zurueck; ai_vision akzeptiert dafuer explizit ein Bytes-Objekt
---! (kein String — ein String wird sonst als lokaler Pfad/URL interpretiert,
---! siehe resolveImageURL in pipe/pkg/object/builtins_vision.go), daher to_bytes.
---! DeepSeeks Standardmodell (deepseek-chat, siehe setup_ai) kann keine Bilder —
---! fuer den Aufruf kurz auf das Vision-Modell umschalten und danach IMMER
---! zurueckschalten (try/catch), sonst laufen alle folgenden Text-Antworten mit
---! dem falschen Modell.
+--! Processes an uploaded photo (Telegram "photo" message) via ai_vision.
+--! "photo" is a list of sizes sorted ascending — the last element is the
+--! highest resolution. The bytes come back as raw bytes via Telegram's
+--! File API; ai_vision explicitly accepts a bytes object for this (not a
+--! string — a string would otherwise be interpreted as a local path/URL,
+--! see resolveImageURL in pipe/pkg/object/builtins_vision.go), hence
+--! to_bytes. DeepSeek's default model (deepseek-chat, see setup_ai) can't
+--! handle images — briefly switch to the vision model for the call and
+--! ALWAYS switch back afterward (try/catch), otherwise all subsequent
+--! text replies would run on the wrong model.
 fn handle_photo token cid dbh msg
     photos: get msg "photo"
     if photos == nil || (len photos) == 0
-        tel.tel_send_message token cid "Foto konnte nicht gelesen werden."
+        tel.tel_send_message token cid "Couldn't read the photo."
         return nil
     largest: at photos ((len photos) - 1)
     caption: get msg "caption"
-    prompt: "Was ist auf diesem Bild zu sehen? Beschreibe es kurz und pruefe, ob etwas Wichtiges oder Auffaelliges zu erkennen ist."
+    prompt: "What can be seen in this image? Describe it briefly and check whether anything important or noteworthy is visible."
     if caption != nil && (trim caption) != ""
         prompt: caption
     tel.tel_send_chat_action token cid "typing"
     fpath: tel.tel_get_file token (get largest "file_id")
     if fpath == nil
-        tel.tel_send_message token cid "Bild konnte nicht abgerufen werden."
+        tel.tel_send_message token cid "Couldn't retrieve the image."
         return nil
     raw: tel.tel_download_file token fpath
     if raw == nil || raw == ""
-        tel.tel_send_message token cid "Bild war leer oder nicht lesbar."
+        tel.tel_send_message token cid "Image was empty or unreadable."
         return nil
     answer: ""
     try
@@ -416,53 +414,53 @@ fn handle_photo token cid dbh msg
         ai_model "deepseek-chat"
     catch e
         ai_model "deepseek-chat"
-        answer: "Ich konnte das Bild nicht auswerten: " ++ (to_str e)
+        answer: "I couldn't analyze the image: " ++ (to_str e)
     tid: mem.active_thread dbh cid
-    mem.add_message dbh tid cid "user" ("[Foto] " ++ prompt)
+    mem.add_message dbh tid cid "user" ("[Photo] " ++ prompt)
     mem.add_message dbh tid cid "assistant" answer
     kb: []
     row: []
-    push row (tel.tel_button "💾 Merken" "save")
+    push row (tel.tel_button "💾 Remember" "save")
     push kb row
     tel.tel_send_message_kb token cid (shorten answer) kb
     nil
 
---! Verarbeitet eine eingehende Sprachnachricht: laedt die OGG/Opus-Datei
---! herunter, transkribiert sie lokal per whisper-transcribe-mcp (kein
---! API-Key, siehe .env.example) und reicht den erkannten Text danach
---! GENAUSO durch handle_message wie eine getippte Nachricht — Befehle,
---! Erinnerungen und das Gremium funktionieren also identisch per Sprache.
---! Ist der "whisper"-MCP-Server nicht konfiguriert/verbunden, faellt das
---! ehrlich zurueck auf die Bitte, stattdessen zu tippen (kein Vortaeuschen
---! einer Faehigkeit, die gerade nicht verfuegbar ist).
+--! Processes an incoming voice message: downloads the OGG/Opus file,
+--! transcribes it locally via whisper-transcribe-mcp (no API key, see
+--! .env.example), and then passes the recognized text through
+--! handle_message JUST LIKE a typed message — commands, reminders, and
+--! the gremium therefore work identically via voice. If the "whisper"
+--! MCP server isn't configured/connected, this honestly falls back to
+--! asking the user to type instead (no pretending to have a capability
+--! that isn't currently available).
 fn handle_voice token cid dbh msg
     voice: get msg "voice"
     tel.tel_send_chat_action token cid "typing"
     fpath: tel.tel_get_file token (get voice "file_id")
     if fpath == nil
-        tel.tel_send_message token cid "Sprachnachricht konnte nicht abgerufen werden."
+        tel.tel_send_message token cid "Couldn't retrieve the voice message."
         return nil
     raw: tel.tel_download_file token fpath
     if raw == nil || raw == ""
-        tel.tel_send_message token cid "Sprachnachricht war leer oder nicht lesbar."
+        tel.tel_send_message token cid "Voice message was empty or unreadable."
         return nil
-    --! Frisches Tool-Budget fuer die Transkription: tool_call laeuft unter dem
-    --! AKTUELL aktiven Sandbox-Profil und verbraucht dessen max_tool_calls-
-    --! Kontingent. Ueber den normalen Nachrichtenfluss wurden diese Profile nur
-    --! vor Gremium-Laefen zurueckgesetzt (setup_sandbox), NIE auf dem Sprachweg
-    --! — dadurch schlug der whisper-Aufruf bei einer spaeten Sprachnachricht
-    --! mit "E_SANDBOX: max tool calls exceeded" fehl, waerend die erste noch
-    --! funktionierte (frisches Profil). Wie bei den Gremium-Aufrufstellen hier
-    --! ein frisches Budget setzen, bevor transkribiert wird.
+    --! Fresh tool budget for the transcription: tool_call runs under the
+    --! CURRENTLY active sandbox profile and consumes its max_tool_calls
+    --! quota. Through the normal message flow, these profiles were only
+    --! reset before gremium runs (setup_sandbox), NEVER on the voice path —
+    --! so the whisper call for a later voice message failed with
+    --! "E_SANDBOX: max tool calls exceeded", while the first one still
+    --! worked (fresh profile). As with the gremium call sites, set a fresh
+    --! budget here before transcribing.
     setup_sandbox all_mcp_servers
     text: nil
     last_err: nil
     try
         b64: base64_encode raw
         res: tool_call "whisper_transcribe_base64" {audio_base64: b64, extension: "ogg", language: "de"}
-        --! tool_call liefert bei einem MCP-Fehler einen Rohtext (kein JSON, z.B.
-        --! "mcp call transcribe_base64: ..."). Erst als JSON-Objekt verstehen, wenn
-        --! es wirklich mit "{" beginnt; sonst den Rohtext als Fehlergrund notieren.
+        --! On an MCP error, tool_call returns raw text (not JSON, e.g. "mcp call
+        --! transcribe_base64: ..."). Only parse it as a JSON object if it truly
+        --! starts with "{"; otherwise record the raw text as the error reason.
         if (trim res) != nil && (len (trim res)) > 0 && (substring (trim res) 0 1) == "{"
             try
                 j: parse_json res
@@ -476,17 +474,17 @@ fn handle_voice token cid dbh msg
     catch e
         last_err: to_str e
     if text == nil || (trim text) == ""
-        --! Echten Grund ins Journal loggen statt ihn still zu schlucken (der
-        --! alte leere catch lieferte KEINEN Hinweis, warum die Transkription
-        --! fehlschlug). Dem Nutzer ehrlich mitteilen, dass es fehlgeschlagen ist.
+        --! Log the real reason to the journal instead of silently swallowing it
+        --! (the old empty catch gave NO clue why the transcription failed).
+        --! Honestly tell the user that it failed.
         if last_err != nil
-            print ("whisper_transcribe_base64 fehlgeschlagen: " ++ last_err)
+            print ("whisper_transcribe_base64 failed: " ++ last_err)
             mem.log_error dbh "whisper_transcribe" last_err
-        tel.tel_send_message token cid "Sprachnachrichten verstehe ich gerade nicht (Transkription nicht verfuegbar oder fehlgeschlagen). Bitte tippe es."
+        tel.tel_send_message token cid "I can't understand voice messages right now (transcription unavailable or failed). Please type it instead."
         return nil
     handle_message token cid (trim text) dbh
 
---! Verarbeitet eine eingehende Textnachricht und antwortet.
+--! Processes an incoming text message and replies.
 fn handle_message token cid text dbh
     if text == nil
         return nil
@@ -513,11 +511,11 @@ fn handle_message token cid text dbh
     if low == "/reminders"
         rows: sched.list dbh cid
         if (len rows) == 0
-            tel.tel_send_message token cid "Keine offenen Erinnerungen oder Briefings geplant."
+            tel.tel_send_message token cid "No open reminders or briefings scheduled."
         else
-            out: "Offene Erinnerungen/Briefings:\n"
+            out: "Open reminders/briefings:\n"
             for r in rows
-                out: out ++ "• [" ++ (get r "kind") ++ "] " ++ (get r "note") ++ " — am " ++ (format_time ((get r "due_ts") + tz_offset) "2006-01-02 15:04:05") ++ "\n"
+                out: out ++ "• [" ++ (get r "kind") ++ "] " ++ (get r "note") ++ " — on " ++ (format_time ((get r "due_ts") + tz_offset) "2006-01-02 15:04:05") ++ "\n"
             tel.tel_send_message token cid (shorten out)
         return nil
     if low == "/briefing stop"
@@ -528,9 +526,9 @@ fn handle_message token cid text dbh
                 sched.cancel dbh (get r "id")
                 cancelled: cancelled + 1
         if cancelled > 0
-            tel.tel_send_message token cid "Tägliches Briefing abbestellt."
+            tel.tel_send_message token cid "Daily briefing unsubscribed."
         else
-            tel.tel_send_message token cid "Kein aktives Briefing gefunden."
+            tel.tel_send_message token cid "No active briefing found."
         return nil
     if low == "/briefing"
         rows: sched.list dbh cid
@@ -540,38 +538,37 @@ fn handle_message token cid text dbh
         bt: parse_briefing_time briefing_time
         nsec: now
         first_due: sched.next_hhmm (get bt "hh") (get bt "mm") nsec tz_offset
-        sched.schedule dbh "briefing" (to_str cid) "Tägliches Briefing" first_due "daily"
-        tel.tel_send_message token cid ("Tägliches Briefing aktiv — ich melde mich das nächste Mal um " ++ (format_time (first_due + tz_offset) "15:04") ++ " (und danach täglich).")
+        sched.schedule dbh "briefing" (to_str cid) "Daily briefing" first_due "daily"
+        tel.tel_send_message token cid ("Daily briefing active — I'll check in next at " ++ (format_time (first_due + tz_offset) "15:04") ++ " (and daily after that).")
         return nil
     rq: remind_query low tnorm
     if rq != ""
         nsec2: now
         parsed: sched.parse_reminder rq nsec2 tz_offset
         sched.schedule dbh "reminder" (to_str cid) (get parsed "text") (get parsed "due") (get parsed "repeat")
-        tel.tel_send_message token cid ("Notiert — ich erinnere dich am " ++ (format_time ((get parsed "due") + tz_offset) "2006-01-02 15:04:05") ++ " an: " ++ (get parsed "text"))
+        tel.tel_send_message token cid ("Noted — I'll remind you on " ++ (format_time ((get parsed "due") + tz_offset) "2006-01-02 15:04:05") ++ " about: " ++ (get parsed "text"))
         return nil
     if low == "/reset"
         mem.close_thread dbh cid
-        tel.tel_send_message token cid "Gespraechsverlauf zurueckgesetzt — ich starte den Kontext frisch."
+        tel.tel_send_message token cid "Conversation history reset — starting with a fresh context."
         return nil
     if low == "/consolidate"
         tel.tel_send_chat_action token cid "typing"
         cdays: mem.setting_consolidate_days dbh (to_str cid)
         res: mem.consolidate dbh (get cdays "decay") (get cdays "forget")
-        tel.tel_send_message token cid ("Konsolidierung: " ++ (to_str (get res "threads_summarized")) ++ " Threads verdichtet, " ++ (to_str (get res "memories_decayed")) ++ " Erinnerungen gealtert, " ++ (to_str (get res "memories_forgotten")) ++ " vergessen.")
+        tel.tel_send_message token cid ("Consolidation: " ++ (to_str (get res "threads_summarized")) ++ " threads condensed, " ++ (to_str (get res "memories_decayed")) ++ " memories decayed, " ++ (to_str (get res "memories_forgotten")) ++ " forgotten.")
         return nil
     if low == "/settings"
         tel.tel_send_message_kb token cid (settings_menu_text dbh cid) (settings_kb dbh cid)
         return nil
     if low == "/stop"
-        --! Deterministisch, OHNE KI-Beteiligung — bewusst so, siehe
-        --! Kommentar bei dt.cancel_all_running: die KI selbst konnte einen
-        --! Abbruch bisher nur BEHAUPTEN (kein echtes Werkzeug dafuer), live
-        --! beobachtet als "alles abgebrochen" gefolgt von einem sofort neu
-        --! gestarteten Hintergrund-Job. /stop garantiert, dass ein Abbruch
-        --! IMMER sofort und zuverlaessig wirkt, unabhaengig von jeder
-        --! KI-Entscheidung — fuer eine Stop-Anfrage die einzig vertretbare
-        --! Grundlage.
+        --! Deterministic, WITHOUT AI involvement — deliberately so, see the
+        --! comment at dt.cancel_all_running: the AI itself could previously only
+        --! CLAIM a cancellation (no real tool for it), observed live as "all
+        --! cancelled" followed immediately by a newly started background job.
+        --! /stop guarantees that a cancellation ALWAYS takes effect immediately
+        --! and reliably, independent of any AI decision — the only defensible
+        --! basis for a stop request.
         tel.tel_send_chat_action token cid "typing"
         cancelled_jobs: dt.cancel_all_running dbh (to_str cid)
         n_sched: 0
@@ -580,18 +577,18 @@ fn handle_message token cid text dbh
                 sched.cancel dbh (get r "id")
                 n_sched: n_sched + 1
         if (len cancelled_jobs) == 0 && n_sched == 0
-            tel.tel_send_message token cid "Es liefen keine Hintergrund-Aufgaben — nichts abzubrechen."
+            tel.tel_send_message token cid "No background tasks were running — nothing to cancel."
         else
-            tel.tel_send_message token cid ("Abgebrochen: " ++ (to_str (len cancelled_jobs)) ++ " laufende(r) Docker-Hintergrund-Job(s) (Container entfernt), " ++ (to_str n_sched) ++ " geplante Fortsetzung(en) storniert.")
+            tel.tel_send_message token cid ("Cancelled: " ++ (to_str (len cancelled_jobs)) ++ " running Docker background job(s) (container removed), " ++ (to_str n_sched) ++ " scheduled continuation(s) cancelled.")
         return nil
     if low == "/graph"
-        tel.tel_send_message token cid "Bitte gib eine Entität an: /graph <Name>"
+        tel.tel_send_message token cid "Please provide an entity: /graph <name>"
         return nil
     gname: graph_query low tnorm
     if gname != ""
         n: mem.neighbors_of dbh gname
         if (len n) == 0
-            tel.tel_send_message token cid ("Keine Verknüpfungen zu '" ++ gname ++ "' im Wissensgraphen gefunden.")
+            tel.tel_send_message token cid ("No connections found for '" ++ gname ++ "' in the knowledge graph.")
         else
             out: gname ++ ":\n"
             for x in n
@@ -599,24 +596,24 @@ fn handle_message token cid text dbh
             tel.tel_send_message token cid (shorten out)
         return nil
     if low == "/search"
-        tel.tel_send_message token cid "Bitte gib einen Suchbegriff an: /search <begriff>"
+        tel.tel_send_message token cid "Please provide a search term: /search <term>"
         return nil
     sq: search_query low tnorm
     if sq != ""
         do_search token cid dbh sq
         return nil
     if low == "/learn"
-        tel.tel_send_message token cid "Bitte gib eine URL an: /learn <URL> — oder schick mir direkt eine .txt/.md-Datei."
+        tel.tel_send_message token cid "Please provide a URL: /learn <URL> — or send me a .txt/.md file directly."
         return nil
     lurl: learn_query low tnorm
     if lurl != ""
         tel.tel_send_chat_action token cid "typing"
         dtext: web.web_fetch_raw lurl
         if dtext == nil || dtext == ""
-            tel.tel_send_message token cid "Seite nicht abrufbar oder leer."
+            tel.tel_send_message token cid "Page not reachable or empty."
             return nil
         res: mem.ingest_document dbh dtext lurl lurl 20
-        tel.tel_send_message token cid ("Gelernt aus " ++ lurl ++ ": " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten gespeichert.")
+        tel.tel_send_message token cid ("Learned from " ++ lurl ++ ": " ++ (to_str (get res "chunks_ingested")) ++ " of " ++ (to_str (get res "chunks_total")) ++ " chunks stored.")
         return nil
     if contains low "was kannst du"
         tel.tel_send_message token cid (capability_text 0)
@@ -624,25 +621,26 @@ fn handle_message token cid text dbh
     if is_mcp_server_question low
         names: list_configured_mcp_aliases 0
         if (len names) == 0
-            tel.tel_send_message token cid "Aktuell sind keine MCP-Server konfiguriert."
+            tel.tel_send_message token cid "No MCP servers are currently configured."
         else
-            available: "Verfügbare MCP-Server: " ++ (join names ", ") ++ "."
+            available: "Available MCP servers: " ++ (join names ", ") ++ "."
             tool_names: connected_mcp_tool_names 0
             if (len tool_names) > 0
-                available: available ++ " Verfügbare Tools: " ++ (join tool_names ", ") ++ "."
+                available: available ++ " Available tools: " ++ (join tool_names ", ") ++ "."
             tel.tel_send_message token cid available
         return nil
-    --! Ab hier: EIN gemeinsamer Pfad fuer das gesamte freie Gespraech. Frueher
-    --! stand hier eine vorab-Klassifikation (regelbasiert + ein kontextfreier
-    --! KI-Einwort-Aufruf) in sechs isolierte Toepfe (reminder/permanent/task/
-    --! goal/fleeting/question), von denen nur "question" wirklich Werkzeuge,
-    --! Gedaechtnis und Gespraechsverlauf hatte. Das fuehrte zu widerspruechlichem
-    --! Verhalten bei identischem Text (je nachdem, welchen Topf die KI beim
-    --! naechsten Aufruf traf) und zu einem blind JSON-Schritte erfindenden
-    --! "task"-Executor ohne jeden Kontext (siehe Plan.md-Diskussion). Jetzt
-    --! bekommt das Gremium (schon fuer "question" bewaehrt: echte Werkzeuge,
-    --! Gedaechtnis, Verlauf) IMMER den vollen Kontext und entscheidet selbst,
-    --! ob es merkt, eine Erinnerung plant, recherchiert oder einfach antwortet.
+    --! From here on: ONE shared path for the entire free-form conversation.
+    --! Previously there was a pre-classification here (rule-based + a
+    --! context-free single-word AI call) into six isolated buckets
+    --! (reminder/permanent/task/goal/fleeting/question), of which only
+    --! "question" actually had tools, memory, and conversation history. That
+    --! led to inconsistent behavior for identical text (depending on which
+    --! bucket the AI hit on the next call) and to a "task" executor blindly
+    --! inventing JSON steps with no context at all (see the Plan.md
+    --! discussion). Now the gremium (already proven for "question": real
+    --! tools, memory, history) ALWAYS gets the full context and decides for
+    --! itself whether to remember something, schedule a reminder, do
+    --! research, or simply answer.
     ensure_mcp_for_task tnorm dbh
     tel.tel_send_chat_action token cid "typing"
     tid: mem.active_thread dbh cid
@@ -652,12 +650,12 @@ fn handle_message token cid text dbh
         task: "Bisheriger Gespraechsverlauf (aeltester zuerst, ungekuerzt):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
     task: (mem.settings_prompt_prefix dbh (to_str cid)) ++ task
     mem.log_event dbh (to_str cid) tnorm "chat"
-    --! Live-Status: EINE Platzhalter-Nachricht senden und per editMessageText
-    --! immer wieder aktualisieren, statt neuer Nachrichtenbloecke oder
-    --! komplettem Schweigen waehrend das Gremium arbeitet (siehe
-    --! swarm_status_text/tel_finalize unten, run_gremium_stream in swarm.pipe).
+    --! Live status: send ONE placeholder message and keep updating it via
+    --! editMessageText, instead of new message blocks or complete silence
+    --! while the gremium works (see swarm_status_text/tel_finalize below,
+    --! run_gremium_stream in swarm.pipe).
     message_id: nil
-    ph: tel.tel_send_message token cid "🧠 Denke nach..."
+    ph: tel.tel_send_message token cid "🧠 Thinking..."
     if (get ph "ok") == true
         message_id: get (get ph "result") "message_id"
     on_update: make_swarm_updater token cid message_id
@@ -668,45 +666,42 @@ fn handle_message token cid text dbh
         res: grm.run_gremium_stream dbh cid task on_update
         answer: get res "content"
     catch e
-        print ("run_gremium_stream fehlgeschlagen (Versuch 1): " ++ (to_str e))
+        print ("run_gremium_stream failed (attempt 1): " ++ (to_str e))
         mem.log_error dbh "run_gremium_stream" (to_str e)
-        --! EIN automatischer Wiederholungsversuch: live beobachtet, dass ein
-        --! echter Absturz hier meist ein TRANSIENTER Netzwerkfehler zum
-        --! KI-Provider ist ("read: connection reset by peer" mitten in einer
-        --! mehrteiligen Rechercheaufgabe zu Friedrich Merz) — ein einzelner
-        --! Netzwerk-Aussetzer soll nicht die GESAMTE Aufgabe zunichtemachen,
-        --! wenn ein zweiter Versuch wahrscheinlich durchgeht. Frisches
-        --! Tool-Budget noetig, der erste (gescheiterte) Versuch hat schon
-        --! einen Teil des alten Kontingents verbraucht.
+        --! ONE automatic retry: observed live that a real crash here is usually
+        --! a TRANSIENT network error to the AI provider ("read: connection reset
+        --! by peer" in the middle of a multi-part research task about Friedrich
+        --! Merz) — a single network blip shouldn't ruin the ENTIRE task when a
+        --! second attempt will likely go through. A fresh tool budget is needed,
+        --! since the first (failed) attempt already consumed part of the old
+        --! quota.
         setup_sandbox all_mcp_servers
         try
             res2: grm.run_gremium_stream dbh cid task on_update
             answer: get res2 "content"
         catch e2
-            --! Ohne dieses Log sah ein ECHTER Gremium-Absturz (z.B. max
-            --! rounds exceeded, ein Interpreter-Fehler) identisch aus wie
-            --! "die KI weiss es nicht" — beides landete stillschweigend im
-            --! selben do_search-Fallback darunter. Journal-Log macht den
-            --! Unterschied sichtbar.
-            print ("run_gremium_stream fehlgeschlagen (Versuch 2, gebe auf): " ++ (to_str e2))
+            --! Without this log, a REAL gremium crash (e.g. max rounds exceeded,
+            --! an interpreter error) looked identical to "the AI doesn't know" —
+            --! both silently ended up in the same do_search fallback below. The
+            --! journal log makes the difference visible.
+            print ("run_gremium_stream failed (attempt 2, giving up): " ++ (to_str e2))
             mem.log_error dbh "run_gremium_stream" (to_str e2)
             answer: ""
             crashed: true
     mem.add_message dbh tid cid "user" tnorm
     if crashed
-        --! Ein ECHTER Absturz (Netzwerk-/Provider-Fehler, Interpreter-Fehler,
-        --! max rounds exceeded) ist NICHT dasselbe wie "die KI weiss es
-        --! nicht" — bei einer laengeren Aufgabenbeschreibung (nicht nur
-        --! einer kurzen Faktenfrage) waere eine blinde Websuche des
-        --! kompletten, oft mehrsaetzigen Aufgabentexts sinnlos. Live
-        --! beobachtet: genau das passierte — die Merz-Rechercheaufgabe
-        --! landete nach dem Netzwerkfehler woertlich als DuckDuckGo-
-        --! Suchanfrage und lieferte "keine brauchbaren Ergebnisse" statt
-        --! ehrlich zu sagen, dass etwas technisch schiefgelaufen ist.
-        tel_finalize token cid message_id "Da ist technisch etwas schiefgelaufen (z.B. ein kurzer Verbindungsabbruch zum KI-Anbieter) — bitte schick deine Anfrage nochmal, dann versuche ich es erneut." nil
+        --! A REAL crash (network/provider error, interpreter error, max rounds
+        --! exceeded) is NOT the same as "the AI doesn't know" — for a longer
+        --! task description (not just a short factual question), a blind web
+        --! search of the entire, often multi-sentence task text would be
+        --! pointless. Observed live: exactly that happened — after the network
+        --! error, the Merz research task ended up verbatim as a DuckDuckGo
+        --! search query and returned "no usable results" instead of honestly
+        --! saying that something went technically wrong.
+        tel_finalize token cid message_id "Something went technically wrong (e.g. a brief connection drop to the AI provider) — please send your request again and I'll retry." nil
         return nil
     if question_needs_research answer
-        tel_finalize token cid message_id "Kein Wissen darüber. Recherchiere..." nil
+        tel_finalize token cid message_id "No knowledge of that. Researching..." nil
         do_search token cid dbh tnorm
         return nil
     if answer == nil || answer == ""
@@ -715,32 +710,32 @@ fn handle_message token cid text dbh
             ctx_text: join ctx "\n\n"
             reply: ""
             try
-                reply: ai_chat ((grm.self_context 0) ++ "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des folgenden Kontexts knapp und faktentreu. Wenn der Kontext nichts Passendes enthaelt, sage ehrlich, dass du es nicht weisst. Gib nur die Antwort aus, kein internes Reasoning.") ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx_text)
+                reply: ai_chat ((grm.self_context 0) ++ "You are Muninn, a personal AI assistant. Answer the question based on the following context, briefly and factually. If the context doesn't contain anything relevant, honestly say you don't know. Output only the answer, no internal reasoning.") ("Question: " ++ tnorm ++ "\n\nContext:\n" ++ ctx_text)
             catch e3
-                print ("Kontext-Fallback-ai_chat fehlgeschlagen: " ++ (to_str e3))
-                mem.log_error dbh "kontext_fallback_ai_chat" (to_str e3)
+                print ("Context-fallback ai_chat failed: " ++ (to_str e3))
+                mem.log_error dbh "context_fallback_ai_chat" (to_str e3)
                 reply: ""
             if reply == nil || reply == ""
-                reply: "Dazu erinnere ich mich an:\n"
+                reply: "Here's what I remember about that:\n"
                 for c in ctx
                     reply: reply ++ "• " ++ c ++ "\n"
             mem.add_message dbh tid cid "assistant" reply
             tel_finalize token cid message_id reply nil
         else
-            tel_finalize token cid message_id "Kein Wissen darüber. Recherchiere..." nil
+            tel_finalize token cid message_id "No knowledge of that. Researching..." nil
             rr: web.research tnorm
             ctx2: get rr "context"
             srcs2: get rr "sources"
             if ctx2 == nil || ctx2 == ""
-                fallback: "Ich konnte online nichts Relevantes finden."
+                fallback: "I couldn't find anything relevant online."
                 mem.add_message dbh tid cid "assistant" fallback
                 tel_finalize token cid message_id fallback nil
             else
                 answer2: ""
                 try
-                    answer2: ai_chat ((grm.self_context 0) ++ "Du bist Muninn, ein persoenlicher KI-Assistent. Beantworte die Frage anhand des recherchierten Kontexts knapp und faktentreu — der Kontext stammt aus einer WEB-Recherche zum Thema der Frage, NICHT aus einer Recherche ueber Muninn selbst. Geht es in der Frage um Muninns eigene Faehigkeiten/Werkzeuge, nutze dafuer das Selbstwissen oben, nicht den Web-Kontext. WICHTIG: Dieser Aufruf hier ist reine Textzusammenfassung OHNE Werkzeugzugriff — behaupte NIEMALS, gerade etwas zu tun/recherchieren/einzurichten oder Schritte einzuleiten. Ist die Anfrage eine AKTION (z.B. 'richte X ein', 'lege einen Container an') statt einer Wissensfrage, erklaere knapp, dass du das ueber deine echten Werkzeuge tun kannst, und bitte den Nutzer, es nochmal als direkte Aufforderung zu senden. Gib nur die Antwort aus, kein internes Reasoning.") ("Frage: " ++ tnorm ++ "\n\nKontext:\n" ++ ctx2)
+                    answer2: ai_chat ((grm.self_context 0) ++ "You are Muninn, a personal AI assistant. Answer the question based on the researched context, briefly and factually — the context comes from a WEB research on the topic of the question, NOT from research about Muninn itself. If the question is about Muninn's own capabilities/tools, use the self-knowledge above for that, not the web context. IMPORTANT: this call here is pure text summarization WITHOUT tool access — NEVER claim to currently be doing/researching/setting something up or initiating steps. If the request is an ACTION (e.g. 'set up X', 'create a container') rather than a knowledge question, briefly explain that you can do that via your real tools, and ask the user to send it again as a direct request. Output only the answer, no internal reasoning.") ("Question: " ++ tnorm ++ "\n\nContext:\n" ++ ctx2)
                 catch e4
-                    print ("Web-Recherche-Fallback-ai_chat fehlgeschlagen: " ++ (to_str e4))
+                    print ("Web-research-fallback ai_chat failed: " ++ (to_str e4))
                     mem.log_error dbh "web_fallback_ai_chat" (to_str e4)
                     answer2: ctx2
                 if answer2 == nil || answer2 == ""
@@ -750,11 +745,11 @@ fn handle_message token cid text dbh
                 src_text: ""
                 for u in srcs2
                     src_text: src_text ++ "\n" ++ u
-                full: (shorten answer2) ++ "\n— Quellen:" ++ (shorten src_text)
+                full: (shorten answer2) ++ "\n— Sources:" ++ (shorten src_text)
                 kb: []
                 row: []
-                push row (tel.tel_button "💾 Merken" "save")
-                push row (tel.tel_button "🔍 Vertiefen" "more")
+                push row (tel.tel_button "💾 Remember" "save")
+                push row (tel.tel_button "🔍 Dig deeper" "more")
                 push kb row
                 row2: []
                 push row2 (tel.tel_button "👍" "up")
@@ -765,8 +760,8 @@ fn handle_message token cid text dbh
         mem.add_message dbh tid cid "assistant" answer
         kb: []
         row: []
-        push row (tel.tel_button "💾 Merken" "save")
-        push row (tel.tel_button "🔍 Vertiefen" "more")
+        push row (tel.tel_button "💾 Remember" "save")
+        push row (tel.tel_button "🔍 Dig deeper" "more")
         push kb row
         row2: []
         push row2 (tel.tel_button "👍" "up")
@@ -774,9 +769,9 @@ fn handle_message token cid text dbh
         push kb row2
         tel_finalize token cid message_id (shorten answer) kb
 
---! Kappt einen Status-Schnipsel auf n Zeichen (fuer die Live-Statuszeile —
---! anders als shorten (4000 Zeichen, fuer Telegram-Nachrichten) hier bewusst
---! kurz, damit eine einzelne Werkzeug-Zeile nicht die ganze Statusnachricht sprengt.
+--! Truncates a status snippet to n characters (for the live status line —
+--! unlike shorten (4000 characters, for Telegram messages) deliberately
+--! short here, so a single tool line doesn't blow up the whole status message.
 fn truncate_status s n
     if s == nil
         return ""
@@ -785,11 +780,12 @@ fn truncate_status s n
     else
         s
 
---! Zieht aus den rohen JSON-Argumenten eines Werkzeugaufrufs einen kurzen,
---! menschenlesbaren Schnipsel (die echte Suchanfrage/URL/o.ae., nicht nur der
---! Werkzeugname) — fuer bekannte lokale Werkzeuge (siehe ai_tool-Registrierung
---! in swarm.pipe) gezielt nach dem passenden Feld, sonst best-effort das erste
---! String-Feld in den Argumenten (deckt MCP-Werkzeuge mit unbekanntem Schema ab).
+--! Extracts a short, human-readable snippet from a tool call's raw JSON
+--! arguments (the actual search query/URL/etc., not just the tool name) —
+--! for known local tools (see the ai_tool registrations in swarm.pipe)
+--! targets the matching field specifically, otherwise best-effort takes
+--! the first string field in the arguments (covers MCP tools with an
+--! unknown schema).
 fn tool_arg_summary tool_name args_json
     if args_json == nil || args_json == ""
         return ""
@@ -824,34 +820,34 @@ fn tool_arg_summary tool_name args_json
         return ""
     truncate_status (to_str field) 70
 
---! Uebersetzt einen Gremium-Fortschritts-Schritt (siehe ai_swarm_stream/
---! run_gremium_stream) in eine kurze Statuszeile fuers Live-Editieren der
---! Telegram-Platzhalternachricht. "handoff"/"final" werden vom Aufrufer schon
---! rausgefiltert (der naechste "start" zeigt den neuen Agenten ohnehin an).
+--! Translates a gremium progress step (see ai_swarm_stream/
+--! run_gremium_stream) into a short status line for live-editing the
+--! Telegram placeholder message. "handoff"/"final" are already filtered
+--! out by the caller (the next "start" shows the new agent anyway).
 fn swarm_status_text agent event detail args_json
-    label: "🧠 " ++ agent ++ " denkt nach..."
+    label: "🧠 " ++ agent ++ " is thinking..."
     if agent == "planer"
-        label: "🧭 Plane die Antwort..."
+        label: "🧭 Planning the answer..."
     else if agent == "faktenwaechter"
-        label: "🔍 Prüfe Fakten und Gedächtnis..."
+        label: "🔍 Checking facts and memory..."
     else if agent == "kritiker"
-        label: "🧐 Prüfe die Antwort..."
+        label: "🧐 Reviewing the answer..."
     else if agent == "registrator"
-        label: "✍️ Schreibe die Antwort..."
+        label: "✍️ Writing the answer..."
     else if (len agent) > 9 && (substring agent 0 9) == "werkzeug_"
-        label: "🔧 Nutze " ++ (substring agent 9 (len agent)) ++ "..."
+        label: "🔧 Using " ++ (substring agent 9 (len agent)) ++ "..."
     if event == "tool" && detail != nil && detail != ""
-        label: label ++ "\n→ ruft " ++ detail ++ " auf"
+        label: label ++ "\n→ calling " ++ detail
         arg_hint: tool_arg_summary detail args_json
         if arg_hint != ""
             label: label ++ " (" ++ arg_hint ++ ")"
     label
 
---! Baut die on_update-Closure fuer run_gremium_stream: uebersetzt jeden
---! Fortschritts-Schritt in eine Statuszeile und editiert damit (gedrosselt
---! auf ca. 1x/Sekunde, keine Wiederholungen) die per message_id referenzierte
---! Platzhalternachricht. message_id darf nil sein (Platzhalter-Versand
---! fehlgeschlagen) — dann ist die Closure ein No-op.
+--! Builds the on_update closure for run_gremium_stream: translates each
+--! progress step into a status line and uses it to edit (throttled to
+--! about once/second, no repeats) the placeholder message referenced by
+--! message_id. message_id may be nil (placeholder send failed) — then the
+--! closure is a no-op.
 fn make_swarm_updater token cid message_id
     stream_state: {last_text: "", last_ms: 0}
     fn on_update agent event detail args_json
@@ -869,12 +865,11 @@ fn make_swarm_updater token cid message_id
             tel.tel_edit_message_text token cid message_id text
     on_update
 
---! Schliesst eine Live-Status-Nachricht mit dem Endergebnis ab: editiert die
---! per message_id referenzierte Platzhalternachricht (optional mit Tastatur
---! kb), faellt aber auf eine neue Nachricht zurueck, wenn message_id fehlt
---! (Platzhalter konnte nicht gesendet werden) oder der Edit selbst scheitert
---! (z.B. Nutzer hat die Nachricht geloescht) — so geht nie eine fertige
---! Antwort verloren.
+--! Finalizes a live-status message with the end result: edits the
+--! placeholder message referenced by message_id (optionally with keyboard
+--! kb), but falls back to a new message if message_id is missing
+--! (placeholder couldn't be sent) or the edit itself fails (e.g. the user
+--! deleted the message) — so a finished answer is never lost.
 fn tel_finalize token cid message_id text kb
     if message_id == nil
         if kb == nil
@@ -892,27 +887,26 @@ fn tel_finalize token cid message_id text kb
             r: tel.tel_send_message_kb token cid text kb
     r
 
---! Prüft, ob eine KI-Antwort einen "ich weiß es nicht"-Fallback darstellt,
---! der nach einer Web-Recherche auffordert.
+--! Checks whether an AI answer represents an "I don't know" fallback that
+--! calls for a web research.
 fn question_needs_research answer
     if answer == nil || answer == ""
         return true
     trimmed: trim answer
-    --! Endet die Antwort mit einem Fragezeichen, ist es mit hoher
-    --! Wahrscheinlichkeit eine legitime Rueckfrage (HONESTY_RULE: bei zu
-    --! vager/kontextabhaengiger Anfrage lieber nachfragen als raten) — KEIN
-    --! Fall fuer eine blinde Web-Suche mit dem unveraenderten Nutzertext als
-    --! Suchbegriff. Live beobachtet: "Was wuerdest du vorschlagen?" (bezog
-    --! sich auf den laufenden Gespraechskontext) loeste genau das aus und
-    --! durchsuchte woertlich "was wuerdest du vorschlagen" im Netz — reine
-    --! Woerterbuch-/Konjugations-Treffer, komplett am Sinn vorbei.
+    --! If the answer ends with a question mark, it's very likely a
+    --! legitimate clarifying question (HONESTY_RULE: for a too-vague/
+    --! context-dependent request, prefer asking over guessing) — NOT a case
+    --! for a blind web search using the unchanged user text as the search
+    --! term. Observed live: "What would you suggest?" (referred to the
+    --! ongoing conversation context) triggered exactly that and searched the
+    --! web verbatim for "what would you suggest" — pure dictionary/
+    --! conjugation hits, completely beside the point.
     if (len trimmed) > 0 && (substring trimmed ((len trimmed) - 1) (len trimmed)) == "?"
         return false
-    --! Nur bei KURZEN Antworten unten als "hat aufgegeben" werten — eine
-    --! laengere, substanzielle Antwort, die eine dieser Phrasen nur
-    --! beilaeufig als Teil einer echten Erklaerung enthaelt (z.B. "dazu gibt
-    --! es keine Informationen, aber X ist bekannt..."), ist keine
-    --! gescheiterte Antwort und sollte nicht verworfen werden.
+    --! Only treat it as "gave up" below for SHORT answers — a longer,
+    --! substantial answer that contains one of these phrases only in passing
+    --! as part of a real explanation (e.g. "there's no information on that,
+    --! but X is known...") is not a failed answer and shouldn't be discarded.
     if (len trimmed) > 300
         return false
     low: lower answer
@@ -960,11 +954,11 @@ fn question_needs_research answer
         return true
     false
 
---! Liefert eine direkte Übersicht der Fähigkeiten statt einer Faktenantwort.
+--! Returns a direct overview of capabilities instead of a factual answer.
 fn capability_text _
-    "Ich kann dich unterstützen bei:\n• Fragen beantworten und bei fehlendem Wissen selbstständig im Web recherchieren\n• Informationen mit Quellen in meiner Seele speichern und später wiederfinden\n• Aufgaben planen und über den Executor ausführen\n• Ziele und zeitgesteuerte Erinnerungen verwalten\n• Wissensgraphen und Dokumente aufbauen (inkl. PDFs — Text wird automatisch extrahiert und gelernt)\n• Fotos verstehen und beschreiben (einfach schicken, optional mit Bildunterschrift als Frage)\n• Bilder auf Anfrage generieren (kostenloser KI-Bildgenerator)\n• GitHub-Repos klonen und testen (isolierter Docker-Container, läuft im Hintergrund)\n• Sprachnachrichten verstehen (lokale Transkription, kein API-Key)\n• angebundene MCP-Werkzeuge kontrolliert nutzen\n• Telegram und das Web-Dashboard bedienen\n\nSchreib einfach eine Frage oder eine konkrete Aufgabe."
+    "I can help you with:\n• Answering questions and researching the web on my own when I lack the knowledge\n• Storing information with sources in my soul and finding it again later\n• Planning tasks and executing them via the executor\n• Managing goals and time-based reminders\n• Building knowledge graphs and documents (incl. PDFs — text is extracted and learned automatically)\n• Understanding and describing photos (just send one, optionally with a caption as a question)\n• Generating images on request (free AI image generator)\n• Cloning and testing GitHub repos (isolated Docker container, runs in the background)\n• Understanding voice messages (local transcription, no API key)\n• Using connected MCP tools in a controlled way\n• Working through Telegram and the web dashboard\n\nJust write a question or a concrete task."
 
---! Kürzt Text auf Telegram-Grenze (4096 Zeichen).
+--! Truncates text to the Telegram limit (4096 characters).
 fn shorten s
     if s == nil
         return ""
@@ -973,7 +967,7 @@ fn shorten s
     else
         s
 
---! Führt eine Web-Recherche aus und antwortet mit Quellen + Buttons.
+--! Runs a web research and replies with sources + buttons.
 fn do_search token cid dbh query
     tel.tel_send_chat_action token cid "typing"
     tid: mem.active_thread dbh cid
@@ -982,30 +976,30 @@ fn do_search token cid dbh query
     ctx: get rr "context"
     srcs: get rr "sources"
     if ctx == nil || ctx == ""
-        fallback: "Keine brauchbaren Ergebnisse gefunden."
+        fallback: "No usable results found."
         mem.add_message dbh tid cid "assistant" fallback
         tel.tel_send_message token cid fallback
         return nil
     answer: ""
     try
-        answer: ai_chat ((grm.self_context 0) ++ "Du bist ein präziser Recherche-Assistent. Beantworte die Frage anhand des recherchierten Kontexts, kurz und faktentreu. WICHTIG: Dieser Aufruf hier ist reine Textzusammenfassung OHNE Werkzeugzugriff — behaupte NIEMALS, du könntest generell keine Dokumente/Dateien erstellen oder versenden (das kannst du sehr wohl, nur nicht in DIESEM Aufruf); erwähnt die Frage sowas, sag stattdessen nur, dass du dafür direkt (nicht als Recherche-Anfrage) gefragt werden musst.") ("Frage: " ++ query ++ "\n\nKontext:\n" ++ ctx)
+        answer: ai_chat ((grm.self_context 0) ++ "You are a precise research assistant. Answer the question based on the researched context, briefly and factually. IMPORTANT: this call here is pure text summarization WITHOUT tool access — NEVER claim that you generally can't create/send documents/files (you very much can, just not in THIS call); if the question mentions that, just say instead that you need to be asked directly for that (not as a research request).") ("Question: " ++ query ++ "\n\nContext:\n" ++ ctx)
     catch e5
-        print ("do_search-ai_chat fehlgeschlagen: " ++ (to_str e5))
+        print ("do_search ai_chat failed: " ++ (to_str e5))
         mem.log_error dbh "do_search_ai_chat" (to_str e5)
         answer: ctx
     mem.add_message dbh tid cid "assistant" answer
     src_text: ""
     for u in srcs
         src_text: src_text ++ "\n" ++ u
-    full: (shorten answer) ++ "\n— Quellen:" ++ (shorten src_text)
+    full: (shorten answer) ++ "\n— Sources:" ++ (shorten src_text)
     kb: []
     row: []
-    push row (tel.tel_button "💾 Merken" "save")
+    push row (tel.tel_button "💾 Remember" "save")
     push kb row
     tel.tel_send_message_kb token cid (shorten full) kb
     nil
 
---! Erkennt eine Such-Intention und liefert den Suchbegriff (oder "").
+--! Detects a search intent and returns the search term (or "").
 fn search_query low tnorm
     if (len low) >= 8
         if (substring low 0 8) == "/search "
@@ -1021,30 +1015,30 @@ fn search_query low tnorm
             return (trim (substring tnorm 6 (len tnorm)))
     ""
 
---! Erkennt eine /graph-Anfrage und liefert den Entitätsnamen (oder "").
+--! Detects a /graph request and returns the entity name (or "").
 fn graph_query low tnorm
     if (len low) >= 7
         if (substring low 0 7) == "/graph "
             return (trim (substring tnorm 7 (len tnorm)))
     ""
 
---! Erkennt eine /learn-Anfrage und liefert die URL (oder "").
+--! Detects a /learn request and returns the URL (or "").
 fn learn_query low tnorm
     if (len low) >= 7
         if (substring low 0 7) == "/learn "
             return (trim (substring tnorm 7 (len tnorm)))
     ""
 
---! Erkennt eine /remind- ODER frei formulierte "erinnere mich..."-Anfrage und
---! liefert die Erinnerungs-Anweisung (oder ""). Bewusst deterministisch statt
---! ueber das Gremiums-Werkzeug 'erinnerung_planen' gelaufen: beobachtet wurde,
---! dass die KI bei "Erinnere mich in 30 Sekunden..." eine Bestaetigung
---! ausgegeben hat, OHNE das Werkzeug tatsaechlich aufzurufen — kein Eintrag in
---! der 'scheduled'-Tabelle trotz "Ich habe die Erinnerung geplant"-Antwort.
---! Fuer eine derart erwartungsstiftende Zusage darf sich das nicht auf
---! Tool-Call-Befolgung durchs LLM verlassen. 'erinnerung_planen' bleibt fuer
---! implizite Faelle (z.B. "Ich habe morgen einen Termin...") zustaendig, die
---! dieses Muster nicht matchen.
+--! Detects a /remind OR a freely worded "remind me..." request and
+--! returns the reminder instruction (or ""). Deliberately deterministic
+--! instead of routed through the gremium tool 'erinnerung_planen': it was
+--! observed that the AI, given "Remind me in 30 seconds...", output a
+--! confirmation WITHOUT actually calling the tool — no entry in the
+--! 'scheduled' table despite an "I've scheduled the reminder" reply. For
+--! such an expectation-setting promise, this can't rely on the LLM
+--! following through on a tool call. 'erinnerung_planen' remains
+--! responsible for implicit cases (e.g. "I have an appointment
+--! tomorrow...") that don't match this pattern.
 fn remind_query low tnorm
     if (len low) >= 8
         if (substring low 0 8) == "/remind "
@@ -1053,19 +1047,18 @@ fn remind_query low tnorm
         return tnorm
     ""
 
---! /settings-Menue: Anzeigetext + Inline-Tastatur, die aktuellen Werte
---! stehen direkt auf den Buttons (Antippen rotiert zum naechsten Wert, siehe
---! handle_callback unten "settings_*"). Beide Funktionen lesen dieselben vier
---! Chat-Einstellungen (siehe setting_get/setting_cycle/setting_label in
---! memory.pipe) — bei jeder Aenderung wird die Nachricht per
---! tel_edit_message_text_kb neu aufgebaut, damit der Button sofort den neuen
---! Wert zeigt.
+--! /settings menu: display text + inline keyboard, the current values sit
+--! directly on the buttons (tapping rotates to the next value, see
+--! handle_callback below "settings_*"). Both functions read the same four
+--! chat settings (see setting_get/setting_cycle/setting_label in
+--! memory.pipe) — on every change the message is rebuilt via
+--! tel_edit_message_text_kb, so the button immediately shows the new value.
 fn settings_menu_text dbh cid
     style: mem.setting_get dbh (to_str cid) "style" "normal"
     sprache: mem.setting_get dbh (to_str cid) "sprache" "de"
     proaktiv: mem.setting_get dbh (to_str cid) "proaktiv" "on"
     gedaechtnis: mem.setting_get dbh (to_str cid) "gedaechtnis" "normal"
-    "⚙️ Einstellungen\n\nStil: " ++ (mem.setting_label "style" style) ++ "\nSprache: " ++ (mem.setting_label "sprache" sprache) ++ "\nProaktive Nachrichten: " ++ (mem.setting_label "proaktiv" proaktiv) ++ "\nGedächtnis: " ++ (mem.setting_label "gedaechtnis" gedaechtnis) ++ "\n\nAuf einen Wert tippen, um ihn zu ändern."
+    "⚙️ Settings\n\nStyle: " ++ (mem.setting_label "style" style) ++ "\nLanguage: " ++ (mem.setting_label "sprache" sprache) ++ "\nProactive messages: " ++ (mem.setting_label "proaktiv" proaktiv) ++ "\nMemory: " ++ (mem.setting_label "gedaechtnis" gedaechtnis) ++ "\n\nTap a value to change it."
 
 fn settings_kb dbh cid
     style: mem.setting_get dbh (to_str cid) "style" "normal"
@@ -1074,23 +1067,23 @@ fn settings_kb dbh cid
     gedaechtnis: mem.setting_get dbh (to_str cid) "gedaechtnis" "normal"
     kb: []
     r1: []
-    push r1 (tel.tel_button ("Stil: " ++ (mem.setting_label "style" style)) "settings_style")
+    push r1 (tel.tel_button ("Style: " ++ (mem.setting_label "style" style)) "settings_style")
     push kb r1
     r2: []
-    push r2 (tel.tel_button ("Sprache: " ++ (mem.setting_label "sprache" sprache)) "settings_sprache")
+    push r2 (tel.tel_button ("Language: " ++ (mem.setting_label "sprache" sprache)) "settings_sprache")
     push kb r2
     r3: []
-    push r3 (tel.tel_button ("Proaktiv: " ++ (mem.setting_label "proaktiv" proaktiv)) "settings_proaktiv")
+    push r3 (tel.tel_button ("Proactive: " ++ (mem.setting_label "proaktiv" proaktiv)) "settings_proaktiv")
     push kb r3
     r4: []
-    push r4 (tel.tel_button ("Gedächtnis: " ++ (mem.setting_label "gedaechtnis" gedaechtnis)) "settings_gedaechtnis")
+    push r4 (tel.tel_button ("Memory: " ++ (mem.setting_label "gedaechtnis" gedaechtnis)) "settings_gedaechtnis")
     push kb r4
     r5: []
-    push r5 (tel.tel_button "Fertig" "settings_done")
+    push r5 (tel.tel_button "Done" "settings_done")
     push kb r5
     kb
 
---! Verarbeitet einen Inline-Button-Druck (callback_query).
+--! Processes an inline button press (callback_query).
 fn handle_callback token dbh cbq
     cbid: get cbq "id"
     data: get cbq "data"
@@ -1102,46 +1095,46 @@ fn handle_callback token dbh cbq
     tel.tel_answer_callback token cbid ""
     if data == "save"
         if txt != nil
-            mem.add_memory dbh (mem.condense_fact txt) "fact" 3 "telegram" "nutzer"
-            tel.tel_send_message token cid "In der Seele gespeichert."
+            mem.add_memory dbh (mem.condense_fact txt) "fact" 3 "telegram" "user"
+            tel.tel_send_message token cid "Saved in the soul."
         return nil
     if data == "more"
         if txt != nil
             tel.tel_send_chat_action token cid "typing"
             message_id: nil
-            ph: tel.tel_send_message token cid "🧠 Vertiefe..."
+            ph: tel.tel_send_message token cid "🧠 Digging deeper..."
             if (get ph "ok") == true
                 message_id: get (get ph "result") "message_id"
             on_update: make_swarm_updater token cid message_id
             setup_sandbox all_mcp_servers
-            res: grm.run_gremium_stream dbh cid ((mem.settings_prompt_prefix dbh (to_str cid)) ++ "Vertiefe bitte diesen Sachverhalt: " ++ txt) on_update
+            res: grm.run_gremium_stream dbh cid ((mem.settings_prompt_prefix dbh (to_str cid)) ++ "Please dig deeper into this: " ++ txt) on_update
             a: get res "content"
             if a != nil && a != ""
                 tid: mem.active_thread dbh cid
                 mem.add_message dbh tid cid "assistant" a
                 tel_finalize token cid message_id (shorten a) nil
             else
-                tel_finalize token cid message_id "Ich konnte leider nichts vertiefen." nil
+                tel_finalize token cid message_id "Unfortunately I couldn't dig up anything more." nil
         return nil
     if data == "up"
         if txt != nil
             n: mem.adjust_by_content dbh txt 1
             if n == 0
                 mem.add_memory dbh (mem.condense_fact txt) "fact" 3 "telegram" "feedback"
-                tel.tel_send_message token cid "Danke! Ich merke mir das."
+                tel.tel_send_message token cid "Thanks! I'll remember that."
             else
-                tel.tel_send_message token cid "Danke! Wichtigkeit erhöht."
+                tel.tel_send_message token cid "Thanks! Importance increased."
         return nil
     if data == "down"
         if txt != nil
             mem.adjust_by_content dbh txt (-1)
-            tel.tel_send_message token cid "Notiert — ich werte das ab."
+            tel.tel_send_message token cid "Noted — I'll lower its importance."
         return nil
-    --! /settings-Menue (siehe settings_menu_text/settings_kb oben): jeder
-    --! Button rotiert seine EIGENE Einstellung zum naechsten Wert (setting_cycle
-    --! in memory.pipe) und baut das Menue direkt in derselben Nachricht neu auf
-    --! (editMessageText statt neuer Nachricht) — fuehlt sich wie ein echter
-    --! Umschalter an, kein wachsender Nachrichtenverlauf pro Klick.
+    --! /settings menu (see settings_menu_text/settings_kb above): each
+    --! button rotates its OWN setting to the next value (setting_cycle in
+    --! memory.pipe) and rebuilds the menu directly in the same message
+    --! (editMessageText instead of a new message) — feels like a real toggle,
+    --! no growing message history per click.
     if data == "settings_style" || data == "settings_sprache" || data == "settings_proaktiv" || data == "settings_gedaechtnis"
         key: substring data 9 (len data)
         cid_str: to_str cid
@@ -1159,9 +1152,9 @@ fn handle_callback token dbh cbq
     if data == "settings_done"
         tel.tel_delete_message token cid message_id
         return nil
-    tel.tel_send_message token cid "Unbekannte Aktion."
+    tel.tel_send_message token cid "Unknown action."
 
---! Zerlegt BRIEFING_TIME ("HH:MM") in {hh, mm}. Default 08:00.
+--! Splits BRIEFING_TIME ("HH:MM") into {hh, mm}. Default 08:00.
 fn parse_briefing_time raw
     hh: 8
     mm: 0
@@ -1175,20 +1168,20 @@ fn parse_briefing_time raw
     set out "mm" mm
     out
 
---! Unix-Sekunden von "morgen 00:00" in der konfigurierten Zeitzone (fuer
---! "Termine bis Ende des heutigen Tages" in der Briefing-Anreicherung unten
---! — gleiche Tagesgrenzen-Logik wie next_hhmm in scheduler.pipe).
+--! Unix seconds of "tomorrow 00:00" in the configured timezone (for
+--! "appointments until the end of today" in the briefing enrichment below
+--! — same day-boundary logic as next_hhmm in scheduler.pipe).
 fn day_end_sec now_sec offset_sec
     shifted: now_sec + offset_sec
     day_start: shifted - (shifted % 86400)
     (day_start + 86400) - offset_sec
 
---! Ruft das Google-Calendar-MCP-Werkzeug fuer Termine im Zeitfenster ab.
---! Liefert den vom Werkzeug formatierten Text (kein rohes JSON verfuegbar)
---! oder nil bei jedem Fehler (Google nicht verbunden, Token abgelaufen —
---! Testing-Mode-Refresh-Token laeuft nach 7 Tagen ab, siehe README). Rein
---! best-effort: eine fehlgeschlagene proaktive Kalenderpruefung darf nie den
---! Scheduler-Tick oder eine andere Nachricht stoeren.
+--! Calls the Google Calendar MCP tool for appointments in the time
+--! window. Returns the text formatted by the tool (no raw JSON
+--! available) or nil on any error (Google not connected, token expired —
+--! testing-mode refresh tokens expire after 7 days, see README). Purely
+--! best-effort: a failed proactive calendar check must never disrupt the
+--! scheduler tick or another message.
 fn calendar_events_text email time_min_sec time_max_sec
     if email == nil || email == ""
         return nil
@@ -1199,11 +1192,11 @@ fn calendar_events_text email time_min_sec time_max_sec
     catch e
         return nil
 
---! Parst eine get_events-Antwort in [{id, line}, ...]. Kein rohes JSON
---! verfuegbar (nur formatierter Text: '- "Titel" (Starts: ...) ID: <id> |
---! Link: ...' pro Zeile) — daher zeilenweise nach 'ID: ' gesucht. Zerbrechlich
---! gegenueber Formatwechseln des MCP-Servers, aber praktikabler als die
---! Alternative (kein strukturiertes Ergebnis verfuegbar).
+--! Parses a get_events response into [{id, line}, ...]. No raw JSON
+--! available (only formatted text: '- "Title" (Starts: ...) ID: <id> |
+--! Link: ...' per line) — so it searches line by line for 'ID: '. Fragile
+--! against format changes in the MCP server, but more practical than the
+--! alternative (no structured result available).
 fn parse_calendar_events text
     out: []
     if text == nil || text == ""
@@ -1220,14 +1213,14 @@ fn parse_calendar_events text
             push out {id: (trim id), line: line}
     out
 
---! Meta-Schluessel fuer die Dedup-Liste bereits gemeldeter Kalendertermine
---! (Format: "<id>:<unix_ts>,<id>:<unix_ts>,..."). Titel+Startzeit waeren als
---! Dedup-Schluessel auch gegangen, aber get_events liefert eine echte
---! Event-ID im Text mit — zuverlaessiger als Freitext-Abgleich.
+--! Meta key for the dedup list of already-reported calendar events
+--! (format: "<id>:<unix_ts>,<id>:<unix_ts>,..."). Title+start time could
+--! also have worked as a dedup key, but get_events includes a real event
+--! ID in the text — more reliable than free-text matching.
 NOTIFIED_CAL_KEY: "notified_calendar_events"
 
---! Laedt die Dedup-Liste, entfernt Eintraege aelter als 24h (damit die Liste
---! bei taeglich wiederkehrenden Terminen nicht unbegrenzt waechst).
+--! Loads the dedup list, removes entries older than 24h (so the list
+--! doesn't grow unbounded for daily recurring events).
 fn load_notified_ids dbh
     raw: mem.meta_get dbh NOTIFIED_CAL_KEY
     out: {}
@@ -1247,10 +1240,11 @@ fn save_notified_ids dbh idmap
         push parts (id ++ ":" ++ (to_str (get idmap id)))
     mem.meta_set dbh NOTIFIED_CAL_KEY (join parts ",")
 
---! Proaktive Kalender-Erinnerung: prueft anstehende Termine im konfigurierten
---! Vorlauf-Fenster (calendar_reminder_minutes) und meldet neue (noch nicht
---! gemeldete) Termine einmalig per Telegram — Dedup ueber load_notified_ids/
---! save_notified_ids verhindert Wiederholungen bei jedem 15-Minuten-Takt.
+--! Proactive calendar reminder: checks upcoming appointments within the
+--! configured lead window (calendar_reminder_minutes) and reports new (not
+--! yet reported) appointments once via Telegram — dedup via
+--! load_notified_ids/save_notified_ids prevents repeats on every
+--! 15-minute tick.
 fn calendar_notify_new token dbh cid email window_minutes
     text: calendar_events_text email now (now + window_minutes * 60)
     events: parse_calendar_events text
@@ -1262,23 +1256,22 @@ fn calendar_notify_new token dbh cid email window_minutes
         id: get ev "id"
         if (get notified id) == nil
             try
-                tel.tel_send_message token (to_num cid) ("📅 Bald: " ++ (get ev "line"))
+                tel.tel_send_message token (to_num cid) ("📅 Coming up: " ++ (get ev "line"))
             catch e6
-                --! Wird trotzdem als "benachrichtigt" markiert (keine
-                --! Wiederholung) — daher wichtig, einen fehlgeschlagenen
-                --! Versand wenigstens zu loggen, statt ihn spurlos zu
-                --! verlieren.
-                print ("Kalender-Erinnerung senden fehlgeschlagen: " ++ (to_str e6))
-                mem.log_error dbh "kalender_erinnerung_senden" (to_str e6)
+                --! Still gets marked as "notified" (no repeat) — so it's
+                --! important to at least log a failed send instead of
+                --! losing it silently.
+                print ("Failed to send calendar reminder: " ++ (to_str e6))
+                mem.log_error dbh "calendar_reminder_send" (to_str e6)
             set notified id now
             changed: true
     if changed
         save_notified_ids dbh notified
 
---! Scheduler-Tick (P4): feuert fällige Erinnerungen/Briefings proaktiv ab —
---! läuft im Bot-Loop nach jedem Poll, single-threaded (kein Goroutine-/DB-
---! Konflikt, siehe Plan.md). Briefings werden erst beim Feuern aus der Seele
---! zusammengestellt (immer aktuell, kein veralteter Snapshot).
+--! Scheduler tick (P4): proactively fires due reminders/briefings — runs
+--! in the bot loop after every poll, single-threaded (no goroutine/DB
+--! conflict, see Plan.md). Briefings are only assembled from the soul at
+--! fire time (always current, never a stale snapshot).
 fn sched_tick token
     hl: mem.open_locked nil
     dbh: get hl "h"
@@ -1293,7 +1286,7 @@ fn sched_tick token
             if mcp.is_connected "google" && user_google_email != nil && user_google_email != ""
                 evt: calendar_events_text user_google_email now_sec (day_end_sec now_sec tz_offset)
                 if (len (parse_calendar_events evt)) > 0
-                    msg: msg ++ "\n\n📅 Termine heute:\n" ++ evt
+                    msg: msg ++ "\n\n📅 Today's appointments:\n" ++ evt
         if kind == "calendar_check"
             if mem.setting_proaktiv_enabled dbh (to_str cid)
                 calendar_notify_new token dbh cid user_google_email calendar_reminder_minutes
@@ -1302,95 +1295,95 @@ fn sched_tick token
         if kind == "goal_tick"
             resumed: exe.resume_running_plans dbh
             if resumed > 0
-                tel.tel_send_message token (to_num cid) ("Fortschritt: " ++ (to_str resumed) ++ " unterbrochene Pläne fortgesetzt.")
+                tel.tel_send_message token (to_num cid) ("Progress: " ++ (to_str resumed) ++ " interrupted plans resumed.")
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
             continue
         if kind == "job_check"
-            --! note-Feld traegt die docker_jobs-Zeilen-ID (siehe
-            --! grm.tool_docker_hintergrund_setup). Frisches Tool-/Exec-Budget
-            --! VOR dem ersten exec()-Aufruf noetig (refresh_job_status ruft
-            --! selbst exec() auf — docker inspect/logs — siehe
-            --! setup_sandbox-Kommentar bei handle_voice; dieser Lauf startet
-            --! ausserhalb des normalen Nachrichtenflusses, hat also noch kein
-            --! aktuelles Sandbox-Profil fuer DIESE Anfrage).
+            --! The note field carries the docker_jobs row ID (see
+            --! grm.tool_docker_hintergrund_setup). A fresh tool/exec budget
+            --! is needed BEFORE the first exec() call (refresh_job_status
+            --! itself calls exec() — docker inspect/logs — see the
+            --! setup_sandbox comment at handle_voice; this run starts
+            --! outside the normal message flow, so it doesn't yet have a
+            --! current sandbox profile for THIS request).
             setup_sandbox all_mcp_servers
-            --! refresh_job_status prueft den ECHTEN Docker-Container-Zustand
-            --! (docker inspect/logs) und aktualisiert docker_jobs erst hier
-            --! auf 'done'/'failed' — 'docker run -d' liefert nur den START
-            --! zurueck, siehe Kommentar in docker_tools.pipe. Laeuft der
-            --! Container noch, einfach neu einplanen — KEIN Telegram-Spam bei
-            --! jedem Tick, nur bei tatsaechlichem Abschluss meldet sich Muninn.
+            --! refresh_job_status checks the REAL Docker container state
+            --! (docker inspect/logs) and only updates docker_jobs to
+            --! 'done'/'failed' here — 'docker run -d' only returns the
+            --! START, see the comment in docker_tools.pipe. If the container
+            --! is still running, simply reschedule — NO Telegram spam on
+            --! every tick, Muninn only checks in once it's actually finished.
             job: dt.refresh_job_status dbh (to_num (get item "note"))
             still_running: job != nil && (get job "status") == "running"
             if still_running
                 sched.mark_fired dbh (get item "id") "5min" (get item "due_ts")
                 continue
-            --! Vom Nutzer explizit abgebrochen (/stop bzw. 'docker_jobs_abbrechen',
-            --! siehe docker_tools.pipe cancel_job) — sauber und STILL beenden,
-            --! keine Nachricht, keine Fortsetzungsfrage. Genau diese Luecke
-            --! fehlte vorher: ohne 'cancelled' als eigenen Endzustand landete ein
-            --! abgebrochener Job hier als "Container nicht mehr auffindbar" und
-            --! wurde als Fehlschlag gemeldet, samt Vorschlag, es erneut zu
-            --! versuchen — trotz expliziten Abbruchs durch den Nutzer.
+            --! Explicitly cancelled by the user (/stop or
+            --! 'docker_jobs_abbrechen', see docker_tools.pipe cancel_job) —
+            --! end cleanly and SILENTLY, no message, no follow-up question.
+            --! This exact gap was missing before: without 'cancelled' as its
+            --! own end state, a cancelled job ended up here as "container no
+            --! longer found" and was reported as a failure, complete with a
+            --! suggestion to retry — despite the user's explicit
+            --! cancellation.
             if job != nil && (get job "status") == "cancelled"
                 sched.cancel dbh (get item "id")
                 continue
-            beschreibung: "unbekannt"
-            ergebnis: "Job nicht gefunden."
+            beschreibung: "unknown"
+            ergebnis: "Job not found."
             if job != nil
                 beschreibung: get job "description"
                 ergebnis: (get job "status") ++ ": " ++ (to_str (get job "result"))
-            continuation: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "Ein zuvor im Hintergrund gestartetes Docker-Setup ist abgeschlossen. Beschreibung: " ++ beschreibung ++ ". Ergebnis (inkl. Container-Logs/Testausgabe, falls vorhanden): " ++ ergebnis ++ ". Berichte dem Nutzer knapp und sauber formatiert, was passiert ist — bei Testlaeufen: wie viele Tests liefen, bestanden/fehlgeschlagen, wichtigste Fehlermeldung falls fehlgeschlagen. Braucht die urspruengliche Aufgabe noch einen naechsten Schritt, stosse ihn direkt an (z.B. erneuter Aufruf von 'docker_hintergrund_setup')."
+            continuation: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "A previously background-started Docker setup has finished. Description: " ++ beschreibung ++ ". Result (incl. container logs/test output, if available): " ++ ergebnis ++ ". Report to the user briefly and cleanly formatted what happened — for test runs: how many tests ran, passed/failed, the most important error message if failed. If the original task still needs a next step, initiate it directly (e.g. calling 'docker_hintergrund_setup' again)."
             res: grm.run_gremium dbh (to_num cid) continuation
             tel.tel_send_message token (to_num cid) (get res "content")
             sched.cancel dbh (get item "id")
             continue
         if kind == "task_check"
-            --! Generische Fortsetzung (siehe grm.tool_hintergrund_fortsetzen) —
-            --! im Gegensatz zu job_check oben gibt es hier KEINEN billigen
-            --! externen Status-Check: das Gremium bekommt einfach ein
-            --! frisches Rundenbudget und arbeitet mit dem gespeicherten
-            --! Fortschritt weiter. Ist es JETZT fertig, antwortet es normal;
-            --! ist es noch nicht fertig, ruft es 'hintergrund_fortsetzen'
-            --! selbst erneut auf (das legt einen NEUEN Checkpoint + neuen
-            --! Scheduler-Eintrag an) — DIESER Eintrag hier wird in jedem Fall
-            --! abgeschlossen, die Kette laeuft ueber den neuen Eintrag weiter.
+            --! Generic continuation (see grm.tool_hintergrund_fortsetzen) —
+            --! unlike job_check above, there is NO cheap external status
+            --! check here: the gremium simply gets a fresh round budget and
+            --! continues working with the saved progress. If it's done NOW,
+            --! it answers normally; if it's not done yet, it calls
+            --! 'hintergrund_fortsetzen' again itself (which creates a NEW
+            --! checkpoint + new scheduler entry) — THIS entry here is
+            --! closed out in any case, the chain continues via the new entry.
             t: sched.get_background_task dbh (to_num (get item "note"))
             if t == nil
                 sched.cancel dbh (get item "id")
                 continue
             setup_sandbox all_mcp_servers
-            continuation2: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "Du arbeitest an einer zuvor zurueckgestellten Aufgabe weiter. Urspruengliche Aufgabe: " ++ (get t "task") ++ ". Bisheriger Fortschritt: " ++ (get t "progress") ++ ". Setze die Arbeit fort. Bist du JETZT fertig, teile dem Nutzer das Endergebnis klar mit. Bist du NOCH NICHT fertig, rufe 'hintergrund_fortsetzen' erneut auf mit dem aktualisierten Fortschritt."
+            continuation2: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "You're continuing work on a previously deferred task. Original task: " ++ (get t "task") ++ ". Progress so far: " ++ (get t "progress") ++ ". Continue the work. If you're done NOW, clearly communicate the final result to the user. If you're NOT done yet, call 'hintergrund_fortsetzen' again with the updated progress."
             res2: grm.run_gremium dbh (to_num cid) continuation2
             tel.tel_send_message token (to_num cid) (get res2 "content")
             sched.cancel dbh (get item "id")
             continue
         if kind == "proaktiv"
-            --! Proaktiver Eigenimpuls (P4): Muninn wurde NICHT angesprochen —
-            --! das Gremium entscheidet selbst, ob sich eine Nachricht lohnt.
-            --! Schweigen ist hier ein vollwertiges Ergebnis ("NICHTS"), sonst
-            --! spammt der taegliche Tick den Nutzer mit Leermeldungen zu.
-            --! Per /settings abschaltbar ("Proaktive Nachrichten") — der
-            --! Scheduler-Eintrag selbst laeuft trotzdem weiter (naechster Tag
-            --! wird normal erneut geplant), nur der eigentliche Gremiums-Lauf
-            --! + Versand entfaellt, solange die Einstellung aus ist.
+            --! Proactive self-initiative (P4): Muninn was NOT addressed —
+            --! the gremium decides for itself whether a message is
+            --! worthwhile. Silence is a fully valid outcome here ("NOTHING"),
+            --! otherwise the daily tick would spam the user with empty
+            --! messages. Can be turned off via /settings ("Proactive
+            --! messages") — the scheduler entry itself keeps running
+            --! regardless (the next day gets rescheduled normally), only the
+            --! actual gremium run + send is skipped while the setting is off.
             if mem.setting_proaktiv_enabled dbh (to_str cid)
                 setup_sandbox all_mcp_servers
-                prompt_proaktiv: "PROAKTIVER IMPULS (du wurdest NICHT angesprochen — entscheide selbst, ob sich eine Nachricht an den Nutzer lohnt): Sieh mit 'erinnerungen_suchen' in dein Gedaechtnis: gibt es offene/angefangene Aufgaben, unterbrochene Arbeiten, bald faellige Termine oder wichtige Entwicklungen zu Themen, die den Nutzer beschaeftigen — etwas, das der Nutzer selbst ansprechen wuerde? Gibt es etwas WICHTIGES: schreibe die kurze, konkrete Nachricht an den Nutzer; findest du eine Aufgabe, die du zu einem bestimmten Zeitpunkt wieder aufgreifen solltest, plane das selbst mit 'erinnerung_planen' bzw. 'hintergrund_fortsetzen'. Gibt es NICHTS Nennenswertes: antworte AUSSCHLIESSLICH mit dem einzelnen Wort NICHTS, ohne weitere Zeichen."
+                prompt_proaktiv: "PROACTIVE IMPULSE (you were NOT addressed — decide for yourself whether a message to the user is worthwhile): use 'erinnerungen_suchen' to look into your memory: are there open/started tasks, interrupted work, upcoming appointments, or important developments on topics that matter to the user — something the user themselves would bring up? If there's something IMPORTANT: write the short, concrete message to the user; if you find a task you should revisit at a specific time, plan that yourself with 'erinnerung_planen' or 'hintergrund_fortsetzen'. If there's NOTHING worth mentioning: reply ONLY with the single word NOTHING, with no other characters."
                 res_proaktiv: grm.run_gremium dbh (to_num cid) prompt_proaktiv
                 content_proaktiv: get res_proaktiv "content"
-                if content_proaktiv != nil && (lower (trim content_proaktiv)) != "nichts" && (trim content_proaktiv) != ""
+                if content_proaktiv != nil && (lower (trim content_proaktiv)) != "nothing" && (trim content_proaktiv) != ""
                     tel.tel_send_message token (to_num cid) (shorten (trim content_proaktiv))
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
             continue
         if kind == "selbstdiagnose"
-            --! Selbst-Diagnose: einmal taeglich wertet Muninn sein eigenes
-            --! strukturiertes Fehler-Log der letzten 3 Tage aus (siehe
-            --! mem.error_summary/log_error) und meldet sich NUR, wenn ein Fehler
-            --! wiederholt (>= 3x) aufgetreten ist — ein einzelner Ausrutscher
-            --! (z.B. ein kurzzeitig nicht erreichbares MCP) ist normal und kein
-            --! Meldungsgrund, sonst Schweigen wie beim Eigenimpuls. Per
-            --! /settings ("Proaktive Nachrichten") ebenfalls abschaltbar.
+            --! Self-diagnosis: once a day, Muninn evaluates its own
+            --! structured error log from the last 3 days (see
+            --! mem.error_summary/log_error) and only speaks up if an error
+            --! occurred repeatedly (>= 3x) — a single blip (e.g. a briefly
+            --! unreachable MCP) is normal and not worth reporting, otherwise
+            --! silence just like the self-initiative. Also toggleable via
+            --! /settings ("Proactive messages").
             if mem.setting_proaktiv_enabled dbh (to_str cid)
                 summary: mem.error_summary dbh 3
                 auffaellig: []
@@ -1398,9 +1391,9 @@ fn sched_tick token
                     if (get row "cnt") >= 3
                         push auffaellig row
                 if (len auffaellig) > 0
-                    diag_msg: "⚠️ Selbst-Diagnose: diese Fehler traten in den letzten 3 Tagen wiederholt auf, evtl. lohnt ein Blick:\n"
+                    diag_msg: "⚠️ Self-diagnosis: these errors occurred repeatedly over the last 3 days, might be worth a look:\n"
                     for row in auffaellig
-                        diag_msg: diag_msg ++ "• " ++ (get row "tag") ++ " (" ++ (to_str (get row "cnt")) ++ "x, zuletzt " ++ (get row "last_ts") ++ ")\n"
+                        diag_msg: diag_msg ++ "• " ++ (get row "tag") ++ " (" ++ (to_str (get row "cnt")) ++ "x, last at " ++ (get row "last_ts") ++ ")\n"
                     tel.tel_send_message token (to_num cid) (shorten diag_msg)
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
             continue
@@ -1408,24 +1401,24 @@ fn sched_tick token
             try
                 tel.tel_send_message token (to_num cid) msg
             catch e7
-                --! Wird trotzdem als "erledigt"/verschoben markiert (kein
-                --! Wiederholungsversuch) — daher wichtig, einen fehlgeschlagenen
-                --! Versand wenigstens zu loggen, statt ihn spurlos zu verlieren.
-                print ("Scheduler-Nachricht senden fehlgeschlagen (" ++ kind ++ "): " ++ (to_str e7))
-                mem.log_error dbh ("scheduler_nachricht_senden:" ++ kind) (to_str e7)
+                --! Still gets marked "done"/rescheduled (no retry) — so it's
+                --! important to at least log a failed send instead of
+                --! losing it silently.
+                print ("Failed to send scheduler message (" ++ kind ++ "): " ++ (to_str e7))
+                mem.log_error dbh ("scheduler_message_send:" ++ kind) (to_str e7)
         sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
     mem.close_locked hl
     nil
 
---! Ein Polling-Zyklus. Liefert die letzte verarbeitete update_id zurück.
---! DB-Sperre (mem.open_locked/close_locked) bewusst NICHT um den ganzen
---! Zyklus, sondern nur um die tatsaechlichen DB-Zugriffe: tel_get_updates
---! wartet per Long-Polling bis zu `timeout` Sekunden auf neue Nachrichten —
---! waere die Sperre die ganze Zeit gehalten, koennte das Web-Dashboard
---! waehrenddessen so gut wie nie an die DB. So haelt jeder Kanal die Sperre
---! nur, waehrend er tatsaechlich etwas verarbeitet (siehe Plan.md zur
---! Nebenlaeufigkeit). timeout (Sekunden) kappt der P4-Scheduler dynamisch
---! auf "Zeit bis zur naechsten faelligen Aufgabe".
+--! One polling cycle. Returns the last processed update_id. The DB lock
+--! (mem.open_locked/close_locked) is deliberately NOT held around the
+--! entire cycle, only around the actual DB accesses: tel_get_updates
+--! waits via long-polling for up to `timeout` seconds for new messages —
+--! if the lock were held the whole time, the web dashboard could almost
+--! never reach the DB in the meantime. This way every channel only holds
+--! the lock while it's actually processing something (see Plan.md on
+--! concurrency). timeout (seconds) is dynamically capped by the P4
+--! scheduler to "time until the next due task".
 fn poll_once token offset allowed timeout
     hl: mem.open_locked nil
     dbh: get hl "h"
@@ -1438,10 +1431,10 @@ fn poll_once token offset allowed timeout
     try
         updates: tel.tel_get_updates token offset timeout
     catch e8
-        --! Kernstueck des Poll-Loops — schlaegt das dauerhaft fehl (z.B.
-        --! ungueltiger Token, Telegram nicht erreichbar), bekommt Muninn
-        --! sonst ohne jeden Hinweis KEINE Nachrichten mehr.
-        print ("tel_get_updates fehlgeschlagen: " ++ (to_str e8))
+        --! Core piece of the poll loop — if this fails persistently (e.g.
+        --! invalid token, Telegram unreachable), Muninn would otherwise
+        --! stop receiving ANY messages with no clue why.
+        print ("tel_get_updates failed: " ++ (to_str e8))
         updates: []
     hl2: mem.open_locked nil
     dbh2: get hl2 "h"
@@ -1458,13 +1451,12 @@ fn poll_once token offset allowed timeout
                     try
                         handle_update token cid msg dbh2
                     catch e9
-                        --! Faengt JEDEN unerwarteten Fehler aus der GESAMTEN
-                        --! Nachrichtenverarbeitung ab (Foto/Sprache/Dokument/
-                        --! Gremium/...) — ohne dieses Log sah ein echter
-                        --! Absturz irgendwo darin identisch aus wie
-                        --! "Muninn antwortet einfach nicht", ganz ohne
-                        --! Hinweis worauf.
-                        print ("handle_update fehlgeschlagen: " ++ (to_str e9))
+                        --! Catches ANY unexpected error from the ENTIRE message
+                        --! processing (photo/voice/document/gremium/...) —
+                        --! without this log, a real crash somewhere in there
+                        --! looked identical to "Muninn just isn't responding",
+                        --! with no clue where.
+                        print ("handle_update failed: " ++ (to_str e9))
                         mem.log_error dbh2 "handle_update" (to_str e9)
         cq: get upd "callback_query"
         if cq != nil
@@ -1475,42 +1467,42 @@ fn poll_once token offset allowed timeout
                     try
                         handle_callback token dbh2 cq
                     catch e10
-                        print ("handle_callback fehlgeschlagen: " ++ (to_str e10))
+                        print ("handle_callback failed: " ++ (to_str e10))
                         mem.log_error dbh2 "handle_callback" (to_str e10)
     if offset != nil
         mem.meta_set dbh2 "telegram_offset" (to_str offset)
     mem.close_locked hl2
     offset
 
---! Geteilter, mutabler Kosten-Zustand fuer maybe_log_cost (siehe dortigen
---! Kommentar zu Pipes Scoping-Regeln — top-level Variablen einfach neu
---! binden persistiert NICHT ueber Funktionsgrenzen hinweg, eine Map schon).
+--! Shared, mutable cost state for maybe_log_cost (see the comment there
+--! on Pipe's scoping rules — simply rebinding top-level variables does
+--! NOT persist across function boundaries, a map does).
 COST_STATE: {session_id: nil, last_calls: -1}
 
---! Sandbox + KI + MCP + Gremium in einem Rutsch, gemeinsam fuer Telegram- und
---! Web-Modus. Setzt voraus, dass Secrets/Config bereits (vor der Sandbox!)
---! gelesen wurden — siehe die Kommentare bei setup_ai/setup_sandbox.
+--! Sandbox + AI + MCP + gremium in one go, shared between Telegram and
+--! web mode. Assumes secrets/config have already been read (before the
+--! sandbox!) — see the comments at setup_ai/setup_sandbox.
 fn setup_core mcp_servers deepseek_key
     setup_sandbox all_mcp_servers
     setup_ai deepseek_key
     mcp_results: mcp.connect_servers all_mcp_servers
-    --! DB-Handle vorgezogen (frueher erst nach dem Connect-Loop fuer
-    --! session_id geoeffnet), damit ein bei JEDEM Neustart fehlschlagender
-    --! MCP-Server (z.B. abgelaufenes Google-Token) ebenfalls im
-    --! error_log landet — nicht nur im Journal — und so ueber die
-    --! Selbst-Diagnose (sched_tick "selbstdiagnose") auffaellt, statt nur bei
-    --! zufaelligem journalctl-Blick.
+    --! DB handle moved earlier (previously only opened after the connect
+    --! loop, for session_id), so that an MCP server that fails on EVERY
+    --! restart (e.g. an expired Google token) also ends up in the
+    --! error_log — not just in the journal — and so shows up via
+    --! self-diagnosis (sched_tick "selbstdiagnose") instead of only by
+    --! chance during a journalctl glance.
     hl: mem.open_locked nil
     dbh0: get hl "h"
     for r in mcp_results
         if get r "ok"
-            print ("MCP verbunden: " ++ (get r "alias"))
+            print ("MCP connected: " ++ (get r "alias"))
         else
-            print ("MCP fehlgeschlagen (" ++ (get r "alias") ++ "): " ++ (get r "error"))
+            print ("MCP failed (" ++ (get r "alias") ++ "): " ++ (get r "error"))
             mem.log_error dbh0 ("mcp_connect_startup:" ++ (get r "alias")) (get r "error")
-    --! MUSS vor init_gremium gesetzt sein: der Google-Spezialist baut seinen
-    --! System-Prompt (inkl. der konfigurierten E-Mail) nur EINMAL beim Start,
-    --! ein spaeteres Setzen haette keine Wirkung mehr.
+    --! MUST be set before init_gremium: the Google specialist builds its
+    --! system prompt (incl. the configured email) only ONCE at startup,
+    --! setting it later would have no effect.
     grm.set_google_email user_google_email
     grm.init_gremium 0
     grm.set_tz_offset tz_offset
@@ -1518,10 +1510,10 @@ fn setup_core mcp_servers deepseek_key
     mem.close_locked hl
     nil
 
---! Schreibt einen Kosten-Schnappschuss, wenn sich seit dem letzten Aufruf
---! etwas geaendert hat (ai_cost/ai_tokens sind In-Prozess-Zaehler ueber die
---! GESAMTE Laufzeit — ein Log pro leerem Poll-Zyklus waere reine
---! Tabellen-Blaehung ohne neue Information).
+--! Writes a cost snapshot if something has changed since the last call
+--! (ai_cost/ai_tokens are in-process counters over the ENTIRE runtime — a
+--! log per empty poll cycle would be pure table bloat with no new
+--! information).
 fn maybe_log_cost _
     c: {}
     try
@@ -1542,7 +1534,7 @@ fn maybe_log_cost _
     set COST_STATE "last_calls" calls
     nil
 
---! CLI-Argumente lesen.
+--! Read CLI arguments.
 avgs: args
 once_mode: false
 consolidate_mode: false
@@ -1555,16 +1547,16 @@ if (len avgs) > 0
     if (at avgs 0) == "web"
         web_mode: true
 
---! Alle Secrets/Config-Werte werden VOR der Sandbox-Aktivierung gelesen (siehe
---! setup_ai/setup_sandbox): einmal von vertrauenswürdigem Startup-Code eingesammelt,
---! danach nur noch als Wert weitergereicht — nie erneut per env() nachgefragt.
+--! All secrets/config values are read BEFORE sandbox activation (see
+--! setup_ai/setup_sandbox): collected once by trusted startup code, then
+--! only ever passed along as a value — never queried again via env().
 cfg: load_env ".env"
 configured_provider: lower (trim (cfg_get cfg "MUNINN_PROVIDER"))
 if configured_provider != nil && configured_provider != "" && configured_provider != "deepseek"
-    print ("Muninn nutzt nur DeepSeek; MUNINN_PROVIDER='" ++ configured_provider ++ "' wird ignoriert.")
+    print ("Muninn only uses DeepSeek; MUNINN_PROVIDER='" ++ configured_provider ++ "' is ignored.")
 deepseek_key: cfg_get cfg "DEEPSEEK_API_KEY"
 if deepseek_key == nil || deepseek_key == ""
-    print "WARNUNG: DEEPSEEK_API_KEY fehlt — Muninn nutzt nur DeepSeek und kann keine KI-Antworten generieren."
+    print "WARNING: DEEPSEEK_API_KEY is missing — Muninn only uses DeepSeek and cannot generate AI responses."
 dash_bind: cfg_get cfg "DASHBOARD_BIND"
 dash_token: cfg_get cfg "DASHBOARD_TOKEN"
 briefing_time: cfg_get cfg "BRIEFING_TIME"
@@ -1572,10 +1564,10 @@ tz_offset_raw: cfg_get cfg "MUNINN_TZ_OFFSET"
 tz_offset: 0
 if tz_offset_raw != nil && tz_offset_raw != ""
     tz_offset: to_num tz_offset_raw
---! Fuer proaktive Kalender-Erinnerungen (siehe calendar_notify_new/sched_tick
---! unten). Kein eigener .env-Schluessel noetig/keine Duplizierung — die
---! Adresse steckt bereits im "google"-Eintrag von MCP_AUTO_SERVERS (siehe
---! .env.example), von dort direkt uebernommen (einzige Quelle der Wahrheit).
+--! For proactive calendar reminders (see calendar_notify_new/sched_tick
+--! below). No separate .env key needed/no duplication — the address is
+--! already in the "google" entry of MCP_AUTO_SERVERS (see .env.example),
+--! taken directly from there (single source of truth).
 calendar_reminder_minutes_raw: cfg_get cfg "CALENDAR_REMINDER_MINUTES"
 calendar_reminder_minutes: 30
 if calendar_reminder_minutes_raw != nil && calendar_reminder_minutes_raw != ""
@@ -1596,25 +1588,26 @@ for s in all_mcp_servers
         if genv != nil
             user_google_email: get genv "USER_GOOGLE_EMAIL"
 
---! consolidate-Modus (P2, "Traum"): einmaliger Aufraeum-/Verdichtungslauf,
---! z.B. per externem Cron: `pipe muninn.pipe consolidate`. Kein Scheduler in
---! Pipe selbst vor P4 — daher bewusst als eigener CLI-Modus statt Dauer-Loop.
---! Braucht kein Telegram/MCP, nur optional KI fuer die Thread-Zusammenfassung
---! (Fallback ohne KI: erste 800 Zeichen des Verlaufs, siehe consolidate_threads).
+--! consolidate mode (P2, "dream"): a one-off cleanup/condensing run, e.g.
+--! via an external cron: `pipe muninn.pipe consolidate`. No scheduler in
+--! Pipe itself before P4 — hence deliberately its own CLI mode instead of
+--! a persistent loop. Needs no Telegram/MCP, only optionally AI for the
+--! thread summary (fallback without AI: the first 800 characters of the
+--! history, see consolidate_threads).
 if consolidate_mode
     sandbox_profile "consolidate" {fs: "full", network: false, exec: false, ai: true, audit_log: true}
     set_sandbox "consolidate"
     setup_ai deepseek_key
     hl: mem.open_locked nil
     res: mem.consolidate (get hl "h") 14 30
-    print ("Konsolidierung: " ++ (to_str (get res "threads_summarized")) ++ " Threads verdichtet, " ++ (to_str (get res "memories_decayed")) ++ " Erinnerungen gealtert, " ++ (to_str (get res "memories_forgotten")) ++ " vergessen.")
+    print ("Consolidation: " ++ (to_str (get res "threads_summarized")) ++ " threads condensed, " ++ (to_str (get res "memories_decayed")) ++ " memories decayed, " ++ (to_str (get res "memories_forgotten")) ++ " forgotten.")
     mem.close_locked hl
 else
     if web_mode
-        --! web-Modus (P3): Dashboard statt Telegram-Loop. DASHBOARD_BIND
-        --! (Standard: nur localhost — bewusst kein "0.0.0.0", siehe
-        --! dashboard.pipe-Kommentar zur Sicherheit) und optional
-        --! DASHBOARD_TOKEN aus .env.
+        --! web mode (P3): dashboard instead of the Telegram loop.
+        --! DASHBOARD_BIND (default: localhost only — deliberately not
+        --! "0.0.0.0", see the dashboard.pipe comment on security) and
+        --! optionally DASHBOARD_TOKEN from .env.
         setup_core mcp_servers deepseek_key
         bind: dash_bind
         if bind == nil || bind == ""
@@ -1628,17 +1621,17 @@ else
         --! — braucht den Bot-Token, um selbst an Telegram senden zu koennen.
         grm.set_token tok
         if tok == nil || tok == ""
-            print "TELEGRAM_BOT_TOKEN fehlt (Env oder .env). Abbruch."
+            print "TELEGRAM_BOT_TOKEN is missing (env or .env). Aborting."
         else
-            print "Muninn gestartet."
-            --! Proaktive Kalender-Erinnerungen (siehe calendar_notify_new oben):
-            --! automatisch aktiv, sobald Google verbunden UND eine feste
-            --! TELEGRAM_ALLOWED_CHAT_ID konfiguriert ist — ohne konfigurierten
-            --! Empfaenger gaebe es keine eindeutige Zieladresse fuer eine
-            --! unaufgeforderte Nachricht, daher bewusst kein Rateversuch.
-            --! Idempotent: registriert nur, wenn noch kein "calendar_check"
-            --! fuer diesen Chat existiert (sonst haeufen sich bei jedem
-            --! Neustart doppelte Scheduler-Eintraege).
+            print "Muninn started."
+            --! Proactive calendar reminders (see calendar_notify_new above):
+            --! automatically active once Google is connected AND a fixed
+            --! TELEGRAM_ALLOWED_CHAT_ID is configured — without a configured
+            --! recipient there would be no clear target address for an
+            --! unsolicited message, so deliberately no guessing. Idempotent:
+            --! only registers if no "calendar_check" exists yet for this
+            --! chat (otherwise duplicate scheduler entries would pile up on
+            --! every restart).
             if mcp.is_connected "google" && allowed != nil && allowed != ""
                 hlc: mem.open_locked nil
                 dbhc: get hlc "h"
@@ -1648,16 +1641,16 @@ else
                         has_check: true
                 if !has_check
                     sched.schedule dbhc "calendar_check" allowed "" (now + 60) "15min"
-                    print "Proaktive Kalender-Erinnerungen aktiviert."
+                    print "Proactive calendar reminders activated."
                 mem.close_locked hlc
-            --! Taeglicher proaktiver Eigenimpuls (siehe sched_tick, kind
-            --! "proaktiv"): Muninn schaut einmal taeglich von sich aus ins
-            --! Gedaechtnis (offene Aufgaben, angefangene Arbeiten, Themen)
-            --! und meldet sich NUR, wenn es etwas Wichtiges gibt — sonst
-            --! Schweigen. Braucht eine feste TELEGRAM_ALLOWED_CHAT_ID als
-            --! Zieladresse (wie calendar_check oben). Idempotent: nur EIN
-            --! "proaktiv"-Eintrag pro Chat, sonst haeufen sich bei jedem
-            --! Neustart Doppel-Ticks.
+            --! Daily proactive self-initiative (see sched_tick, kind
+            --! "proaktiv"): once a day, Muninn looks into its memory on its
+            --! own (open tasks, started work, topics) and only speaks up if
+            --! there's something important — otherwise silence. Needs a
+            --! fixed TELEGRAM_ALLOWED_CHAT_ID as the target address (like
+            --! calendar_check above). Idempotent: only ONE "proaktiv" entry
+            --! per chat, otherwise duplicate ticks would pile up on every
+            --! restart.
             if allowed != nil && allowed != ""
                 hlp: mem.open_locked nil
                 dbhp: get hlp "h"
@@ -1668,16 +1661,16 @@ else
                 if !has_proaktiv
                     proaktiv_due: sched.next_hhmm 12 0 now tz_offset
                     sched.schedule dbhp "proaktiv" allowed "" proaktiv_due "daily"
-                    print "Taeglicher proaktiver Eigenimpuls aktiviert."
+                    print "Daily proactive self-initiative activated."
                 mem.close_locked hlp
-            --! Taegliche Selbst-Diagnose (siehe sched_tick, kind
-            --! "selbstdiagnose"): Muninn prueft einmal taeglich sein eigenes
-            --! strukturiertes Fehler-Log (mem.error_summary, siehe log_error-
-            --! Aufrufstellen im ganzen Code) auf wiederholte Fehler und meldet
-            --! sich NUR, wenn etwas ueber dem Schwellwert liegt — sonst
-            --! Schweigen (wie beim Eigenimpuls). Andere Uhrzeit als Briefing
-            --! (08:00) und Eigenimpuls (12:00), damit proaktive Nachrichten
-            --! sich nicht ballen. Idempotent wie die beiden Eintraege oben.
+            --! Daily self-diagnosis (see sched_tick, kind "selbstdiagnose"):
+            --! once a day, Muninn checks its own structured error log
+            --! (mem.error_summary, see the log_error call sites throughout
+            --! the code) for repeated errors and only speaks up if something
+            --! is above the threshold — otherwise silence (like the
+            --! self-initiative). A different time than the briefing (08:00)
+            --! and self-initiative (12:00), so proactive messages don't
+            --! cluster. Idempotent like the two entries above.
             if allowed != nil && allowed != ""
                 hld: mem.open_locked nil
                 dbhd: get hld "h"
@@ -1688,33 +1681,33 @@ else
                 if !has_diag
                     diag_due: sched.next_hhmm 9 0 now tz_offset
                     sched.schedule dbhd "selbstdiagnose" allowed "" diag_due "daily"
-                    print "Taegliche Selbst-Diagnose aktiviert."
+                    print "Daily self-diagnosis activated."
                 mem.close_locked hld
             try
                 cmds: []
-                push cmds {command: "start", description: "Begrüßung"}
-                push cmds {command: "help", description: "Alle Befehle anzeigen"}
-                push cmds {command: "status", description: "Zustand von Muninn"}
-                push cmds {command: "costs", description: "KI-Betriebskosten zusammengefasst"}
-                push cmds {command: "list", description: "Wichtigste Erinnerungen"}
-                push cmds {command: "search", description: "Im Web suchen"}
-                push cmds {command: "learn", description: "Dokument/URL lernen"}
-                push cmds {command: "graph", description: "Wissensgraph abfragen"}
-                push cmds {command: "remind", description: "Erinnerung planen"}
-                push cmds {command: "reminders", description: "Offene Erinnerungen/Briefings"}
-                push cmds {command: "briefing", description: "Tägliches Briefing an/aus"}
-                push cmds {command: "reset", description: "Gesprächsverlauf zurücksetzen"}
-                push cmds {command: "consolidate", description: "Traum: Gedächtnis verdichten"}
-                push cmds {command: "settings", description: "Stil, Sprache, Proaktivität, Gedächtnis einstellen"}
-                push cmds {command: "stop", description: "Alle Hintergrund-Jobs sofort abbrechen"}
+                push cmds {command: "start", description: "Greeting"}
+                push cmds {command: "help", description: "Show all commands"}
+                push cmds {command: "status", description: "Muninn's status"}
+                push cmds {command: "costs", description: "AI running-cost summary"}
+                push cmds {command: "list", description: "Most important memories"}
+                push cmds {command: "search", description: "Search the web"}
+                push cmds {command: "learn", description: "Learn a document/URL"}
+                push cmds {command: "graph", description: "Query the knowledge graph"}
+                push cmds {command: "remind", description: "Schedule a reminder"}
+                push cmds {command: "reminders", description: "Open reminders/briefings"}
+                push cmds {command: "briefing", description: "Daily briefing on/off"}
+                push cmds {command: "reset", description: "Reset conversation history"}
+                push cmds {command: "consolidate", description: "Dream: condense memory"}
+                push cmds {command: "settings", description: "Configure style, language, proactivity, memory"}
+                push cmds {command: "stop", description: "Cancel all background jobs immediately"}
                 tel.tel_set_my_commands tok cmds
             catch
                 nil
             off: nil
             if once_mode
-                print "once-Modus: ein Zyklus"
+                print "once mode: one cycle"
                 off: poll_once tok off allowed 25
-                print "once-Zyklus fertig."
+                print "once cycle done."
             else
                 while true
                     try
@@ -1731,16 +1724,15 @@ else
                         sched_tick tok
                         maybe_log_cost 0
                     catch e
-                        print ("Zyklus-Fehler — versuche erneut: " ++ (to_str e))
-                    --! systemd-Watchdog-Heartbeat: bewusst AUSSERHALB des
-                    --! try/catch oben, damit auch ein abgefangener
-                    --! Zyklus-Fehler als "lebt noch, iteriert weiter"
-                    --! zaehlt — nur ein echter Haenger (gar kein Code laeuft
-                    --! mehr, siehe Kommentar bei WatchdogSec in
-                    --! muninn.service) laesst diesen Aufruf ausbleiben.
-                    --! try/catch hier: best-effort, kein NOTIFY_SOCKET
-                    --! gesetzt (z.B. manueller Testlauf ausserhalb von
-                    --! systemd) darf die Hauptschleife nicht stoppen.
+                        print ("Cycle error — retrying: " ++ (to_str e))
+                    --! systemd watchdog heartbeat: deliberately OUTSIDE the
+                    --! try/catch above, so that even a caught cycle error
+                    --! still counts as "still alive, still iterating" — only
+                    --! a genuine hang (no code running at all anymore, see
+                    --! the comment at WatchdogSec in muninn.service) makes
+                    --! this call not happen. try/catch here: best-effort, no
+                    --! NOTIFY_SOCKET set (e.g. a manual test run outside
+                    --! systemd) must not stop the main loop.
                     try
                         exec "systemd-notify WATCHDOG=1"
                     catch
