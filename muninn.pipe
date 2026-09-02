@@ -232,6 +232,15 @@ fn list_text dbh
 
 --! Processes an incoming update (extracts text, handles non-text).
 fn handle_update token cid msg dbh
+    --! Instant "seen" acknowledgment -- fires before any processing (which,
+    --! especially with tool calls, can take a noticeable while) even
+    --! starts, so the user knows the message actually arrived instead of
+    --! wondering whether it got lost. Best-effort: not every message
+    --! supports reactions (see tel_set_message_reaction), never let a
+    --! reaction failure block handling the actual message.
+    mid: get msg "message_id"
+    if mid != nil
+        tel.tel_set_message_reaction token cid mid "👀"
     txt: get msg "text"
     if txt == nil
         doc: get msg "document"

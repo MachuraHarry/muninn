@@ -237,6 +237,21 @@ export fn tel_send_chat_action token chat_id action
     set m "action" action
     tel_post token "sendChatAction" m
 
+--! Reacts to a message with a single emoji -- used as an immediate "seen"
+--! acknowledgment the instant a message arrives, before the gremium (which
+--! can take a while, especially with tool calls) even starts. Best-effort:
+--! not every chat/message supports reactions, callers should not treat a
+--! failure here as fatal to handling the message itself.
+export fn tel_set_message_reaction token chat_id message_id emoji
+    r: {}
+    set r "type" "emoji"
+    set r "emoji" emoji
+    m: {}
+    set m "chat_id" chat_id
+    set m "message_id" message_id
+    set m "reaction" ([r])
+    tel_post token "setMessageReaction" m
+
 --! Builds an inline keyboard button.
 export fn tel_button text data
     b: {}
