@@ -1,5 +1,5 @@
 [Unit]
-Description=Muninn — persoenlicher KI-Agent (Telegram-Bot)
+Description=Muninn — personal AI agent (Telegram bot)
 After=network-online.target
 Wants=network-online.target
 
@@ -10,37 +10,36 @@ WorkingDirectory=/root/muninn
 Environment=PATH=/root/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/local/bin/pipe muninn.pipe
 
-# Sauberes Herunterfahren: der Pipe-Interpreter faengt SIGTERM/SIGINT selbst
-# ab, schliesst alle MCP-Subprozesse geordnet und beendet sich danach mit
-# Exit-Code 143/130 (konventionell 128+Signalnummer) — kein echter Fehler,
-# aber systemd wertet jeden Nicht-Null-Code sonst als "failed". Zusaetzlich
-# raeumt systemds eigenes cgroup-basiertes Kill-Verhalten (Standard:
-# KillMode=control-group) beim Stoppen ohnehin ALLE Prozesse der Unit auf
-# (inkl. MCP-Enkel-Prozesse), auch falls der interpreterseitige Shutdown
-# je einen Fall uebersehen sollte.
+# Clean shutdown: the Pipe interpreter itself catches SIGTERM/SIGINT,
+# cleanly closes all MCP subprocesses, and then exits with exit code
+# 143/130 (conventionally 128+signal number) — not a real error, but
+# systemd otherwise treats any non-zero code as "failed". Additionally,
+# systemd's own cgroup-based kill behavior (default: KillMode=control-
+# group) cleans up ALL processes of the unit on stop anyway (incl. MCP
+# grandchild processes), even if the interpreter-side shutdown should
+# ever miss a case.
 SuccessExitStatus=143 130
 TimeoutStopSec=30
 Restart=on-failure
 RestartSec=5
 
-# Zweite Verteidigungslinie neben dem Pipe-internen exec()-Timeout (siehe
-# setup_sandbox in muninn.pipe): der Haupt-Loop meldet sich nach JEDER
-# Zyklus-Iteration per "systemd-notify WATCHDOG=1" (erfolgreich oder
-# abgefangener Fehler zaehlt gleichermassen als "lebt noch") — bleibt dieses
-# Signal laenger als WatchdogSec aus, wertet systemd den Dienst als
-# gehaengt, killt ihn und startet ihn dank Restart=on-failure automatisch
-# neu, statt dass ein Haenger erst manuell entdeckt werden muss (live
-# passiert: ein blockierender exec()-Aufruf legte den GESAMTEN Bot fuer
-# Stunden lahm, bis das von Hand aufgefallen ist). 900s (15 Minuten) statt
-# knapper bemessen, weil Pipe bewusst single-threaded ist — waehrend eines
-# echten, aber LEGITIMEN langen Gremiums-Durchlaufs (viele Runden, viele
-# Werkzeugaufrufe) kann kein Heartbeat gesendet werden, das darf nicht
-# faelschlich als Haenger gewertet werden. Deckt trotzdem jeden ECHTEN
-# unbegrenzten Haenger zuverlaessig ab, der sonst fuer immer stehen bliebe.
+# Second line of defense alongside Pipe's internal exec() timeout (see
+# setup_sandbox in muninn.pipe): the main loop checks in after EVERY cycle
+# iteration via "systemd-notify WATCHDOG=1" (a success or a caught error
+# both count equally as "still alive") — if this signal is missing for
+# longer than WatchdogSec, systemd considers the service hung, kills it,
+# and automatically restarts it thanks to Restart=on-failure, instead of a
+# hang having to be discovered manually first (happened live: a blocking
+# exec() call took down the ENTIRE bot for hours until it was noticed by
+# hand). Set to 900s (15 minutes) rather than tighter, because Pipe is
+# deliberately single-threaded — during a real but LEGITIMATE long gremium
+# run (many rounds, many tool calls) no heartbeat can be sent, and that
+# must not be wrongly counted as a hang. Still reliably covers any REAL
+# unbounded hang that would otherwise sit stuck forever.
 WatchdogSec=900
 
-# Loggt automatisch in den systemd-Journal (journalctl -u muninn -f) statt
-# in eine manuell verwaltete Datei wie beim bisherigen nohup-Start.
+# Automatically logs to the systemd journal (journalctl -u muninn -f)
+# instead of a manually managed file like the previous nohup-based start.
 StandardOutput=journal
 StandardError=journal
 

@@ -1,16 +1,16 @@
 #!/bin/bash
-# install.sh — richtet Muninn auf einem frischen Ubuntu-22.04-Server ein
-# (System-Abhaengigkeiten, den Pipe-Interpreter, Muninn selbst, den
-# systemd-Dienst) und legt eine leere .env aus der Vorlage an. Idempotent:
-# jeder Schritt prueft erst, ob er noetig ist, bevor er etwas installiert —
-# mehrfaches Ausfuehren ist sicher (z.B. nach einem Update).
+# install.sh — sets up Muninn on a fresh Ubuntu 22.04 server (system
+# dependencies, the Pipe interpreter, Muninn itself, the systemd service)
+# and creates an empty .env from the template. Idempotent: every step
+# checks first whether it's needed before installing anything — running it
+# multiple times is safe (e.g. after an update).
 #
-# Nutzung: als root ausfuehren, z.B. `bash deploy/install.sh`.
+# Usage: run as root, e.g. `bash deploy/install.sh`.
 #
-# Deckt NUR die Installation ab. Was danach noch von Hand passieren muss
-# (Telegram-Bot-Token, DeepSeek-Key, Google-OAuth-Einrichtung + einmalige
-# Consent-Freigabe) steht am Ende als Checkliste — das kann kein Skript
-# automatisieren, siehe README.md.
+# Covers ONLY the installation. What still needs to be done by hand
+# afterward (Telegram bot token, DeepSeek key, Google OAuth setup + one-time
+# consent grant) is listed as a checklist at the end — that can't be
+# automated by a script, see README.md.
 set -euo pipefail
 
 MUNINN_DIR="/root/muninn"
@@ -19,17 +19,17 @@ GO_VERSION="1.25.0"
 PIPER_RELEASE="2023.11.14-2"
 
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Bitte als root ausfuehren (z.B. mit sudo)." >&2
+    echo "Please run as root (e.g. with sudo)." >&2
     exit 1
 fi
 
 log() { echo -e "\n\033[1;34m==> $1\033[0m"; }
 
-log "System-Pakete (git, curl, ffmpeg, ca-certificates)"
+log "System packages (git, curl, ffmpeg, ca-certificates)"
 apt-get update -qq
 apt-get install -y -qq git curl ffmpeg ca-certificates >/dev/null
 
-log "Go ${GO_VERSION}+ (Ubuntus apt-Paket ist zu alt fuer pipes go.mod)"
+log "Go ${GO_VERSION}+ (Ubuntu's apt package is too old for pipe's go.mod)"
 current_go=""
 if [ -x /usr/local/go/bin/go ]; then
     current_go="$(/usr/local/go/bin/go version | awk '{print $3}' | sed 's/go//')"
@@ -41,34 +41,34 @@ if [ "$current_go" != "$GO_VERSION" ]; then
     tar -C /usr/local -xzf "$tmp_tar"
     rm "$tmp_tar"
 else
-    echo "Go ${GO_VERSION} bereits installiert, ueberspringe."
+    echo "Go ${GO_VERSION} already installed, skipping."
 fi
 export PATH="/usr/local/go/bin:$PATH"
 
-log "Node.js 20.x (fuer die npx-basierten MCP-Server)"
+log "Node.js 20.x (for the npx-based MCP servers)"
 if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1)" != "v20" ]; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null
     apt-get install -y -qq nodejs >/dev/null
 else
-    echo "Node.js $(node --version) bereits installiert, ueberspringe."
+    echo "Node.js $(node --version) already installed, skipping."
 fi
 
-log "Docker Engine (fuer die eingeschraenkte Docker-Erweiterung + mcp-docker-server)"
+log "Docker Engine (for the restricted Docker extension + mcp-docker-server)"
 if ! command -v docker >/dev/null 2>&1; then
     curl -fsSL https://get.docker.com | sh >/dev/null
 else
-    echo "Docker $(docker --version) bereits installiert, ueberspringe."
+    echo "Docker $(docker --version) already installed, skipping."
 fi
 
-log "uv/uvx (fuer die Python-basierten MCP-Server: Google Workspace, PowerPoint, Word)"
+log "uv/uvx (for the Python-based MCP servers: Google Workspace, PowerPoint, Word)"
 if [ ! -x "$HOME/.local/bin/uvx" ]; then
     curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
 else
-    echo "uv/uvx bereits installiert, ueberspringe."
+    echo "uv/uvx already installed, skipping."
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
-log "Piper TTS + deutsche Stimme (fuer Sprachnachrichten, siehe tts_synth.sh)"
+log "Piper TTS + German voice (for voice messages, see tts_synth.sh)"
 mkdir -p /opt/piper/voices
 if [ ! -x /opt/piper/piper/piper ]; then
     tmp_tar="$(mktemp --suffix=.tar.gz)"
@@ -76,7 +76,7 @@ if [ ! -x /opt/piper/piper/piper ]; then
     tar -C /opt/piper -xzf "$tmp_tar"
     rm "$tmp_tar"
 else
-    echo "Piper-Binary bereits vorhanden, ueberspringe."
+    echo "Piper binary already present, skipping."
 fi
 if [ ! -f /opt/piper/voices/de_DE-thorsten-high.onnx ]; then
     curl -LsSf -o /opt/piper/voices/de_DE-thorsten-high.onnx \
@@ -84,10 +84,10 @@ if [ ! -f /opt/piper/voices/de_DE-thorsten-high.onnx ]; then
     curl -LsSf -o /opt/piper/voices/de_DE-thorsten-high.onnx.json \
         "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json"
 else
-    echo "Stimmmodell bereits vorhanden, ueberspringe."
+    echo "Voice model already present, skipping."
 fi
 
-log "Pipe-Interpreter bauen (${PIPE_DIR})"
+log "Build the Pipe interpreter (${PIPE_DIR})"
 if [ ! -d "$PIPE_DIR" ]; then
     git clone https://github.com/MachuraHarry/pipe "$PIPE_DIR"
 fi
@@ -95,7 +95,7 @@ fi
 cp "$PIPE_DIR/bin/pipe" /usr/local/bin/pipe.new
 mv /usr/local/bin/pipe.new /usr/local/bin/pipe
 
-log "Muninn selbst (${MUNINN_DIR})"
+log "Muninn itself (${MUNINN_DIR})"
 if [ ! -d "$MUNINN_DIR" ]; then
     git clone https://github.com/MachuraHarry/muninn "$MUNINN_DIR"
 fi
@@ -104,44 +104,45 @@ chmod 700 "$MUNINN_DIR/google_creds"
 chmod +x "$MUNINN_DIR/tts_synth.sh"
 if [ ! -f "$MUNINN_DIR/.env" ]; then
     cp "$MUNINN_DIR/.env.example" "$MUNINN_DIR/.env"
-    echo "→ .env aus .env.example angelegt — muss noch ausgefuellt werden (siehe Checkliste unten)."
+    echo "→ .env created from .env.example — still needs to be filled in (see checklist below)."
 else
-    echo ".env existiert bereits, wird nicht ueberschrieben."
+    echo ".env already exists, not overwriting."
 fi
 
-log "systemd-Dienst einrichten"
+log "Set up the systemd service"
 cp "$MUNINN_DIR/deploy/muninn.service" /etc/systemd/system/muninn.service
 systemctl daemon-reload
-echo "Dienst installiert (noch nicht gestartet — siehe Checkliste unten)."
+echo "Service installed (not started yet — see checklist below)."
 
 cat <<'EOF'
 
 ════════════════════════════════════════════════════════════════
- Installation fertig. Vor dem ersten Start noch von Hand:
+ Installation complete. Before the first start, by hand:
 ════════════════════════════════════════════════════════════════
 
-1. /root/muninn/.env ausfuellen (Pflicht):
-   - TELEGRAM_BOT_TOKEN       von @BotFather (/newbot)
-   - TELEGRAM_ALLOWED_CHAT_ID von @userinfobot (leer = jeder darf,
-                              nicht empfohlen — auch Voraussetzung
-                              fuer proaktive Kalender-Erinnerungen)
+1. Fill in /root/muninn/.env (required):
+   - TELEGRAM_BOT_TOKEN       from @BotFather (/newbot)
+   - TELEGRAM_ALLOWED_CHAT_ID from @userinfobot (empty = anyone
+                              allowed, not recommended — also
+                              required for proactive calendar
+                              reminders)
    - DEEPSEEK_API_KEY         platform.deepseek.com
 
-2. Optional, je nach gewuenschten Faehigkeiten (siehe Kommentare
-   in .env.example fuer das genaue JSON-Format):
-   - MCP_AUTO_SERVERS erweitern (Dateisystem/Browser/Wetter/Docker/
-     Google Workspace/Praesentationen/Dokumente, ...)
-   - Fuer Google Workspace (Gmail/Drive/Kalender): eigenes
-     OAuth-Setup in der Google Cloud Console + einmalige
-     Browser-Freigabe noetig — siehe README.md → "Google Workspace"
-     (kann NICHT automatisiert werden).
-   - DASHBOARD_BIND/DASHBOARD_TOKEN fuer das Web-Dashboard.
+2. Optional, depending on the capabilities you want (see the
+   comments in .env.example for the exact JSON format):
+   - Extend MCP_AUTO_SERVERS (filesystem/browser/weather/Docker/
+     Google Workspace/presentations/documents, ...)
+   - For Google Workspace (Gmail/Drive/Calendar): your own OAuth
+     setup in the Google Cloud Console + a one-time browser
+     consent is needed — see README.md → "Google Workspace"
+     (cannot be automated).
+   - DASHBOARD_BIND/DASHBOARD_TOKEN for the web dashboard.
 
-3. Wenn .env vollstaendig ist:
+3. Once .env is complete:
      systemctl enable --now muninn
-     journalctl -u muninn -f      # Logs live verfolgen
+     journalctl -u muninn -f      # follow logs live
 
-Ohne systemd manuell testen:
+To test manually without systemd:
      cd /root/muninn && pipe muninn.pipe
 ════════════════════════════════════════════════════════════════
 EOF
