@@ -18,6 +18,7 @@ set -euo pipefail
 
 MUNINN_DIR="/root/muninn"
 PIPE_DIR="/root/pipe"
+GITHUB_MCP_DIR="/root/github-mcp-server"
 GO_VERSION="1.25.0"
 PIPER_RELEASE="2023.11.14-2"
 
@@ -368,6 +369,20 @@ spin "Building pipe (make build)" bash -c "cd '$PIPE_DIR' && PATH='/usr/local/go
 cp "$PIPE_DIR/bin/pipe" /usr/local/bin/pipe.new
 mv /usr/local/bin/pipe.new /usr/local/bin/pipe
 ok "pipe installed to /usr/local/bin/pipe"
+
+log "GitHub MCP server (optional, for the 'github' MCP_AUTO_SERVERS entry)"
+info "Built from source (not the ghcr.io Docker image) -- live-tested: 'docker run' has"
+info "noticeable per-connection startup latency that can race Muninn's MCP handshake and"
+info "occasionally lose the first request; a native binary starts near-instantly instead."
+if [ ! -d "$GITHUB_MCP_DIR" ]; then
+    spin "Cloning github-mcp-server" git clone -q --depth 1 https://github.com/github/github-mcp-server "$GITHUB_MCP_DIR"
+else
+    info "$GITHUB_MCP_DIR already present, skipping clone."
+fi
+spin "Building github-mcp-server (go build)" bash -c "cd '$GITHUB_MCP_DIR' && PATH='/usr/local/go/bin:$PATH' go build -o github-mcp-server ./cmd/github-mcp-server"
+cp "$GITHUB_MCP_DIR/github-mcp-server" /usr/local/bin/github-mcp-server.new
+mv /usr/local/bin/github-mcp-server.new /usr/local/bin/github-mcp-server
+ok "github-mcp-server installed to /usr/local/bin/github-mcp-server"
 
 log "Muninn itself (${MUNINN_DIR})"
 if [ ! -d "$MUNINN_DIR" ]; then
