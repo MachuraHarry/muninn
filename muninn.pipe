@@ -232,15 +232,6 @@ fn list_text dbh
 
 --! Processes an incoming update (extracts text, handles non-text).
 fn handle_update token cid msg dbh
-    --! Instant "seen" acknowledgment -- fires before any processing (which,
-    --! especially with tool calls, can take a noticeable while) even
-    --! starts, so the user knows the message actually arrived instead of
-    --! wondering whether it got lost. Best-effort: not every message
-    --! supports reactions (see tel_set_message_reaction), never let a
-    --! reaction failure block handling the actual message.
-    mid: get msg "message_id"
-    if mid != nil
-        tel.tel_set_message_reaction token cid mid "👀"
     txt: get msg "text"
     if txt == nil
         doc: get msg "document"
@@ -675,16 +666,18 @@ fn handle_message token cid text dbh
         task: "Bisheriger Gespraechsverlauf (aeltester zuerst, ungekuerzt):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
     task: (mem.settings_prompt_prefix dbh (to_str cid)) ++ task
     mem.log_event dbh (to_str cid) tnorm "chat"
-    --! Live status: stream a native "drafting..." preview (sendMessageDraft,
-    --! see make_swarm_updater) while the gremium works, instead of new
-    --! message blocks or complete silence (see swarm_status_text/
-    --! tel_finalize below, run_gremium_stream in swarm.pipe). No upfront
-    --! placeholder message anymore -- message_id stays nil, so tel_finalize
-    --! below sends the final answer as a real new message once the
-    --! gremium is done (the draft itself is ephemeral and never part of
-    --! the persisted chat history).
+    --! Live status: send ONE placeholder message and keep updating it via
+    --! editMessageText, instead of new message blocks or complete silence
+    --! while the gremium works (see swarm_status_text/tel_finalize below,
+    --! run_gremium_stream in swarm.pipe). (sendMessageDraft was tried here
+    --! instead — reverted: it visibly made the message jump around in the
+    --! chat instead of updating in place, worse than the plain edit-based
+    --! version.)
     message_id: nil
-    on_update: make_swarm_updater token cid
+    ph: tel.tel_send_message token cid "🧠 Thinking..."
+    if (get ph "ok") == true
+        message_id: get (get ph "result") "message_id"
+    on_update: make_swarm_updater token cid message_id
     setup_sandbox all_mcp_servers
     answer: ""
     crashed: false
@@ -870,16 +863,13 @@ fn swarm_status_text agent event detail args_json
     label
 
 --! Builds the on_update closure for run_gremium_stream: translates each
---! progress step into a status line and streams it as a native "drafting
---! ..." preview (sendMessageDraft, see tel_send_message_draft) instead of
---! editing a real placeholder message — throttled to about once/second, no
---! repeats, same pacing as before. A fixed draft_id (1) is fine: Muninn's
---! poll loop processes one update at a time per chat, never two overlapping
---! streams. The draft is only ever a live preview; the real final answer is
---! sent separately once the gremium finishes (see tel_finalize, called with
---! message_id=nil by both callers of this function — that sends the answer
---! as a genuine new message, which also makes the draft disappear).
-fn make_swarm_updater token cid
+--! progress step into a status line and uses it to edit (throttled to
+--! about once/second, no repeats) the placeholder message referenced by
+--! message_id. message_id may be nil (placeholder send failed) — then the
+--! closure is a no-op. (sendMessageDraft was tried here instead of the
+--! edit — reverted: live feedback was that it made the message visibly
+--! jump around in the chat instead of updating calmly in place.)
+fn make_swarm_updater token cid message_id
     stream_state: {last_text: "", last_ms: 0}
     fn on_update agent event detail args_json
         if event == "handoff" || event == "final"
@@ -892,7 +882,8 @@ fn make_swarm_updater token cid
             return nil
         set stream_state "last_text" text
         set stream_state "last_ms" ms
-        tel.tel_send_message_draft token cid 1 text
+        if message_id != nil
+            tel.tel_edit_message_text token cid message_id text
     on_update
 
 --! Finalizes a live-status message with the end result: edits the
@@ -1132,7 +1123,10 @@ fn handle_callback token dbh cbq
         if txt != nil
             tel.tel_send_chat_action token cid "typing"
             message_id: nil
-            on_update: make_swarm_updater token cid
+            ph: tel.tel_send_message token cid "🧠 Digging deeper..."
+            if (get ph "ok") == true
+                message_id: get (get ph "result") "message_id"
+            on_update: make_swarm_updater token cid message_id
             setup_sandbox all_mcp_servers
             res: grm.run_gremium_stream dbh cid ((mem.settings_prompt_prefix dbh (to_str cid)) ++ "Please dig deeper into this: " ++ txt) on_update
             a: get res "content"
@@ -1269,10 +1263,16 @@ fn parse_calendar_events text
 --! ID in the text — more reliable than free-text matching.
 NOTIFIED_CAL_KEY: "notified_calendar_events"
 
---! Loads the dedup list, removes entries older than 24h (so the list
---! doesn't grow unbounded for daily recurring events).
-fn load_notified_ids dbh
-    raw: mem.meta_get dbh NOTIFIED_CAL_KEY
+--! Same idea, for already-checked Gmail message ids (see email_notify_new
+--! below) — a message only ever needs to be judged for importance ONCE,
+--! whether or not it turned out worth a notification.
+NOTIFIED_MAIL_KEY: "notified_gmail_messages"
+
+--! Loads a dedup list stored under meta key `key` (see NOTIFIED_CAL_KEY/
+--! NOTIFIED_MAIL_KEY), removes entries older than 24h (so the list doesn't
+--! grow unbounded for daily recurring events/frequent mail checks).
+fn load_notified_ids dbh key
+    raw: mem.meta_get dbh key
     out: {}
     if raw != nil && raw != ""
         cutoff: now - 86400
@@ -1284,11 +1284,11 @@ fn load_notified_ids dbh
                     set out (at kv 0) ts
     out
 
-fn save_notified_ids dbh idmap
+fn save_notified_ids dbh key idmap
     parts: []
     for id in (keys idmap)
         push parts (id ++ ":" ++ (to_str (get idmap id)))
-    mem.meta_set dbh NOTIFIED_CAL_KEY (join parts ",")
+    mem.meta_set dbh key (join parts ",")
 
 --! Proactive calendar reminder: checks upcoming appointments within the
 --! configured lead window (calendar_reminder_minutes) and reports new (not
@@ -1300,7 +1300,7 @@ fn calendar_notify_new token dbh cid email window_minutes
     events: parse_calendar_events text
     if (len events) == 0
         return nil
-    notified: load_notified_ids dbh
+    notified: load_notified_ids dbh NOTIFIED_CAL_KEY
     changed: false
     for ev in events
         id: get ev "id"
@@ -1316,7 +1316,63 @@ fn calendar_notify_new token dbh cid email window_minutes
             set notified id now
             changed: true
     if changed
-        save_notified_ids dbh notified
+        save_notified_ids dbh NOTIFIED_CAL_KEY notified
+
+--! Calls the Gmail search MCP tool for messages newer than the given
+--! window and extracts their message ids (no raw JSON available, only the
+--! formatted text the MCP tool returns — same tradeoff as
+--! calendar_events_text/parse_calendar_events). Purely best-effort: a
+--! failed proactive check must never disrupt the scheduler tick.
+fn gmail_new_message_ids email window_minutes
+    if email == nil || email == ""
+        return []
+    query: "newer_than:" ++ (to_str (window_minutes + 5)) ++ "m"
+    text: nil
+    try
+        text: tool_call "google_search_gmail_messages" {user_google_email: email, query: query, page_size: 15}
+    catch e10
+        return []
+    if text == nil
+        return []
+    ids: []
+    for line in (split text "\n")
+        t: trim line
+        if (len t) > 12 && (substring t 0 12) == "Message ID:"
+            push ids (trim (substring t 12 (len t)))
+    ids
+
+--! Proactive new-mail check: finds genuinely new messages (dedup via
+--! load_notified_ids/save_notified_ids, same mechanism as
+--! calendar_notify_new) and, if there are any, lets the AI judge whether
+--! ANY of them are important enough to interrupt the user about — most new
+--! mail is newsletters/marketing/notifications (live-checked against a
+--! real inbox: even the most recent messages were mostly promotional), so
+--! unconditionally notifying on every new message would just be noise.
+--! Every new message gets marked as checked regardless of the verdict, so
+--! it's never re-judged on the next tick.
+fn email_notify_new token dbh cid email
+    ids: gmail_new_message_ids email 65
+    if (len ids) == 0
+        return nil
+    notified: load_notified_ids dbh NOTIFIED_MAIL_KEY
+    new_ids: []
+    for id in ids
+        if (get notified id) == nil
+            push new_ids id
+    if (len new_ids) == 0
+        return nil
+    try
+        content: tool_call "google_get_gmail_messages_content_batch" {user_google_email: email, message_ids: new_ids}
+        if content != nil && content != ""
+            verdict: ai_chat "You screen new emails for a personal assistant. Given the raw content of one or more new emails, decide: is ANY of them important or time-sensitive enough that the user should be interrupted about it right now (e.g. from a real person, needs a timely reply/action)? Newsletters, marketing, automated notifications, and routine confirmations are NOT important. If none of them are important, respond with EXACTLY the single word NOTHING and nothing else. Otherwise write a short, concrete notification (1-2 sentences per relevant email: sender, subject, what it's about) for ONLY the important one(s) — ignore the unimportant ones entirely." content
+            if verdict != nil && (lower (trim verdict)) != "nothing" && (trim verdict) != ""
+                tel.tel_send_message token (to_num cid) ("📬 " ++ (trim verdict))
+    catch e11
+        print ("Email importance check failed: " ++ (to_str e11))
+        mem.log_error dbh "email_check_judge" (to_str e11)
+    for id in new_ids
+        set notified id now
+    save_notified_ids dbh NOTIFIED_MAIL_KEY notified
 
 --! Scheduler tick (P4): proactively fires due reminders/briefings — runs
 --! in the bot loop after every poll, single-threaded (no goroutine/DB
