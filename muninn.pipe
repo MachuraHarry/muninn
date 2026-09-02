@@ -194,7 +194,7 @@ fn greeting_text _
 
 --! Help text.
 fn help_text _
-    "/start      — greeting\n/help       — this help\n/status     — Muninn's state\n/costs      — AI running-cost summary (sessions, tokens, $)\n/list       — your most important memories\n/search     — search the web (e.g. /search Huginn and Muninn)\n/learn      — learn a document (e.g. /learn https://... or send me a .txt/.md file)\n/graph      — query the knowledge graph (e.g. /graph Harry)\n/remind     — schedule a reminder (e.g. /remind in 10 minutes about the break)\n/reminders  — show open reminders/briefings\n/goals      — show open goals, tap to mark done\n/trace      — see which of the gremium's Norse-named members handled your last request\n/briefing   — activate the daily morning briefing (/briefing stop to cancel)\n/reset      — reset conversation history (fresh context for follow-up questions)\n/consolidate — dream: condense old conversations, let memories decay/be forgotten\n/settings   — configure response style, language, proactive messages, memory aggressiveness\n/stop       — IMMEDIATELY cancel all running background Docker jobs and scheduled continuations"
+    "/start      — greeting\n/help       — this help\n/status     — Muninn's state\n/costs      — AI running-cost summary (sessions, tokens, $)\n/list       — your most important memories\n/search     — search the web (e.g. /search Huginn and Muninn)\n/learn      — learn a document (e.g. /learn https://... or send me a .txt/.md file)\n/graph      — query the knowledge graph (e.g. /graph Harry)\n/remind     — schedule a reminder (e.g. /remind in 10 minutes about the break)\n/reminders  — show open reminders/briefings\n/goals      — show open goals, tap to mark done\n/trace      — see which of the gremium's Norse-named members handled your last request\n/briefing   — activate the daily morning briefing (/briefing stop to cancel)\n/reset      — reset conversation history (fresh context for follow-up questions)\n/consolidate — dream: condense old conversations, let memories decay/be forgotten\n/settings   — configure response style, language, proactive messages, memory aggressiveness\n/stop       — IMMEDIATELY cancel a gremium run currently in progress, plus all running background Docker jobs and scheduled continuations"
 
 --! Status text (statistics from the soul).
 fn status_text dbh
@@ -239,7 +239,7 @@ fn list_text dbh
     out
 
 --! Processes an incoming update (extracts text, handles non-text).
-fn handle_update token cid msg dbh
+fn handle_update token cid msg dbh allowed
     txt: get msg "text"
     if txt == nil
         doc: get msg "document"
@@ -253,10 +253,10 @@ fn handle_update token cid msg dbh
             tel.tel_send_message token cid "Nice sticker — but I only understand text."
             return nil
         if (get msg "voice") != nil
-            handle_voice token cid dbh msg
+            handle_voice token cid dbh msg allowed
             return nil
         return nil
-    handle_message token cid txt dbh
+    handle_message token cid txt dbh allowed
 
 --! Checks by filename/mime type whether a document is plain text (.txt/.md
 --! or mime "text/..."). PDFs/binary formats return false here.
@@ -441,7 +441,7 @@ fn handle_photo token cid dbh msg
 --! MCP server isn't configured/connected, this honestly falls back to
 --! asking the user to type instead (no pretending to have a capability
 --! that isn't currently available).
-fn handle_voice token cid dbh msg
+fn handle_voice token cid dbh msg allowed
     voice: get msg "voice"
     tel.tel_send_chat_action token cid "typing"
     fpath: tel.tel_get_file token (get voice "file_id")
@@ -490,10 +490,10 @@ fn handle_voice token cid dbh msg
             mem.log_error dbh "whisper_transcribe" last_err
         tel.tel_send_message token cid "I can't understand voice messages right now (transcription unavailable or failed). Please type it instead."
         return nil
-    handle_message token cid (trim text) dbh
+    handle_message token cid (trim text) dbh allowed
 
 --! Processes an incoming text message and replies.
-fn handle_message token cid text dbh
+fn handle_message token cid text dbh allowed
     if text == nil
         return nil
     tnorm: trim text
@@ -693,13 +693,20 @@ fn handle_message token cid text dbh
     if (get ph "ok") == true
         message_id: get (get ph "result") "message_id"
     on_update: make_swarm_updater token cid message_id
+    abort_check: make_abort_check token cid allowed dbh
     setup_sandbox all_mcp_servers
     answer: ""
     crashed: false
+    aborted: false
+    abort_reason: ""
     try
-        res: grm.run_gremium_stream dbh cid task on_update
-        answer: get res "content"
-        save_trace dbh cid res
+        res: grm.run_gremium_stream dbh cid task on_update abort_check
+        if (get res "aborted") == true
+            aborted: true
+            abort_reason: get res "abort_reason"
+        else
+            answer: get res "content"
+            save_trace dbh cid res
     catch e
         print ("run_gremium_stream failed (attempt 1): " ++ (to_str e))
         mem.log_error dbh "run_gremium_stream" (to_str e)
@@ -712,9 +719,13 @@ fn handle_message token cid text dbh
         --! quota.
         setup_sandbox all_mcp_servers
         try
-            res2: grm.run_gremium_stream dbh cid task on_update
-            answer: get res2 "content"
-            save_trace dbh cid res2
+            res2: grm.run_gremium_stream dbh cid task on_update abort_check
+            if (get res2 "aborted") == true
+                aborted: true
+                abort_reason: get res2 "abort_reason"
+            else
+                answer: get res2 "content"
+                save_trace dbh cid res2
         catch e2
             --! Without this log, a REAL gremium crash (e.g. max rounds exceeded,
             --! an interpreter error) looked identical to "the AI doesn't know" —
@@ -725,6 +736,14 @@ fn handle_message token cid text dbh
             answer: ""
             crashed: true
     mem.add_message dbh tid cid "user" tnorm
+    if aborted
+        --! An intentional /stop is not a crash — no retry happened for it
+        --! (checked right after each attempt, before the crash path), and
+        --! it must never fall through to the "answer is empty" research
+        --! fallback below, which would otherwise start a whole new web
+        --! search for the very task the user just asked to cancel.
+        tel_finalize token cid message_id ("🛑 " ++ abort_reason) nil
+        return nil
     if crashed
         --! A REAL crash (network/provider error, interpreter error, max rounds
         --! exceeded) is NOT the same as "the AI doesn't know" — for a longer
@@ -998,6 +1017,61 @@ fn make_swarm_updater token cid message_id
             tel.tel_edit_message_text token cid message_id text
     on_update
 
+--! Builds the abort_check closure for run_gremium_stream (see its doc
+--! comment in swarm.pipe): lets the user stop a running gremium call with
+--! /stop instead of having to wait for it to finish, without introducing
+--! any concurrency (Muninn's bot loop stays fully single-threaded — the
+--! pure-Pipe sqlite module's handle registry and Pipe's process-wide
+--! ActiveProfile are both unsynchronized, so real background execution
+--! isn't safe yet). Checked at most once every 3s (ai_swarm_stream calls
+--! this at the START of every round — cheap, but no reason to hit
+--! Telegram's API more often than that).
+--!
+--! dbh MUST be the handle poll_once already has open — this function must
+--! NEVER call mem.open_locked itself. poll_once holds its cross-process
+--! file lock for the ENTIRE handle_update/handle_callback call chain
+--! (which is where this runs, several calls deep inside
+--! ai_swarm_stream's own round loop, bridged back into Pipe exactly like
+--! on_update above); a second open_locked from in here would try to
+--! re-acquire a lock this same process already holds and block forever.
+--!
+--! Non-destructive by design: reads the LAST PERSISTED offset (never
+--! writes a new one), so tel_get_updates here — even though it uses the
+--! real Bot API, not a mock — never marks anything as delivered. Whatever
+--! message this sees is later re-delivered to poll_once's own normal
+--! flow completely untouched, exactly as if this check had never run.
+fn make_abort_check token cid allowed dbh
+    state: {last_ms: 0, acked: false}
+    fn check
+        ms: time_ms
+        if (ms - (get state "last_ms")) < 3000
+            return nil
+        set state "last_ms" ms
+        offset: nil
+        saved: mem.meta_get dbh "telegram_offset"
+        if saved != nil && saved != ""
+            offset: to_num saved
+        updates: []
+        try
+            updates: tel.tel_get_updates token offset 0
+        catch
+            updates: []
+        for upd in updates
+            msg: get upd "message"
+            if msg != nil
+                chat: get msg "chat"
+                if chat != nil && (is_allowed (get chat "id") allowed)
+                    txt: get msg "text"
+                    if txt != nil
+                        low: lower (trim txt)
+                        if low == "/stop"
+                            return "Cancelled by /stop."
+                        if (get state "acked") != true
+                            set state "acked" true
+                            tel.tel_send_message token cid "⏳ Still working on your last request — send /stop to cancel it, or just wait: I'll get to this one right after."
+        nil
+    check
+
 --! Finalizes a live-status message with the end result: edits the
 --! placeholder message referenced by message_id (optionally with keyboard
 --! kb), but falls back to a new message if message_id is missing
@@ -1217,7 +1291,7 @@ fn settings_kb dbh cid
     kb
 
 --! Processes an inline button press (callback_query).
-fn handle_callback token dbh cbq
+fn handle_callback token dbh cbq allowed
     cbid: get cbq "id"
     data: get cbq "data"
     msg: get cbq "message"
@@ -1239,16 +1313,20 @@ fn handle_callback token dbh cbq
             if (get ph "ok") == true
                 message_id: get (get ph "result") "message_id"
             on_update: make_swarm_updater token cid message_id
+            abort_check: make_abort_check token cid allowed dbh
             setup_sandbox all_mcp_servers
-            res: grm.run_gremium_stream dbh cid ((mem.settings_prompt_prefix dbh (to_str cid)) ++ "Please dig deeper into this: " ++ txt) on_update
-            a: get res "content"
-            save_trace dbh cid res
-            if a != nil && a != ""
-                tid: mem.active_thread dbh cid
-                mem.add_message dbh tid cid "assistant" a
-                tel_finalize token cid message_id (shorten a) nil
+            res: grm.run_gremium_stream dbh cid ((mem.settings_prompt_prefix dbh (to_str cid)) ++ "Please dig deeper into this: " ++ txt) on_update abort_check
+            if (get res "aborted") == true
+                tel_finalize token cid message_id ("🛑 " ++ (get res "abort_reason")) nil
             else
-                tel_finalize token cid message_id "Unfortunately I couldn't dig up anything more." nil
+                a: get res "content"
+                save_trace dbh cid res
+                if a != nil && a != ""
+                    tid: mem.active_thread dbh cid
+                    mem.add_message dbh tid cid "assistant" a
+                    tel_finalize token cid message_id (shorten a) nil
+                else
+                    tel_finalize token cid message_id "Unfortunately I couldn't dig up anything more." nil
         return nil
     if data == "up"
         if txt != nil
@@ -1683,7 +1761,7 @@ fn poll_once token offset allowed timeout
                 cid: get chat "id"
                 if is_allowed cid allowed
                     try
-                        handle_update token cid msg dbh2
+                        handle_update token cid msg dbh2 allowed
                     catch e9
                         --! Catches ANY unexpected error from the ENTIRE message
                         --! processing (photo/voice/document/gremium/...) —
@@ -1699,7 +1777,7 @@ fn poll_once token offset allowed timeout
                 cid2: get chat2 "id"
                 if is_allowed cid2 allowed
                     try
-                        handle_callback token dbh2 cq
+                        handle_callback token dbh2 cq allowed
                     catch e10
                         print ("handle_callback failed: " ++ (to_str e10))
                         mem.log_error dbh2 "handle_callback" (to_str e10)

@@ -796,6 +796,13 @@ export fn init_gremium _
 --! Instead of relying solely on prompt compliance, a deterministic cleanup
 --! step here. Shared by run_gremium AND run_gremium_stream.
 fn apply_registrator_backstop res
+    if (get res "aborted") == true
+        --! Deliberately cancelled (see run_gremium_stream/abort_check) —
+        --! content is whatever partial progress happened before the stop
+        --! (often empty), not a real answer that needs the meta-comment
+        --! cleanup below. Running an extra ai_chat pass on it would just
+        --! waste a call and could fabricate polish on cancelled garbage.
+        return res
     path: get res "path"
     if (len path) > 0 && (at path ((len path) - 1)) != "registrator"
         cleaned: get res "content"
@@ -829,9 +836,12 @@ export fn run_gremium dbh cid task
 --! "start"|"tool"|"handoff"|"final", args_json only populated for "tool"
 --! — the raw JSON arguments of the call, see ai_swarm_stream). Stays
 --! UI-neutral — Telegram-specific formatting/editing happens at the
---! caller (muninn.pipe), not here.
-export fn run_gremium_stream dbh cid task on_update
+--! caller (muninn.pipe), not here. abort_check (optional): called with no
+--! arguments at the start of every round by ai_swarm_stream itself — a
+--! non-empty string return stops the run immediately, res then has
+--! aborted=true/abort_reason set (see apply_registrator_backstop above).
+export fn run_gremium_stream dbh cid task on_update abort_check
     set STATE "dbh" dbh
     set STATE "cid" cid
-    res: ai_swarm_stream task "planer" 150 on_update
+    res: ai_swarm_stream task "planer" 150 on_update abort_check
     apply_registrator_backstop res
