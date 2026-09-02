@@ -223,6 +223,25 @@ export fn tel_edit_message_text_kb token chat_id message_id text kb
         set m "reply_markup" rm
     tel_post_with_markdown token "editMessageText" m
 
+--! Streams a temporary, animated "drafting..." preview (Bot API 9.3
+--! sendMessageDraft, private chats only) -- replaces the old approach of
+--! repeatedly editing a real placeholder message: this avoids touching
+--! Telegram's message-edit rate limit entirely and shows a native,
+--! animated "the bot is composing" indicator instead of a message that
+--! visibly rewrites itself. draft_id must be non-zero; repeated calls with
+--! the SAME draft_id are animated as one continuous stream, a different
+--! draft_id replaces without animation. The draft itself is ephemeral
+--! (Telegram auto-expires it after roughly 30s of no updates, and it
+--! disappears once a real message is sent) -- callers MUST still send a
+--! real message (tel_send_message et al.) with the final answer, this is
+--! only a live preview during generation, never persisted chat history.
+export fn tel_send_message_draft token chat_id draft_id text
+    m: {}
+    set m "chat_id" chat_id
+    set m "draft_id" draft_id
+    set m "text" text
+    tel_post token "sendMessageDraft" m
+
 --! Delete a message.
 export fn tel_delete_message token chat_id message_id
     m: {}

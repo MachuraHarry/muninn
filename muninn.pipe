@@ -659,15 +659,16 @@ fn handle_message token cid text dbh
         task: "Bisheriger Gespraechsverlauf (aeltester zuerst, ungekuerzt):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
     task: (mem.settings_prompt_prefix dbh (to_str cid)) ++ task
     mem.log_event dbh (to_str cid) tnorm "chat"
-    --! Live status: send ONE placeholder message and keep updating it via
-    --! editMessageText, instead of new message blocks or complete silence
-    --! while the gremium works (see swarm_status_text/tel_finalize below,
-    --! run_gremium_stream in swarm.pipe).
+    --! Live status: stream a native "drafting..." preview (sendMessageDraft,
+    --! see make_swarm_updater) while the gremium works, instead of new
+    --! message blocks or complete silence (see swarm_status_text/
+    --! tel_finalize below, run_gremium_stream in swarm.pipe). No upfront
+    --! placeholder message anymore -- message_id stays nil, so tel_finalize
+    --! below sends the final answer as a real new message once the
+    --! gremium is done (the draft itself is ephemeral and never part of
+    --! the persisted chat history).
     message_id: nil
-    ph: tel.tel_send_message token cid "🧠 Thinking..."
-    if (get ph "ok") == true
-        message_id: get (get ph "result") "message_id"
-    on_update: make_swarm_updater token cid message_id
+    on_update: make_swarm_updater token cid
     setup_sandbox all_mcp_servers
     answer: ""
     crashed: false
@@ -853,11 +854,16 @@ fn swarm_status_text agent event detail args_json
     label
 
 --! Builds the on_update closure for run_gremium_stream: translates each
---! progress step into a status line and uses it to edit (throttled to
---! about once/second, no repeats) the placeholder message referenced by
---! message_id. message_id may be nil (placeholder send failed) — then the
---! closure is a no-op.
-fn make_swarm_updater token cid message_id
+--! progress step into a status line and streams it as a native "drafting
+--! ..." preview (sendMessageDraft, see tel_send_message_draft) instead of
+--! editing a real placeholder message — throttled to about once/second, no
+--! repeats, same pacing as before. A fixed draft_id (1) is fine: Muninn's
+--! poll loop processes one update at a time per chat, never two overlapping
+--! streams. The draft is only ever a live preview; the real final answer is
+--! sent separately once the gremium finishes (see tel_finalize, called with
+--! message_id=nil by both callers of this function — that sends the answer
+--! as a genuine new message, which also makes the draft disappear).
+fn make_swarm_updater token cid
     stream_state: {last_text: "", last_ms: 0}
     fn on_update agent event detail args_json
         if event == "handoff" || event == "final"
@@ -870,8 +876,7 @@ fn make_swarm_updater token cid message_id
             return nil
         set stream_state "last_text" text
         set stream_state "last_ms" ms
-        if message_id != nil
-            tel.tel_edit_message_text token cid message_id text
+        tel.tel_send_message_draft token cid 1 text
     on_update
 
 --! Finalizes a live-status message with the end result: edits the
@@ -1111,10 +1116,7 @@ fn handle_callback token dbh cbq
         if txt != nil
             tel.tel_send_chat_action token cid "typing"
             message_id: nil
-            ph: tel.tel_send_message token cid "🧠 Digging deeper..."
-            if (get ph "ok") == true
-                message_id: get (get ph "result") "message_id"
-            on_update: make_swarm_updater token cid message_id
+            on_update: make_swarm_updater token cid
             setup_sandbox all_mcp_servers
             res: grm.run_gremium_stream dbh cid ((mem.settings_prompt_prefix dbh (to_str cid)) ++ "Please dig deeper into this: " ++ txt) on_update
             a: get res "content"
