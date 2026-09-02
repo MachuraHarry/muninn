@@ -1,36 +1,33 @@
---! dashboard.pipe — P3: Web-Dashboard (Chat, Erinnerungen verwalten, Ziele,
---! Wissensgraph, Aktivität, Werkzeuge). Ein eigener Kanal neben Telegram,
---! ueber pipe-web. Nutzt dieselben Kernfunktionen aus memory/swarm/executor/
---! web.pipe wie muninn.pipe — nur die Kommando-Weiche fuer den Web-Chat
---! (dashboard_reply) ist eine eigene, bewusst duenne Kopie von muninn.pipes
---! handle_message: dort ist die Weiche eng mit Telegram-spezifischem
---! Verhalten (Inline-Buttons, "typing"-Status) verwoben, eine gemeinsame
---! Extraktion haette an dieser Stelle mehr Risiko fuer den bereits live
---! laufenden Telegram-Kanal bedeutet, als der Duplizierung von ~40 Zeilen
---! reiner Weichen-Logik wert ist. Die eigentliche Logik (Gremium, Executor,
---! Gedaechtnis, Recherche, Ingestion) liegt weiterhin ausschliesslich in den
---! jeweiligen Modulen.
+--! dashboard.pipe — P3: web dashboard (chat, manage memories, goals,
+--! knowledge graph, activity, tools). A separate channel alongside Telegram,
+--! via pipe-web. Uses the same core functions from memory/swarm/executor/
+--! web.pipe as muninn.pipe — only the command dispatcher for the web chat
+--! (dashboard_reply) is a deliberately thin copy of muninn.pipe's
+--! handle_message: there, the dispatcher is tightly interwoven with
+--! Telegram-specific behavior (inline buttons, "typing" status), and a
+--! shared extraction would have meant more risk to the already-live
+--! Telegram channel than the ~40 lines of duplicated pure dispatch logic are
+--! worth. The actual logic (gremium, executor, memory, research, ingestion)
+--! still lives exclusively in the respective modules.
 --!
---! Design: Farbpalette 1:1 von pipe-lang.com uebernommen (dunkles Theme, lila
---! Akzente — das war explizit gewuenscht), Layout/Komponenten/Typografie
---! bewusst EIGENSTAENDIG (Sidebar-Navigation statt Scroll-Seite, keine
---! Gradient-Text-Ueberschriften, kein "Terminal-Fenster"-Chat, System-Schrift
---! statt der auf der Seite verwendeten Google-Font-Kombination).
+--! Design: color palette taken 1:1 from pipe-lang.com (dark theme, purple
+--! accents — that was explicitly requested), layout/components/typography
+--! deliberately INDEPENDENT (sidebar navigation instead of a scroll page, no
+--! gradient-text headings, no "terminal window" chat, system font instead of
+--! the Google Font combination used on the site).
 --!
---! Sicherheit: bindet standardmaessig nur an localhost (siehe muninn.pipe);
---! optional per DASHBOARD_TOKEN abgesichert (Query-Param ?token=... oder
---! Header X-Dashboard-Token). Ein Query-Param-Token ist KEIN vollwertiger
---! Auth-Mechanismus (landet in Logs/Browser-Historie) — fuer eine oeffentliche
---! Bereitstellung gehoert ein Reverse-Proxy mit TLS + echter Authentifizierung
---! davor, nicht dieser Token allein.
+--! Security: binds to localhost only by default (see muninn.pipe); optionally
+--! secured via DASHBOARD_TOKEN (query param ?token=... or header
+--! X-Dashboard-Token). A query-param token is NOT a full auth mechanism (ends
+--! up in logs/browser history) — a public deployment needs a reverse proxy
+--! with TLS + real authentication in front of it, not this token alone.
 --!
---! Jeder Request oeffnet/schliesst sein eigenes DB-Handle (wie Telegrams
---! poll_once): ein db_open ohne folgenden db_close persistiert Schreibvorgaenge
---! nicht zuverlaessig auf die Datei (siehe Plan.md). pipe-web serialisiert
---! Requests intern (ein Mutex pro Server), daher ist das trotz vieler
---! kurzlebiger Handles nebenlaeufigkeitssicher. Zusaetzlich sichert
---! mem.open_locked/close_locked jeden Zugriff prozessuebergreifend gegen
---! Telegram/Konsolidierung ab (siehe Kommentar dort).
+--! Every request opens/closes its own DB handle (like Telegram's poll_once):
+--! a db_open without a following db_close does not reliably persist writes to
+--! the file (see Plan.md). pipe-web serializes requests internally (one mutex
+--! per server), so this is concurrency-safe despite the many short-lived
+--! handles. mem.open_locked/close_locked additionally guards every access
+--! across processes against Telegram/consolidation (see comment there).
 import "pipe-web"
 import "sqlite"
 import "modules/memory.pipe" as mem
@@ -41,8 +38,8 @@ import "modules/web.pipe" as web
 DASH_STATE: {token: nil}
 DASH_CHAT_ID: "dashboard"
 
---! Prueft das optionale Token (Query-Param oder Header). Ohne konfiguriertes
---! Token ist die Pruefung deaktiviert (Vertrauen auf den localhost-Bind).
+--! Checks the optional token (query param or header). Without a configured
+--! token, the check is disabled (trusting the localhost bind).
 fn auth_mw req
     tok: get DASH_STATE "token"
     if tok == nil || tok == ""
@@ -58,13 +55,12 @@ fn auth_mw req
     if supplied == tok
         nil
     else
-        text 401 "Unauthorized — ?token=... oder X-Dashboard-Token-Header erforderlich."
+        text 401 "Unauthorized — ?token=... or X-Dashboard-Token header required."
 
---! Erzwingt no-cache-Header auf einer pipe-web-Response-Map. Alles hier ist
---! live (Chat, Erinnerungen, Status, ...) und darf vom Browser (oder einem
---! zwischengeschalteten Proxy) NIE zwischengespeichert werden — sonst sieht
---! ein Nutzer nach einem Update/einer Aenderung stillschweigend eine alte
---! Version, ohne dass ein "neu laden" das bemerkt oder behebt.
+--! Forces no-cache headers on a pipe-web response map. Everything here is
+--! live (chat, memories, status, ...) and must NEVER be cached by the browser
+--! (or an intermediate proxy) — otherwise a user would silently see a stale
+--! version after an update/change, with no "reload" noticing or fixing it.
 fn no_cache resp
     hdrs: get resp "headers"
     if hdrs == nil
@@ -76,7 +72,7 @@ fn no_cache resp
     resp
 
 DASHBOARD_HTML: `<!doctype html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -93,16 +89,16 @@ DASHBOARD_HTML: `<!doctype html>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px;-webkit-text-size-adjust:100%}
-/* --vh wird per JS aus window.visualViewport.height gesetzt (siehe Script
-   unten, mit window.innerHeight als Fallback) — auf Mobil-Browsern (v.a. iOS
-   Safari) ist 100vh oft GROESSER als die tatsaechlich sichtbare Hoehe
-   (rechnet die einklappbare Adressleiste mit ein) UND aendert sich live beim
-   Ein-/Ausblenden der Adressleiste; visualViewport bildet das laufend korrekt
-   ab (100dvh bewusst NICHT zusaetzlich genutzt — zwei konkurrierende
-   Mechanismen sind schwerer zu debuggen als einer). overflow:hidden auf body
-   wuerde bei falscher Berechnung Teile der Seite (z.B. die Navigation)
-   ausserhalb des sichtbaren Bereichs UND unerreichbar machen, da nicht
-   scrollbar — deshalb bleibt body als Sicherheitsnetz scrollbar. */
+/* --vh is set via JS from window.visualViewport.height (see script below,
+   with window.innerHeight as a fallback) — on mobile browsers (especially
+   iOS Safari), 100vh is often LARGER than the actually visible height
+   (counts the collapsible address bar) AND changes live as the address bar
+   shows/hides; visualViewport tracks that correctly at all times (100dvh is
+   deliberately NOT also used — two competing mechanisms are harder to debug
+   than one). overflow:hidden on body would, if the calculation is wrong,
+   push parts of the page (e.g. the navigation) outside the visible area AND
+   make them unreachable, since not scrollable — so body stays scrollable as
+   a safety net. */
 .app{display:flex;height:100vh;min-height:100vh}
 .app{height:calc(var(--vh, 1vh) * 100)}
 
@@ -167,9 +163,9 @@ body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px
 .chat-input input:focus{border-color:var(--accent)}
 .chat-hint{color:var(--fg3);font-size:.67rem;margin-top:9px;font-family:var(--mono)}
 
-/* Mobil: die Sidebar wird zur unteren Tab-Leiste (etabliertes App-Muster)
-   statt sich nur zu verschmaelern — echtes eigenes Verhalten pro Breakpoint,
-   nicht dieselbe Seiten-Navigation nur kleiner. */
+/* Mobile: the sidebar becomes a bottom tab bar (an established app pattern)
+   instead of just narrowing — genuinely different behavior per breakpoint,
+   not the same page navigation just smaller. */
 @media (max-width:760px){
   .app{flex-direction:column}
   .sidebar{
@@ -191,8 +187,8 @@ body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px
   .row-item{padding:12px}
   .row-actions{margin-left:auto}
 
-  /* 16px verhindert das automatische Hineinzoomen von iOS Safari bei Fokus
-     auf ein Eingabefeld mit kleinerer Schrift. */
+  /* 16px prevents iOS Safari from auto-zooming in when focusing an input
+     field with a smaller font size. */
   .toolbar input,.toolbar select,.chat-input input,.btn,.btn-secondary{font-size:16px}
   .toolbar input{min-width:0}
   .btn-icon{padding:6px 10px;font-size:.85rem}
@@ -200,8 +196,8 @@ body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px
   .msg{max-width:88%}
 }
 
-/* Sehr schmale Geraete: Labels unter den Icons weglassen, nur Icon + aktiver
-   Zustand (Farbe) — bei 6 Tabs sonst zu eng. */
+/* Very narrow devices: drop the labels under the icons, icon + active state
+   (color) only — too cramped otherwise with 6 tabs. */
 @media (max-width:420px){
   .nav-item span:not(.ic){display:none}
   .nav-item .ic{font-size:1.3rem}
@@ -211,17 +207,17 @@ body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px
 <body>
 <div class="app">
 <aside class="sidebar">
-<div class="brand">Muninn<small>Gedächtnis-Dashboard</small></div>
+<div class="brand">Muninn<small>Memory Dashboard</small></div>
 <nav class="nav" id="navlist">
 <button class="nav-item active" data-panel="chat" data-title="Chat"><span class="ic">▤</span><span>Chat</span></button>
-<button class="nav-item" data-panel="memories" data-title="Erinnerungen"><span class="ic">◈</span><span>Erinnerungen</span></button>
-<button class="nav-item" data-panel="goals" data-title="Ziele"><span class="ic">◎</span><span>Ziele</span></button>
-<button class="nav-item" data-panel="graph" data-title="Wissensgraph"><span class="ic">◇</span><span>Wissensgraph</span></button>
-<button class="nav-item" data-panel="activity" data-title="Aktivität"><span class="ic">≡</span><span>Aktivität</span></button>
-<button class="nav-item" data-panel="tools" data-title="Werkzeuge"><span class="ic">⚙</span><span>Werkzeuge</span></button>
-<button class="nav-item" data-panel="costs" data-title="Kosten"><span class="ic">$</span><span>Kosten</span></button>
+<button class="nav-item" data-panel="memories" data-title="Memories"><span class="ic">◈</span><span>Memories</span></button>
+<button class="nav-item" data-panel="goals" data-title="Goals"><span class="ic">◎</span><span>Goals</span></button>
+<button class="nav-item" data-panel="graph" data-title="Knowledge Graph"><span class="ic">◇</span><span>Knowledge Graph</span></button>
+<button class="nav-item" data-panel="activity" data-title="Activity"><span class="ic">≡</span><span>Activity</span></button>
+<button class="nav-item" data-panel="tools" data-title="Tools"><span class="ic">⚙</span><span>Tools</span></button>
+<button class="nav-item" data-panel="costs" data-title="Costs"><span class="ic">$</span><span>Costs</span></button>
 </nav>
-<div class="sidebar-foot"><span class="dot-live"></span><span>verbunden</span></div>
+<div class="sidebar-foot"><span class="dot-live"></span><span>connected</span></div>
 </aside>
 <div class="content">
 <div class="topbar">
@@ -234,48 +230,48 @@ body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px
 <div class="chat-wrap">
 <div class="chatlog" id="chatlog"></div>
 <div class="chat-input">
-<input id="chat-in" type="text" placeholder="Nachricht oder Befehl...">
-<button class="btn" onclick="sendChat()">Senden</button>
+<input id="chat-in" type="text" placeholder="Message or command...">
+<button class="btn" onclick="sendChat()">Send</button>
 </div>
-<div class="chat-hint">/status · /reset · /consolidate · /graph &lt;Name&gt; · /learn &lt;URL&gt;</div>
+<div class="chat-hint">/status · /reset · /consolidate · /graph &lt;name&gt; · /learn &lt;URL&gt;</div>
 </div>
 </section>
 
 <section class="panel" id="panel-memories">
 <div class="toolbar">
-<input id="mem-q" type="text" placeholder="Suche in Erinnerungen...">
+<input id="mem-q" type="text" placeholder="Search memories...">
 <select id="mem-kind">
-<option value="">alle Arten</option>
+<option value="">all kinds</option>
 <option value="permanent">permanent</option>
 <option value="fact">fact</option>
 <option value="task">task</option>
 <option value="document">document</option>
 <option value="summary">summary</option>
 </select>
-<button class="btn btn-secondary" onclick="loadMemories()">Filtern</button>
+<button class="btn btn-secondary" onclick="loadMemories()">Filter</button>
 </div>
 <div id="mem-list"></div>
 </section>
 
 <section class="panel" id="panel-goals">
 <div class="toolbar">
-<button class="btn btn-secondary" onclick="loadGoals()">Aktualisieren</button>
+<button class="btn btn-secondary" onclick="loadGoals()">Refresh</button>
 </div>
 <div id="goals-list"></div>
 </section>
 
 <section class="panel" id="panel-graph">
 <div class="toolbar">
-<input id="graph-q" type="text" placeholder="Entität, z.B. Harry">
-<button class="btn" onclick="loadGraph()">Abfragen</button>
+<input id="graph-q" type="text" placeholder="Entity, e.g. Harry">
+<button class="btn" onclick="loadGraph()">Query</button>
 </div>
 <div id="graph-list"></div>
 </section>
 
 <section class="panel" id="panel-activity">
-<div class="subhead">Ereignisse</div>
+<div class="subhead">Events</div>
 <div id="events-list"></div>
-<div class="subhead">Pläne (Executor)</div>
+<div class="subhead">Plans (Executor)</div>
 <div id="plans-list"></div>
 </section>
 
@@ -352,10 +348,10 @@ function loadStatus(){
   apiGet('api/status').then(function(d){
     var el = document.getElementById('stat-strip');
     el.innerHTML =
-      '<span class="s"><b>' + d.memories + '</b> Erinnerungen</span>' +
-      '<span class="s"><b>' + d.entities + '</b> Entitäten</span>' +
-      '<span class="s"><b>' + d.relations + '</b> Relationen</span>' +
-      '<span class="s"><b>' + d.tools + '</b> Werkzeuge</span>';
+      '<span class="s"><b>' + d.memories + '</b> memories</span>' +
+      '<span class="s"><b>' + d.entities + '</b> entities</span>' +
+      '<span class="s"><b>' + d.relations + '</b> relations</span>' +
+      '<span class="s"><b>' + d.tools + '</b> tools</span>';
   });
 }
 
@@ -379,8 +375,8 @@ function sendChat(){
   input.value = '';
   var bubble = addMsg('bot', '…');
   apiPost('api/chat', {message: msg})
-    .then(function(d){ bubble.textContent = d.reply || '(keine Antwort)'; loadStatus(); })
-    .catch(function(){ bubble.textContent = 'Fehler bei der Anfrage.'; });
+    .then(function(d){ bubble.textContent = d.reply || '(no reply)'; loadStatus(); })
+    .catch(function(){ bubble.textContent = 'Request failed.'; });
 }
 document.getElementById('chat-in').addEventListener('keydown', function(e){ if(e.key === 'Enter') sendChat(); });
 
@@ -391,7 +387,7 @@ function memItemHtml(m){
     '</div><div class="row-actions">' +
     '<button class="btn-icon" title="Importance +1" onclick="bumpImportance(' + m.id + ',' + m.importance + ',1)">▲</button>' +
     '<button class="btn-icon" title="Importance -1" onclick="bumpImportance(' + m.id + ',' + m.importance + ',-1)">▼</button>' +
-    '<button class="btn-icon danger" title="Löschen" onclick="deleteMemory(' + m.id + ')">✕</button>' +
+    '<button class="btn-icon danger" title="Delete" onclick="deleteMemory(' + m.id + ')">✕</button>' +
     '</div></div>';
 }
 function loadMemories(){
@@ -403,7 +399,7 @@ function loadMemories(){
   apiGet(url).then(function(d){
     var el = document.getElementById('mem-list');
     var items = d.memories || [];
-    if(items.length === 0){ el.innerHTML = '<div class="empty">Keine Erinnerungen gefunden.</div>'; return; }
+    if(items.length === 0){ el.innerHTML = '<div class="empty">No memories found.</div>'; return; }
     el.innerHTML = items.map(memItemHtml).join('');
   });
 }
@@ -430,7 +426,7 @@ function loadGoals(){
   apiGet('api/goals').then(function(d){
     var el = document.getElementById('goals-list');
     var items = d.goals || [];
-    if(items.length === 0){ el.innerHTML = '<div class="empty">Noch keine Ziele.</div>'; return; }
+    if(items.length === 0){ el.innerHTML = '<div class="empty">No goals yet.</div>'; return; }
     el.innerHTML = items.map(goalItemHtml).join('');
   });
 }
@@ -444,7 +440,7 @@ function loadGraph(){
   apiGet('api/graph?name=' + encodeURIComponent(name)).then(function(d){
     var el = document.getElementById('graph-list');
     var n = d.neighbors || [];
-    if(n.length === 0){ el.innerHTML = '<div class="empty">Keine Verknüpfungen gefunden.</div>'; return; }
+    if(n.length === 0){ el.innerHTML = '<div class="empty">No connections found.</div>'; return; }
     el.innerHTML = n.map(function(x){
       return '<div class="row-item acc-accent"><div class="row-main"><div class="txt">' + escapeHtml(x.rel) + ' → ' + escapeHtml(x.target) + '</div></div></div>';
     }).join('');
@@ -465,17 +461,17 @@ function planAccent(state){
 function planItemHtml(p){
   return '<div class="row-item ' + planAccent(p.state) + '"><div class="row-main">' +
     '<div class="txt">' + escapeHtml(p.goal) + '</div>' +
-    '<div class="row-meta"><span class="tag">' + escapeHtml(p.state) + '</span><span>Schritt ' + p.step_idx + '</span><span>' + escapeHtml(p.updated) + '</span></div>' +
+    '<div class="row-meta"><span class="tag">' + escapeHtml(p.state) + '</span><span>step ' + p.step_idx + '</span><span>' + escapeHtml(p.updated) + '</span></div>' +
     '</div></div>';
 }
 function loadActivity(){
   apiGet('api/activity').then(function(d){
     var evEl = document.getElementById('events-list');
     var events = d.events || [];
-    evEl.innerHTML = events.length === 0 ? '<div class="empty">Noch keine Ereignisse.</div>' : events.map(eventItemHtml).join('');
+    evEl.innerHTML = events.length === 0 ? '<div class="empty">No events yet.</div>' : events.map(eventItemHtml).join('');
     var plEl = document.getElementById('plans-list');
     var plans = d.plans || [];
-    plEl.innerHTML = plans.length === 0 ? '<div class="empty">Noch keine Pläne.</div>' : plans.map(planItemHtml).join('');
+    plEl.innerHTML = plans.length === 0 ? '<div class="empty">No plans yet.</div>' : plans.map(planItemHtml).join('');
   });
 }
 
@@ -489,7 +485,7 @@ function loadTools(){
   apiGet('api/tools').then(function(d){
     var el = document.getElementById('tools-list');
     var items = d.tools || [];
-    if(items.length === 0){ el.innerHTML = '<div class="empty">Keine Werkzeuge registriert.</div>'; return; }
+    if(items.length === 0){ el.innerHTML = '<div class="empty">No tools registered.</div>'; return; }
     el.innerHTML = items.map(toolItemHtml).join('');
   });
 }
@@ -497,8 +493,8 @@ function loadTools(){
 function costItemHtml(s){
   return '<div class="row-item acc-accent"><div class="row-main">' +
     '<div class="txt">Session ' + escapeHtml(s.session_id) + ' — $' + escapeHtml(s.cost_usd) + '</div>' +
-    '<div class="row-meta"><span>' + escapeHtml(s.tokens) + ' Tokens · ' + escapeHtml(s.calls) + ' Aufrufe · ' + escapeHtml(s.cache_hits) + ' Cache-Treffer</span>' +
-    '<span>' + escapeHtml(s.first_ts) + ' bis ' + escapeHtml(s.last_ts) + '</span></div>' +
+    '<div class="row-meta"><span>' + escapeHtml(s.tokens) + ' tokens · ' + escapeHtml(s.calls) + ' calls · ' + escapeHtml(s.cache_hits) + ' cache hits</span>' +
+    '<span>' + escapeHtml(s.first_ts) + ' to ' + escapeHtml(s.last_ts) + '</span></div>' +
     '</div></div>';
 }
 function loadCosts(){
@@ -507,11 +503,11 @@ function loadCosts(){
     var listEl = document.getElementById('costs-list');
     var sessions = d.sessions || [];
     if(sessions.length === 0){
-      sumEl.textContent = 'Noch keine Kosten aufgezeichnet.';
+      sumEl.textContent = 'No costs recorded yet.';
       listEl.innerHTML = '';
       return;
     }
-    sumEl.innerHTML = '<b>$' + escapeHtml(d.total_cost_usd) + '</b> gesamt über ' + escapeHtml(d.session_count) + ' Sessions · ' + escapeHtml(d.total_tokens) + ' Tokens · ' + escapeHtml(d.total_calls) + ' KI-Aufrufe';
+    sumEl.innerHTML = '<b>$' + escapeHtml(d.total_cost_usd) + '</b> total across ' + escapeHtml(d.session_count) + ' sessions · ' + escapeHtml(d.total_tokens) + ' tokens · ' + escapeHtml(d.total_calls) + ' AI calls';
     listEl.innerHTML = sessions.map(costItemHtml).join('');
   });
 }
@@ -524,12 +520,12 @@ loadStatus();
 fn page_handler req
     no_cache (html 200 DASHBOARD_HTML)
 
---! Alle Handler nutzen mem.open_locked/close_locked statt init_db/close direkt
---! — sonst koennte ein gleichzeitig laufender Telegram-Prozess Schreibvorgaenge
---! des Dashboards (oder umgekehrt) stillschweigend ueberschreiben (siehe
---! open_locked-Kommentar in memory.pipe, live reproduziert). Langsame,
---! DB-unabhaengige Arbeit (Netzwerk-Fetch in learn_handler) laeuft bewusst
---! VOR dem Lock, damit die Sperre nicht laenger als noetig gehalten wird.
+--! All handlers use mem.open_locked/close_locked instead of init_db/close
+--! directly — otherwise a concurrently running Telegram process could
+--! silently overwrite the dashboard's writes (or vice versa) (see
+--! open_locked comment in memory.pipe, reproduced live). Slow, DB-independent
+--! work (network fetch in learn_handler) deliberately runs BEFORE the lock,
+--! so the lock isn't held longer than necessary.
 
 fn status_handler req
     hl: mem.open_locked nil
@@ -632,38 +628,38 @@ fn learn_handler req
     body: json_body req
     url: get body "url"
     if url == nil || url == ""
-        return (no_cache (json 400 {error: "url fehlt"}))
+        return (no_cache (json 400 {error: "url missing"}))
     content: web.web_fetch_raw url
     if content == nil || content == ""
-        return (no_cache (ok {error: "Seite nicht abrufbar oder leer"}))
+        return (no_cache (ok {error: "Page not reachable or empty"}))
     hl: mem.open_locked nil
     res: mem.ingest_document (get hl "h") content url url 20
     mem.close_locked hl
     no_cache (ok res)
 
---! Erkennt eine /graph-Anfrage im Web-Chat und liefert den Entitätsnamen (oder "").
+--! Detects a /graph request in the web chat and returns the entity name (or "").
 fn dash_graph_query low tnorm
     if (len low) >= 7
         if (substring low 0 7) == "/graph "
             return (trim (substring tnorm 7 (len tnorm)))
     ""
 
---! Erkennt eine /learn-Anfrage im Web-Chat und liefert die URL (oder "").
+--! Detects a /learn request in the web chat and returns the URL (or "").
 fn dash_learn_query low tnorm
     if (len low) >= 7
         if (substring low 0 7) == "/learn "
             return (trim (substring tnorm 7 (len tnorm)))
     ""
 
---! Erkennt eine /search-Anfrage im Web-Chat und liefert den Suchbegriff (oder "").
+--! Detects a /search request in the web chat and returns the search term (or "").
 fn dash_search_query low tnorm
     if (len low) >= 8
         if (substring low 0 8) == "/search "
             return (trim (substring tnorm 8 (len tnorm)))
     ""
 
---! Duenne Kommando-Weiche fuer den Web-Chat (siehe Modul-Kommentar oben zur
---! bewussten Abgrenzung von muninn.pipes Telegram-handle_message).
+--! Thin command dispatcher for the web chat (see module comment above for
+--! the deliberate distinction from muninn.pipe's Telegram handle_message).
 fn dashboard_reply h text
     if text == nil
         return ""
@@ -674,19 +670,19 @@ fn dashboard_reply h text
     if low == "/status" || low == "status"
         n: mem.memory_count h
         gc: mem.graph_counts h
-        return ("Erinnerungen: " ++ (to_str n) ++ " · Wissensgraph: " ++ (to_str (get gc "entities")) ++ " Entitäten, " ++ (to_str (get gc "relations")) ++ " Relationen")
+        return ("Memories: " ++ (to_str n) ++ " · Knowledge graph: " ++ (to_str (get gc "entities")) ++ " entities, " ++ (to_str (get gc "relations")) ++ " relations")
     if low == "/reset"
         mem.close_thread h DASH_CHAT_ID
-        return "Gespraechsverlauf zurueckgesetzt."
+        return "Conversation history reset."
     if low == "/consolidate"
         cdays: mem.setting_consolidate_days h DASH_CHAT_ID
         res: mem.consolidate h (get cdays "decay") (get cdays "forget")
-        return ("Konsolidierung: " ++ (to_str (get res "threads_summarized")) ++ " Threads verdichtet, " ++ (to_str (get res "memories_decayed")) ++ " Erinnerungen gealtert, " ++ (to_str (get res "memories_forgotten")) ++ " vergessen.")
+        return ("Consolidation: " ++ (to_str (get res "threads_summarized")) ++ " threads condensed, " ++ (to_str (get res "memories_decayed")) ++ " memories decayed, " ++ (to_str (get res "memories_forgotten")) ++ " forgotten.")
     gname: dash_graph_query low tnorm
     if gname != ""
         n: mem.neighbors_of h gname
         if (len n) == 0
-            return ("Keine Verknüpfungen zu '" ++ gname ++ "' gefunden.")
+            return ("No connections found for '" ++ gname ++ "'.")
         out: gname ++ ":\n"
         for x in n
             out: out ++ "• " ++ (get x "rel") ++ " → " ++ (get x "target") ++ "\n"
@@ -695,61 +691,62 @@ fn dashboard_reply h text
     if lurl != ""
         dtext: web.web_fetch_raw lurl
         if dtext == nil || dtext == ""
-            return "Seite nicht abrufbar oder leer."
+            return "Page not reachable or empty."
         res: mem.ingest_document h dtext lurl lurl 20
-        return ("Gelernt aus " ++ lurl ++ ": " ++ (to_str (get res "chunks_ingested")) ++ " von " ++ (to_str (get res "chunks_total")) ++ " Abschnitten gespeichert.")
+        return ("Learned from " ++ lurl ++ ": " ++ (to_str (get res "chunks_ingested")) ++ " of " ++ (to_str (get res "chunks_total")) ++ " chunks stored.")
     sq: dash_search_query low tnorm
     if sq != ""
         rr: web.research sq
         ctx: get rr "context"
         if ctx == nil || ctx == ""
-            return "Keine brauchbaren Ergebnisse gefunden."
+            return "No usable results found."
         answer: ""
         try
-            answer: ai_chat "Du bist ein präziser Recherche-Assistent. Beantworte die Frage anhand des recherchierten Kontexts, kurz und faktentreu." ("Frage: " ++ sq ++ "\n\nKontext:\n" ++ ctx)
+            answer: ai_chat "You are a precise research assistant. Answer the question using the researched context, briefly and factually." ("Question: " ++ sq ++ "\n\nContext:\n" ++ ctx)
         catch e
-            print ("Dashboard-Recherche-ai_chat fehlgeschlagen: " ++ (to_str e))
-            mem.log_error h "dashboard_recherche_ai_chat" (to_str e)
+            print ("Dashboard research ai_chat failed: " ++ (to_str e))
+            mem.log_error h "dashboard_research_ai_chat" (to_str e)
             answer: ctx
         return answer
-    --! Ab hier: EIN gemeinsamer Pfad fuers gesamte freie Gespraech (frueher hier
-    --! wie in muninn.pipe eine vorab-Klassifikation in permanent/task/goal/
-    --! question, siehe deren Ausbau-Notiz beim Umbau — dieselbe Inkonsistenz-
-    --! Problematik galt hier 1:1). Das Gremium hat volle Werkzeuge (merken,
-    --! erinnerung_planen, web_search/fetch, MCP) und entscheidet selbst.
+    --! From here on: ONE shared path for the entire free-form conversation
+    --! (previously here, as in muninn.pipe, a pre-classification into
+    --! permanent/task/goal/question — the same inconsistency issue applied
+    --! here 1:1, see its expansion note at the time of the rework). The
+    --! gremium has full tools (remember, schedule_reminder, web_search/fetch,
+    --! MCP) and decides for itself.
     mem.log_event h DASH_CHAT_ID tnorm "chat"
     tid: mem.active_thread h DASH_CHAT_ID
     hist: mem.thread_history h tid 6
     task: tnorm
     if (len hist) > 0
-        task: "Bisheriger Gespraechsverlauf (aeltester zuerst):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
+        task: "Conversation so far (oldest first):\n" ++ (mem.format_history hist) ++ "\nCurrent message: " ++ tnorm
     task: (mem.settings_prompt_prefix h DASH_CHAT_ID) ++ task
     answer: ""
     try
         r: grm.run_gremium h DASH_CHAT_ID task
         answer: get r "content"
     catch e
-        --! Wie in muninn.pipes handle_message: ohne dieses Log sah ein
-        --! echter Gremium-Absturz identisch aus wie "die KI weiss es nicht".
-        print ("Dashboard run_gremium fehlgeschlagen: " ++ (to_str e))
+        --! As in muninn.pipe's handle_message: without this log, a real
+        --! gremium crash looked identical to "the AI doesn't know".
+        print ("Dashboard run_gremium failed: " ++ (to_str e))
         mem.log_error h "dashboard_run_gremium" (to_str e)
         answer: ""
     mem.add_message h tid DASH_CHAT_ID "user" tnorm
     if answer == nil || answer == ""
         ctx: mem.retrieve_context h tnorm 3
         if (len ctx) > 0
-            reply: "Dazu erinnere ich mich an:\n"
+            reply: "Here's what I remember about that:\n"
             for c in ctx
                 reply: reply ++ "• " ++ c ++ "\n"
             mem.add_message h tid DASH_CHAT_ID "assistant" reply
             return reply
-        fallback: "Dazu fällt mir noch nichts ein."
+        fallback: "I don't have anything on that yet."
         mem.add_message h tid DASH_CHAT_ID "assistant" fallback
         return fallback
     mem.add_message h tid DASH_CHAT_ID "assistant" answer
     answer
 
---! Startet den Dashboard-Server (blockierend). bind z.B. "127.0.0.1:8787".
+--! Starts the dashboard server (blocking). bind e.g. "127.0.0.1:8787".
 export fn start bind token
     set DASH_STATE "token" token
     a: app "Muninn Dashboard"
@@ -767,9 +764,9 @@ export fn start bind token
     route_get a "/api/tools" tools_handler
     route_get a "/api/costs" costs_handler
     post a "/api/learn" learn_handler
-    print ("Muninn-Dashboard: http://" ++ bind ++ "/")
+    print ("Muninn dashboard: http://" ++ bind ++ "/")
     if token != nil && token != ""
-        print "Zugriff nur mit ?token=... oder X-Dashboard-Token-Header."
+        print "Access requires ?token=... or X-Dashboard-Token header."
     listen a bind
     while true
         sleep 60000
