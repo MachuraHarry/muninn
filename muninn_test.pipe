@@ -39,6 +39,32 @@ test "meta_set/meta_get Roundtrip"
     expect_eq (mem.meta_get h "bot_name") "Muninn" "roundtrip"
     mem.close h
 
+--! was_injected/mark_injected (Live-Zwischensteuerung mitten im
+--! Gremiums-Lauf, siehe make_round_check in muninn.pipe): ein update_id,
+--! das noch nie als Injektion verbraucht wurde, ist erkennbar unverbraucht;
+--! nach mark_injected ist es es das nicht mehr; ein anderes, nie
+--! markiertes update_id bleibt davon unberuehrt.
+test "was_injected/mark_injected Roundtrip"
+    h: mem.init_db ":memory:"
+    expect_eq (mem.was_injected h 42) false "frisches update_id ist unverbraucht"
+    mem.mark_injected h 42
+    expect_eq (mem.was_injected h 42) true "nach mark_injected als verbraucht erkannt"
+    expect_eq (mem.was_injected h 43) false "ein anderes update_id bleibt unbeeinflusst"
+    mem.close h
+
+--! mark_injected kappt die persistierte Liste auf die letzten 30 Eintraege
+--! — das aelteste update_id faellt irgendwann heraus, damit die
+--! meta-Zeile ueber einen lang laufenden Prozess nicht unbegrenzt waechst.
+test "mark_injected kappt auf die letzten 30 Eintraege"
+    h: mem.init_db ":memory:"
+    i: 0
+    while i < 35
+        mem.mark_injected h (1000 + i)
+        i: i + 1
+    expect_eq (mem.was_injected h 1000) false "aeltestes von 35 faellt nach der Kappung heraus"
+    expect_eq (mem.was_injected h 1034) true "juengstes bleibt erhalten"
+    mem.close h
+
 --! /settings (P6): setting_get/setting_set-Roundtrip + Default ohne
 --! gesetzten Wert, getrennt pro Chat (zwei Chats teilen sich NICHT dieselbe
 --! Einstellung).

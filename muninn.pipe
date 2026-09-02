@@ -239,7 +239,7 @@ fn list_text dbh
     out
 
 --! Processes an incoming update (extracts text, handles non-text).
-fn handle_update token cid msg dbh allowed
+fn handle_update token cid msg dbh allowed uid
     txt: get msg "text"
     if txt == nil
         doc: get msg "document"
@@ -253,10 +253,10 @@ fn handle_update token cid msg dbh allowed
             tel.tel_send_message token cid "Nice sticker — but I only understand text."
             return nil
         if (get msg "voice") != nil
-            handle_voice token cid dbh msg allowed
+            handle_voice token cid dbh msg allowed uid
             return nil
         return nil
-    handle_message token cid txt dbh allowed
+    handle_message token cid txt dbh allowed uid
 
 --! Checks by filename/mime type whether a document is plain text (.txt/.md
 --! or mime "text/..."). PDFs/binary formats return false here.
@@ -338,7 +338,7 @@ fn safe_filename fname
 --! tool_filesystem); plain text files are additionally learned directly
 --! into memory (ingest_document), PDFs via pdftotext (see
 --! extract_pdf_text above) — other binary formats are only saved.
---! Live status like with the gremium (see tel_finalize/swarm_status_text
+--! Live status like with the gremium (see tel_finalize/swarm_transcript_line
 --! below): ONE placeholder message is updated via editMessageText across
 --! the processing steps, instead of silently answering only at the end —
 --! for a PDF (download + extraction + learning) this can take a
@@ -441,7 +441,7 @@ fn handle_photo token cid dbh msg
 --! MCP server isn't configured/connected, this honestly falls back to
 --! asking the user to type instead (no pretending to have a capability
 --! that isn't currently available).
-fn handle_voice token cid dbh msg allowed
+fn handle_voice token cid dbh msg allowed uid
     voice: get msg "voice"
     tel.tel_send_chat_action token cid "typing"
     fpath: tel.tel_get_file token (get voice "file_id")
@@ -490,10 +490,10 @@ fn handle_voice token cid dbh msg allowed
             mem.log_error dbh "whisper_transcribe" last_err
         tel.tel_send_message token cid "I can't understand voice messages right now (transcription unavailable or failed). Please type it instead."
         return nil
-    handle_message token cid (trim text) dbh allowed
+    handle_message token cid (trim text) dbh allowed uid
 
 --! Processes an incoming text message and replies.
-fn handle_message token cid text dbh allowed
+fn handle_message token cid text dbh allowed uid
     if text == nil
         return nil
     tnorm: trim text
@@ -683,7 +683,7 @@ fn handle_message token cid text dbh allowed
     mem.log_event dbh (to_str cid) tnorm "chat"
     --! Live status: send ONE placeholder message and keep updating it via
     --! editMessageText, instead of new message blocks or complete silence
-    --! while the gremium works (see swarm_status_text/tel_finalize below,
+    --! while the gremium works (see swarm_transcript_line/tel_finalize below,
     --! run_gremium_stream in swarm.pipe). (sendMessageDraft was tried here
     --! instead — reverted: it visibly made the message jump around in the
     --! chat instead of updating in place, worse than the plain edit-based
@@ -693,14 +693,14 @@ fn handle_message token cid text dbh allowed
     if (get ph "ok") == true
         message_id: get (get ph "result") "message_id"
     on_update: make_swarm_updater token cid message_id
-    abort_check: make_abort_check token cid allowed dbh
+    round_check: make_round_check token cid allowed dbh uid
     setup_sandbox all_mcp_servers
     answer: ""
     crashed: false
     aborted: false
     abort_reason: ""
     try
-        res: grm.run_gremium_stream dbh cid task on_update abort_check
+        res: grm.run_gremium_stream dbh cid task on_update round_check
         if (get res "aborted") == true
             aborted: true
             abort_reason: get res "abort_reason"
@@ -719,7 +719,7 @@ fn handle_message token cid text dbh allowed
         --! quota.
         setup_sandbox all_mcp_servers
         try
-            res2: grm.run_gremium_stream dbh cid task on_update abort_check
+            res2: grm.run_gremium_stream dbh cid task on_update round_check
             if (get res2 "aborted") == true
                 aborted: true
                 abort_reason: get res2 "abort_reason"
@@ -952,7 +952,7 @@ fn format_trace dbh cid
     (join names " → ") ++ "\n" ++ (to_str rounds) ++ suffix
 
 --! Display name + icon for any gremium agent (the 4 core roles, or a
---! werkzeug_<alias> specialist). Shared by swarm_status_text (live
+--! werkzeug_<alias> specialist). Shared by agent_action_phrase (live
 --! status) and the /trace command, so both always show the same names.
 fn agent_display_name agent
     if agent == "planer"
@@ -967,45 +967,100 @@ fn agent_display_name agent
         return (werkzeug_display_name (substring agent 9 (len agent)))
     {icon: "🧠", name: agent}
 
---! Translates a gremium progress step (see ai_swarm_stream/
---! run_gremium_stream) into a short status line for live-editing the
---! Telegram placeholder message. "handoff"/"final" are already filtered
---! out by the caller (the next "start" shows the new agent anyway).
-fn swarm_status_text agent event detail args_json
+--! The "agent is doing X..." half of a gremium status line — icon + bold
+--! name + a phrase depending on its role. Used by swarm_transcript_line
+--! (the live transcript, see make_swarm_updater).
+fn agent_action_phrase agent
     d: agent_display_name agent
     icon: get d "icon"
     name: get d "name"
-    label: icon ++ " " ++ name ++ " is thinking..."
+    label: icon ++ " **" ++ name ++ "** is thinking..."
     if agent == "planer"
-        label: icon ++ " " ++ name ++ " is planning the answer..."
+        label: icon ++ " **" ++ name ++ "** is planning the answer..."
     else if agent == "faktenwaechter"
-        label: icon ++ " " ++ name ++ " is checking facts and memory..."
+        label: icon ++ " **" ++ name ++ "** is checking facts and memory..."
     else if agent == "kritiker"
-        label: icon ++ " " ++ name ++ " is reviewing the answer..."
+        label: icon ++ " **" ++ name ++ "** is reviewing the answer..."
     else if agent == "registrator"
-        label: icon ++ " " ++ name ++ " is writing the answer..."
+        label: icon ++ " **" ++ name ++ "** is writing the answer..."
     else if (len agent) > 9 && (substring agent 0 9) == "werkzeug_"
-        label: icon ++ " " ++ name ++ " is working (" ++ (substring agent 9 (len agent)) ++ ")..."
-    if event == "tool" && detail != nil && detail != ""
-        label: label ++ "\n→ calling " ++ detail
-        arg_hint: tool_arg_summary detail args_json
-        if arg_hint != ""
-            label: label ++ " (" ++ arg_hint ++ ")"
+        label: icon ++ " **" ++ name ++ "** is working (" ++ (substring agent 9 (len agent)) ++ ")..."
     label
 
---! Builds the on_update closure for run_gremium_stream: translates each
---! progress step into a status line and uses it to edit (throttled to
---! about once/second, no repeats) the placeholder message referenced by
---! message_id. message_id may be nil (placeholder send failed) — then the
---! closure is a no-op. (sendMessageDraft was tried here instead of the
---! edit — reverted: live feedback was that it made the message visibly
---! jump around in the chat instead of updating calmly in place.)
+--! The "→ calling toolname (hint)" half of a gremium status line, for a
+--! "tool" event. Empty string if there is no detail (nothing to show).
+fn tool_call_detail_line detail args_json
+    if detail == nil || detail == ""
+        return ""
+    line: "→ calling " ++ detail
+    arg_hint: tool_arg_summary detail args_json
+    if arg_hint != ""
+        line: line ++ " (" ++ arg_hint ++ ")"
+    line
+
+--! Renders ONE line for the accumulating live transcript (see
+--! make_swarm_updater) from a single ai_swarm_stream progress event.
+--! "handoff"/"final" are filtered out by the caller before this is ever
+--! reached (the next "start" already announces the new agent; "final" is
+--! handled separately by tel_finalize with the real answer). "reasoning"
+--! is the model's actual chain-of-thought for that round (only fires when
+--! the provider returns one) — the real "watch them think" signal;
+--! "inject" reflects a steering message a round_check fed into the run
+--! (see make_round_check) back into the transcript, so the user sees their
+--! own nudge take effect. Empty string means "nothing to show" (caller
+--! skips the edit entirely).
+fn swarm_transcript_line agent event detail args_json
+    if event == "start"
+        return (agent_action_phrase agent)
+    if event == "tool"
+        return (tool_call_detail_line detail args_json)
+    if event == "reasoning"
+        return "*" ++ (truncate_status detail 180) ++ "*"
+    if event == "inject"
+        return "💬 **You**: " ++ (truncate_status detail 180)
+    ""
+
+--! Joins accumulated transcript lines into one message, kept under
+--! Telegram's 4096-char hard limit for editMessageText with real margin to
+--! spare — deliberately tighter than shorten's 4000 (that one is sized for
+--! a single answer block; a multi-line transcript has many separate
+--! bold/italic/icon runs, each adding its own HTML-tag overhead once
+--! tg_html converts the markdown below). Drops the OLDEST lines first when
+--! over budget, with a leading marker so it reads as "history trimmed",
+--! not "nothing happened yet".
+fn render_transcript lines
+    budget: 3500
+    kept: lines
+    text: join kept "\n"
+    while (len text) > budget && (len kept) > 1
+        kept: slice kept 1 (len kept)
+        text: join kept "\n"
+    if (len kept) < (len lines)
+        text: "… (earlier steps hidden)\n" ++ text
+    text
+
+--! Builds the on_update closure for run_gremium_stream: renders every new
+--! progress step as one line, appended to a growing, visually formatted
+--! transcript (see swarm_transcript_line/render_transcript) instead of
+--! overwriting a single status line — so watching the gremium shows what
+--! it has actually been doing/thinking so far, not just its current step.
+--! Same edit throttle as before (about once/second, skip if text
+--! unchanged) gates every event type uniformly, including the newer
+--! "reasoning"/"inject" events. message_id may be nil (placeholder send
+--! failed) — then the closure is a no-op. (sendMessageDraft was tried here
+--! instead of the edit — reverted: live feedback was that it made the
+--! message visibly jump around in the chat instead of updating calmly in
+--! place.)
 fn make_swarm_updater token cid message_id
-    stream_state: {last_text: "", last_ms: 0}
+    stream_state: {lines: [], last_text: "", last_ms: 0}
     fn on_update agent event detail args_json
         if event == "handoff" || event == "final"
             return nil
-        text: swarm_status_text agent event detail args_json
+        line: swarm_transcript_line agent event detail args_json
+        if line == ""
+            return nil
+        push (get stream_state "lines") line
+        text: render_transcript (get stream_state "lines")
         if text == (get stream_state "last_text")
             return nil
         ms: time_ms
@@ -1017,15 +1072,15 @@ fn make_swarm_updater token cid message_id
             tel.tel_edit_message_text token cid message_id text
     on_update
 
---! Builds the abort_check closure for run_gremium_stream (see its doc
+--! Builds the round_check closure for run_gremium_stream (see its doc
 --! comment in swarm.pipe): lets the user stop a running gremium call with
---! /stop instead of having to wait for it to finish, without introducing
---! any concurrency (Muninn's bot loop stays fully single-threaded — the
---! pure-Pipe sqlite module's handle registry and Pipe's process-wide
---! ActiveProfile are both unsynchronized, so real background execution
---! isn't safe yet). Checked at most once every 3s (ai_swarm_stream calls
---! this at the START of every round — cheap, but no reason to hit
---! Telegram's API more often than that).
+--! /stop, or steer it mid-run with a fresh text message, without
+--! introducing any concurrency (Muninn's bot loop stays fully
+--! single-threaded — the pure-Pipe sqlite module's handle registry and
+--! Pipe's process-wide ActiveProfile are both unsynchronized, so real
+--! background execution isn't safe yet). Checked at most once every 3s
+--! (ai_swarm_stream calls this at the START of every round — cheap, but
+--! no reason to hit Telegram's API more often than that).
 --!
 --! dbh MUST be the handle poll_once already has open — this function must
 --! NEVER call mem.open_locked itself. poll_once holds its cross-process
@@ -1035,40 +1090,69 @@ fn make_swarm_updater token cid message_id
 --! on_update above); a second open_locked from in here would try to
 --! re-acquire a lock this same process already holds and block forever.
 --!
---! Non-destructive by design: reads the LAST PERSISTED offset (never
---! writes a new one), so tel_get_updates here — even though it uses the
---! real Bot API, not a mock — never marks anything as delivered. Whatever
---! message this sees is later re-delivered to poll_once's own normal
---! flow completely untouched, exactly as if this check had never run.
-fn make_abort_check token cid allowed dbh
-    state: {last_ms: 0, acked: false}
+--! uid is the update_id of the message that triggered THIS gremium run.
+--! poll_once only persists its advanced telegram_offset AFTER this whole
+--! call chain returns, so every peek during the run would otherwise still
+--! see its own triggering message and misread it as a fresh steering
+--! message — injecting the task's own original text back into its own
+--! conversation. Excluding update_ids <= uid (in addition to the last
+--! persisted offset, whichever is higher) prevents that. A genuine text
+--! steering message found here is marked consumed (mark_injected) so
+--! poll_once's own later, normal pass never dispatches it a second time as
+--! an independent message — the peek itself stays non-destructive (never
+--! advances the real offset), so without that separate marker it would
+--! surface there and start an unintended second gremium run. Non-text
+--! messages arriving mid-run (photo/document/voice) fall back to the old
+--! generic "still working" notice, once per run — injecting binary
+--! content isn't feasible over this text-only channel, so they are NOT
+--! marked consumed and flow through normally once the gremium is done.
+fn make_round_check token cid allowed dbh uid
+    state: {last_ms: 0, pending_ack_id: nil, injected_ids: [], acked_other: false}
     fn check
         ms: time_ms
         if (ms - (get state "last_ms")) < 3000
             return nil
         set state "last_ms" ms
-        offset: nil
+        if (get state "pending_ack_id") != nil
+            --! The ack for a PREVIOUS injection made by THIS closure: by the
+            --! time we're allowed to run again (the 3s throttle above), at
+            --! least one full round has already used it (ChatSwarm appends
+            --! an injection to the conversation before that SAME round's
+            --! model call) — safe to remove now, unconditionally, whether
+            --! this call goes on to find /stop, a new injection, or nothing.
+            tel.tel_delete_message token cid (get state "pending_ack_id")
+            set state "pending_ack_id" nil
+        floor: 0
         saved: mem.meta_get dbh "telegram_offset"
         if saved != nil && saved != ""
-            offset: to_num saved
+            floor: to_num saved
+        if uid != nil && (uid + 1) > floor
+            floor: uid + 1
         updates: []
         try
-            updates: tel.tel_get_updates token offset 0
+            updates: tel.tel_get_updates token floor 0
         catch
             updates: []
         for upd in updates
+            this_uid: get upd "update_id"
             msg: get upd "message"
-            if msg != nil
+            if msg != nil && !(contains (get state "injected_ids") this_uid) && !(mem.was_injected dbh this_uid)
                 chat: get msg "chat"
                 if chat != nil && (is_allowed (get chat "id") allowed)
                     txt: get msg "text"
                     if txt != nil
                         low: lower (trim txt)
                         if low == "/stop"
-                            return "Cancelled by /stop."
-                        if (get state "acked") != true
-                            set state "acked" true
-                            tel.tel_send_message token cid "⏳ Still working on your last request — send /stop to cancel it, or just wait: I'll get to this one right after."
+                            return {abort: true, abort_reason: "Cancelled by /stop."}
+                        push (get state "injected_ids") this_uid
+                        mem.mark_injected dbh this_uid
+                        ack: tel.tel_send_message token cid ("👀 Got it, working it in: *" ++ (truncate_status txt 200) ++ "*")
+                        if (get ack "ok") == true
+                            set state "pending_ack_id" (get (get ack "result") "message_id")
+                        return {inject: txt}
+                    else if (get state "acked_other") != true
+                        set state "acked_other" true
+                        tel.tel_send_message token cid "⏳ Still working on your last request — send /stop to cancel it, or just wait: I'll get to this one right after."
         nil
     check
 
@@ -1291,7 +1375,7 @@ fn settings_kb dbh cid
     kb
 
 --! Processes an inline button press (callback_query).
-fn handle_callback token dbh cbq allowed
+fn handle_callback token dbh cbq allowed uid
     cbid: get cbq "id"
     data: get cbq "data"
     msg: get cbq "message"
@@ -1313,9 +1397,9 @@ fn handle_callback token dbh cbq allowed
             if (get ph "ok") == true
                 message_id: get (get ph "result") "message_id"
             on_update: make_swarm_updater token cid message_id
-            abort_check: make_abort_check token cid allowed dbh
+            round_check: make_round_check token cid allowed dbh uid
             setup_sandbox all_mcp_servers
-            res: grm.run_gremium_stream dbh cid ((mem.settings_prompt_prefix dbh (to_str cid)) ++ "Please dig deeper into this: " ++ txt) on_update abort_check
+            res: grm.run_gremium_stream dbh cid ((mem.settings_prompt_prefix dbh (to_str cid)) ++ "Please dig deeper into this: " ++ txt) on_update round_check
             if (get res "aborted") == true
                 tel_finalize token cid message_id ("🛑 " ++ (get res "abort_reason")) nil
             else
@@ -1759,9 +1843,17 @@ fn poll_once token offset allowed timeout
             chat: get msg "chat"
             if chat != nil
                 cid: get chat "id"
-                if is_allowed cid allowed
+                if (is_allowed cid allowed) && !(mem.was_injected dbh2 uid)
+                    --! was_injected: a message a round_check already fed into
+                    --! a swarm run as a steering interjection (see
+                    --! make_round_check) must never ALSO be dispatched here as
+                    --! a fresh, independent message — the peek that consumed
+                    --! it never advances the real offset (deliberately
+                    --! non-destructive), so without this check it would
+                    --! surface again right here and start a second,
+                    --! unintended gremium run for the same text.
                     try
-                        handle_update token cid msg dbh2 allowed
+                        handle_update token cid msg dbh2 allowed uid
                     catch e9
                         --! Catches ANY unexpected error from the ENTIRE message
                         --! processing (photo/voice/document/gremium/...) —
@@ -1777,7 +1869,7 @@ fn poll_once token offset allowed timeout
                 cid2: get chat2 "id"
                 if is_allowed cid2 allowed
                     try
-                        handle_callback token dbh2 cq allowed
+                        handle_callback token dbh2 cq allowed uid
                     catch e10
                         print ("handle_callback failed: " ++ (to_str e10))
                         mem.log_error dbh2 "handle_callback" (to_str e10)

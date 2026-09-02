@@ -83,6 +83,45 @@ export fn meta_get h key
     else
         ""
 
+--! Tracks Telegram update_ids that a gremium round_check (see muninn.pipe's
+--! make_round_check) already consumed as a live steering interjection —
+--! poll_once's own dispatch loop must never ALSO process the same message
+--! as a fresh, independent one. Kept separate from telegram_offset itself
+--! because round_check's own peek is deliberately non-destructive (never
+--! advances that offset), so this needs its own persisted record. Capped
+--! at the last 30 ids (via mark_injected) so it never grows unbounded
+--! across a long-running process.
+export fn was_injected h uid
+    if uid == nil
+        return false
+    raw: meta_get h "consumed_injected_updates"
+    if raw == nil || raw == ""
+        return false
+    ids: []
+    try
+        ids: parse_json raw
+    catch
+        ids: []
+    contains ids uid
+
+--! Companion to was_injected — call once, right when a message is actually
+--! used as an injection (never for /stop, never for the generic "still
+--! working" notice on non-text messages — see make_round_check).
+export fn mark_injected h uid
+    if uid == nil
+        return nil
+    raw: meta_get h "consumed_injected_updates"
+    ids: []
+    if raw != nil && raw != ""
+        try
+            ids: parse_json raw
+        catch
+            ids: []
+    push ids uid
+    if (len ids) > 30
+        ids: slice ids ((len ids) - 30) (len ids)
+    meta_set h "consumed_injected_updates" (to_json ids)
+
 --! New session ID (sequential, counted via meta) — a "session" here is
 --! one process run of `pipe muninn.pipe` (start until restart/crash),
 --! because ai_cost/ai_tokens are purely in-process counters that start

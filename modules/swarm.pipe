@@ -797,7 +797,7 @@ export fn init_gremium _
 --! step here. Shared by run_gremium AND run_gremium_stream.
 fn apply_registrator_backstop res
     if (get res "aborted") == true
-        --! Deliberately cancelled (see run_gremium_stream/abort_check) —
+        --! Deliberately cancelled (see run_gremium_stream/round_check) —
         --! content is whatever partial progress happened before the stop
         --! (often empty), not a real answer that needs the meta-comment
         --! cleanup below. Running an extra ai_chat pass on it would just
@@ -833,15 +833,18 @@ export fn run_gremium dbh cid task
 
 --! Like run_gremium, but with live progress: on_update is called as
 --! on_update(agent, event, detail, args_json) on every swarm step (event:
---! "start"|"tool"|"handoff"|"final", args_json only populated for "tool"
---! — the raw JSON arguments of the call, see ai_swarm_stream). Stays
---! UI-neutral — Telegram-specific formatting/editing happens at the
---! caller (muninn.pipe), not here. abort_check (optional): called with no
---! arguments at the start of every round by ai_swarm_stream itself — a
---! non-empty string return stops the run immediately, res then has
---! aborted=true/abort_reason set (see apply_registrator_backstop above).
-export fn run_gremium_stream dbh cid task on_update abort_check
+--! "start"|"tool"|"handoff"|"final"|"reasoning"|"inject", args_json only
+--! populated for "tool" — the raw JSON arguments of the call, see
+--! ai_swarm_stream). Stays UI-neutral — Telegram-specific formatting/
+--! editing happens at the caller (muninn.pipe), not here. round_check
+--! (optional): called with no arguments at the start of every round by
+--! ai_swarm_stream itself, may return a map {abort, abort_reason, inject}
+--! (every field optional, nil/non-map/empty = no-op). A truthy "abort"
+--! stops the run immediately, res then has aborted=true/abort_reason set
+--! (see apply_registrator_backstop above). A non-empty "inject" steers the
+--! run with a fresh instruction without stopping it.
+export fn run_gremium_stream dbh cid task on_update round_check
     set STATE "dbh" dbh
     set STATE "cid" cid
-    res: ai_swarm_stream task "planer" 150 on_update abort_check
+    res: ai_swarm_stream task "planer" 150 on_update round_check
     apply_registrator_backstop res
