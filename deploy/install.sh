@@ -25,9 +25,9 @@ fi
 
 log() { echo -e "\n\033[1;34m==> $1\033[0m"; }
 
-log "System packages (git, curl, ffmpeg, ca-certificates)"
+log "System packages (git, curl, ffmpeg, ca-certificates, make, poppler-utils)"
 apt-get update -qq
-apt-get install -y -qq git curl ffmpeg ca-certificates >/dev/null
+apt-get install -y -qq git curl ffmpeg ca-certificates make poppler-utils >/dev/null
 
 log "Go ${GO_VERSION}+ (Ubuntu's apt package is too old for pipe's go.mod)"
 current_go=""
