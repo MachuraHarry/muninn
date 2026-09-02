@@ -663,18 +663,48 @@ fn handle_message token cid text dbh
     on_update: make_swarm_updater token cid message_id
     setup_sandbox all_mcp_servers
     answer: ""
+    crashed: false
     try
         res: grm.run_gremium_stream dbh cid task on_update
         answer: get res "content"
     catch e
-        --! Ohne dieses Log sah ein ECHTER Gremium-Absturz (z.B. max rounds
-        --! exceeded, ein Interpreter-Fehler) identisch aus wie "die KI weiss
-        --! es nicht" — beides landete stillschweigend im selben do_search-
-        --! Fallback darunter. Journal-Log macht den Unterschied sichtbar.
-        print ("run_gremium_stream fehlgeschlagen: " ++ (to_str e))
+        print ("run_gremium_stream fehlgeschlagen (Versuch 1): " ++ (to_str e))
         mem.log_error dbh "run_gremium_stream" (to_str e)
-        answer: ""
+        --! EIN automatischer Wiederholungsversuch: live beobachtet, dass ein
+        --! echter Absturz hier meist ein TRANSIENTER Netzwerkfehler zum
+        --! KI-Provider ist ("read: connection reset by peer" mitten in einer
+        --! mehrteiligen Rechercheaufgabe zu Friedrich Merz) — ein einzelner
+        --! Netzwerk-Aussetzer soll nicht die GESAMTE Aufgabe zunichtemachen,
+        --! wenn ein zweiter Versuch wahrscheinlich durchgeht. Frisches
+        --! Tool-Budget noetig, der erste (gescheiterte) Versuch hat schon
+        --! einen Teil des alten Kontingents verbraucht.
+        setup_sandbox all_mcp_servers
+        try
+            res2: grm.run_gremium_stream dbh cid task on_update
+            answer: get res2 "content"
+        catch e2
+            --! Ohne dieses Log sah ein ECHTER Gremium-Absturz (z.B. max
+            --! rounds exceeded, ein Interpreter-Fehler) identisch aus wie
+            --! "die KI weiss es nicht" — beides landete stillschweigend im
+            --! selben do_search-Fallback darunter. Journal-Log macht den
+            --! Unterschied sichtbar.
+            print ("run_gremium_stream fehlgeschlagen (Versuch 2, gebe auf): " ++ (to_str e2))
+            mem.log_error dbh "run_gremium_stream" (to_str e2)
+            answer: ""
+            crashed: true
     mem.add_message dbh tid cid "user" tnorm
+    if crashed
+        --! Ein ECHTER Absturz (Netzwerk-/Provider-Fehler, Interpreter-Fehler,
+        --! max rounds exceeded) ist NICHT dasselbe wie "die KI weiss es
+        --! nicht" — bei einer laengeren Aufgabenbeschreibung (nicht nur
+        --! einer kurzen Faktenfrage) waere eine blinde Websuche des
+        --! kompletten, oft mehrsaetzigen Aufgabentexts sinnlos. Live
+        --! beobachtet: genau das passierte — die Merz-Rechercheaufgabe
+        --! landete nach dem Netzwerkfehler woertlich als DuckDuckGo-
+        --! Suchanfrage und lieferte "keine brauchbaren Ergebnisse" statt
+        --! ehrlich zu sagen, dass etwas technisch schiefgelaufen ist.
+        tel_finalize token cid message_id "Da ist technisch etwas schiefgelaufen (z.B. ein kurzer Verbindungsabbruch zum KI-Anbieter) — bitte schick deine Anfrage nochmal, dann versuche ich es erneut." nil
+        return nil
     if question_needs_research answer
         tel_finalize token cid message_id "Kein Wissen darüber. Recherchiere..." nil
         do_search token cid dbh tnorm
