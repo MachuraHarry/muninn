@@ -186,7 +186,7 @@ fn greeting_text _
 
 --! Help text.
 fn help_text _
-    "/start      — greeting\n/help       — this help\n/status     — Muninn's state\n/costs      — AI running-cost summary (sessions, tokens, $)\n/list       — your most important memories\n/search     — search the web (e.g. /search Huginn and Muninn)\n/learn      — learn a document (e.g. /learn https://... or send me a .txt/.md file)\n/graph      — query the knowledge graph (e.g. /graph Harry)\n/remind     — schedule a reminder (e.g. /remind in 10 minutes about the break)\n/reminders  — show open reminders/briefings\n/goals      — show open goals, tap to mark done\n/briefing   — activate the daily morning briefing (/briefing stop to cancel)\n/reset      — reset conversation history (fresh context for follow-up questions)\n/consolidate — dream: condense old conversations, let memories decay/be forgotten\n/settings   — configure response style, language, proactive messages, memory aggressiveness\n/stop       — IMMEDIATELY cancel all running background Docker jobs and scheduled continuations"
+    "/start      — greeting\n/help       — this help\n/status     — Muninn's state\n/costs      — AI running-cost summary (sessions, tokens, $)\n/list       — your most important memories\n/search     — search the web (e.g. /search Huginn and Muninn)\n/learn      — learn a document (e.g. /learn https://... or send me a .txt/.md file)\n/graph      — query the knowledge graph (e.g. /graph Harry)\n/remind     — schedule a reminder (e.g. /remind in 10 minutes about the break)\n/reminders  — show open reminders/briefings\n/goals      — show open goals, tap to mark done\n/trace      — see which of the gremium's Norse-named members handled your last request\n/briefing   — activate the daily morning briefing (/briefing stop to cancel)\n/reset      — reset conversation history (fresh context for follow-up questions)\n/consolidate — dream: condense old conversations, let memories decay/be forgotten\n/settings   — configure response style, language, proactive messages, memory aggressiveness\n/stop       — IMMEDIATELY cancel all running background Docker jobs and scheduled continuations"
 
 --! Status text (statistics from the soul).
 fn status_text dbh
@@ -524,6 +524,13 @@ fn handle_message token cid text dbh
                 push kb row
             tel.tel_send_message_kb token cid "Open goals — tap one to mark it done:" kb
         return nil
+    if low == "/trace"
+        t: format_trace dbh cid
+        if t == nil
+            tel.tel_send_message token cid "No trace yet — ask me something first."
+        else
+            tel.tel_send_message token cid t
+        return nil
     if low == "/reminders"
         rows: sched.list dbh cid
         if (len rows) == 0
@@ -684,6 +691,7 @@ fn handle_message token cid text dbh
     try
         res: grm.run_gremium_stream dbh cid task on_update
         answer: get res "content"
+        save_trace dbh cid res
     catch e
         print ("run_gremium_stream failed (attempt 1): " ++ (to_str e))
         mem.log_error dbh "run_gremium_stream" (to_str e)
@@ -698,6 +706,7 @@ fn handle_message token cid text dbh
         try
             res2: grm.run_gremium_stream dbh cid task on_update
             answer: get res2 "content"
+            save_trace dbh cid res2
         catch e2
             --! Without this log, a REAL gremium crash (e.g. max rounds exceeded,
             --! an interpreter error) looked identical to "the AI doesn't know" —
@@ -839,22 +848,117 @@ fn tool_arg_summary tool_name args_json
         return ""
     truncate_status (to_str field) 70
 
+--! Norse names for the tool specialists (werkzeug_<alias>) -- Muninn
+--! itself is Odin's raven of memory, so the whole gremium got a matching
+--! theme instead of generic role labels. Purely a DISPLAY-layer mapping
+--! (see agent_display_name below) -- the actual internal alias/agent
+--! identifiers used for routing/handoff (swarm.pipe) are untouched, so
+--! this carries zero risk to existing handoff logic or stored recipes
+--! (unlike renaming the identifiers themselves, deliberately out of scope).
+--! Unknown/future aliases fall back to a generic icon + the alias itself.
+fn werkzeug_display_name alias
+    if alias == "filesystem"
+        return {icon: "🔨", name: "Sindri"}
+    if alias == "memory"
+        return {icon: "📚", name: "Kvasir"}
+    if alias == "denkwerkzeug"
+        return {icon: "🤔", name: "Vili"}
+    if alias == "browser"
+        return {icon: "🐿️", name: "Ratatoskr"}
+    if alias == "doku"
+        return {icon: "📖", name: "Vör"}
+    if alias == "docker"
+        return {icon: "🔥", name: "Brokkr"}
+    if alias == "zeit"
+        return {icon: "⏳", name: "Skuld"}
+    if alias == "google"
+        return {icon: "📅", name: "Frigg"}
+    if alias == "praesentation"
+        return {icon: "🎨", name: "Iðunn"}
+    if alias == "dokument"
+        return {icon: "📝", name: "Fjalar"}
+    if alias == "whisper"
+        return {icon: "🎙️", name: "Sága"}
+    if alias == "github"
+        return {icon: "⚒️", name: "Eitri"}
+    {icon: "🔧", name: alias}
+
+--! Persists the path/round-count of a finished gremium run (see the
+--! {content, path, rounds} shape returned by run_gremium/run_gremium_stream
+--! — path and rounds used to be silently discarded after pulling out just
+--! "content") so /trace can show it afterwards. One slot per chat (most
+--! recent run only), stored via meta like other small persistent values.
+fn save_trace dbh cid res
+    path: get res "path"
+    if path == nil
+        return nil
+    trace: {}
+    set trace "path" path
+    set trace "rounds" (get res "rounds")
+    mem.meta_set dbh ("last_trace:" ++ (to_str cid)) (to_json trace)
+
+--! Formats a saved trace (see save_trace) as a short, named path for
+--! /trace -- shared formatting so Telegram and any future caller (e.g. the
+--! dashboard) show it identically.
+fn format_trace dbh cid
+    raw: mem.meta_get dbh ("last_trace:" ++ (to_str cid))
+    if raw == nil || raw == ""
+        return nil
+    trace: nil
+    try
+        trace: parse_json raw
+    catch
+        return nil
+    if trace == nil
+        return nil
+    path: get trace "path"
+    if path == nil || (len path) == 0
+        return nil
+    names: []
+    for a in path
+        d: agent_display_name a
+        push names ((get d "icon") ++ " " ++ (get d "name"))
+    rounds: get trace "rounds"
+    suffix: " round"
+    if rounds != 1
+        suffix: " rounds"
+    (join names " → ") ++ "\n" ++ (to_str rounds) ++ suffix
+
+--! Display name + icon for any gremium agent (the 4 core roles, or a
+--! werkzeug_<alias> specialist). Shared by swarm_status_text (live
+--! status) and the /trace command, so both always show the same names.
+fn agent_display_name agent
+    if agent == "planer"
+        return {icon: "🧭", name: "Huginn"}
+    if agent == "faktenwaechter"
+        return {icon: "🔍", name: "Mimir"}
+    if agent == "kritiker"
+        return {icon: "🧐", name: "Heimdall"}
+    if agent == "registrator"
+        return {icon: "✍️", name: "Bragi"}
+    if (len agent) > 9 && (substring agent 0 9) == "werkzeug_"
+        return (werkzeug_display_name (substring agent 9 (len agent)))
+    {icon: "🧠", name: agent}
+
 --! Translates a gremium progress step (see ai_swarm_stream/
 --! run_gremium_stream) into a short status line for live-editing the
 --! Telegram placeholder message. "handoff"/"final" are already filtered
 --! out by the caller (the next "start" shows the new agent anyway).
 fn swarm_status_text agent event detail args_json
-    label: "🧠 " ++ agent ++ " is thinking..."
+    d: agent_display_name agent
+    icon: get d "icon"
+    name: get d "name"
+    label: icon ++ " " ++ name ++ " is thinking..."
     if agent == "planer"
-        label: "🧭 Planning the answer..."
+        label: icon ++ " " ++ name ++ " is planning the answer..."
     else if agent == "faktenwaechter"
-        label: "🔍 Checking facts and memory..."
+        label: icon ++ " " ++ name ++ " is checking facts and memory..."
     else if agent == "kritiker"
-        label: "🧐 Reviewing the answer..."
+        label: icon ++ " " ++ name ++ " is reviewing the answer..."
     else if agent == "registrator"
-        label: "✍️ Writing the answer..."
+        label: icon ++ " " ++ name ++ " is writing the answer..."
     else if (len agent) > 9 && (substring agent 0 9) == "werkzeug_"
-        label: "🔧 Using " ++ (substring agent 9 (len agent)) ++ "..."
+        label: icon ++ " " ++ name ++ " is working (" ++ (substring agent 9 (len agent)) ++ ")..."
     if event == "tool" && detail != nil && detail != ""
         label: label ++ "\n→ calling " ++ detail
         arg_hint: tool_arg_summary detail args_json
@@ -1130,6 +1234,7 @@ fn handle_callback token dbh cbq
             setup_sandbox all_mcp_servers
             res: grm.run_gremium_stream dbh cid ((mem.settings_prompt_prefix dbh (to_str cid)) ++ "Please dig deeper into this: " ++ txt) on_update
             a: get res "content"
+            save_trace dbh cid res
             if a != nil && a != ""
                 tid: mem.active_thread dbh cid
                 mem.add_message dbh tid cid "assistant" a
