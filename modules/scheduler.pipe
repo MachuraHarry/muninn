@@ -90,13 +90,14 @@ export fn next_hhmm hh mm now_sec offset_sec
     target - offset_sec
 
 --! Schedules a task/reminder. kind: "reminder" | "briefing" | "goal_tick" |
---! "calendar_check" | "job_check" (background Docker setup, note = job id
---! from docker_tools.pipe) | "task_check" (generic swarm continuation,
---! note = checkpoint id from create_background_task above — see sched_tick
---! in muninn.pipe for both). due_sec: Unix seconds. repeat: "" (one-off,
---! also for task_check — every re-deferral creates a NEW entry) | "daily" |
---! "weekly" | "15min" (calendar-check cadence) | "5min" (Docker-job-check
---! cadence). Returns id.
+--! "calendar_check" | "email_check" (proactive new-mail check, see
+--! sched_tick in muninn.pipe) | "job_check" (background Docker setup,
+--! note = job id from docker_tools.pipe) | "task_check" (generic swarm
+--! continuation, note = checkpoint id from create_background_task above —
+--! see sched_tick in muninn.pipe for both). due_sec: Unix seconds. repeat:
+--! "" (one-off, also for task_check — every re-deferral creates a NEW
+--! entry) | "daily" | "weekly" | "hourly" (email-check cadence) | "15min"
+--! (calendar-check cadence) | "5min" (Docker-job-check cadence). Returns id.
 export fn schedule h kind chat_id text due_sec repeat
     init_scheduler h
     db_exec h ("INSERT INTO scheduled (kind, chat_id, note, due_ts, repeat, state, created) VALUES ('" ++ (mem.sql_escape kind) ++ "', '" ++ (mem.sql_escape (to_str chat_id)) ++ "', '" ++ (mem.sql_escape text) ++ "', " ++ (to_str due_sec) ++ ", '" ++ (mem.sql_escape repeat) ++ "', 'pending', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "')")
@@ -107,13 +108,16 @@ export fn due h now_sec
     init_scheduler h
     db_query h ("SELECT id, kind, chat_id, note, due_ts, repeat FROM scheduled WHERE state = 'pending' AND due_ts <= " ++ (to_str now_sec) ++ " ORDER BY due_ts ASC")
 
---! Marks an entry as done — or, for daily/weekly/15min/5min, pushes it to
---! the next occurrence (+86400/+604800/+900/+300) instead of closing it.
+--! Marks an entry as done — or, for daily/weekly/hourly/15min/5min, pushes
+--! it to the next occurrence (+86400/+604800/+3600/+900/+300) instead of
+--! closing it.
 export fn mark_fired h id repeat due_sec
-    if repeat == "daily" || repeat == "weekly" || repeat == "15min" || repeat == "5min"
+    if repeat == "daily" || repeat == "weekly" || repeat == "hourly" || repeat == "15min" || repeat == "5min"
         inc: 86400
         if repeat == "weekly"
             inc: 604800
+        if repeat == "hourly"
+            inc: 3600
         if repeat == "15min"
             inc: 900
         if repeat == "5min"

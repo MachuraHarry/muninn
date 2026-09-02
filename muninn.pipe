@@ -1334,11 +1334,17 @@ fn gmail_new_message_ids email window_minutes
         return []
     if text == nil
         return []
+    --! Searches for "Message ID: " ANYWHERE in the line, not as a prefix:
+    --! the tool's actual output nests it ("  1. Message ID: <id>"), and
+    --! also has "Thread ID: " lines right below it that a naive prefix
+    --! check could confuse — index_of matches only the exact substring, so
+    --! it can't accidentally hit those. Same approach as
+    --! parse_calendar_events above for "ID: ".
     ids: []
     for line in (split text "\n")
-        t: trim line
-        if (len t) > 12 && (substring t 0 12) == "Message ID:"
-            push ids (trim (substring t 12 (len t)))
+        idx: index_of line "Message ID: "
+        if idx >= 0
+            push ids (trim (substring line (idx + 12) (len line)))
     ids
 
 --! Proactive new-mail check: finds genuinely new messages (dedup via
@@ -1396,6 +1402,15 @@ fn sched_tick token
         if kind == "calendar_check"
             if mem.setting_proaktiv_enabled dbh (to_str cid)
                 calendar_notify_new token dbh cid user_google_email calendar_reminder_minutes
+            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
+            continue
+        if kind == "email_check"
+            if mem.setting_proaktiv_enabled dbh (to_str cid)
+                try
+                    email_notify_new token dbh cid user_google_email
+                catch e12
+                    print ("email_check failed: " ++ (to_str e12))
+                    mem.log_error dbh "email_check" (to_str e12)
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
             continue
         if kind == "goal_tick"
@@ -1749,6 +1764,22 @@ else
                     sched.schedule dbhc "calendar_check" allowed "" (now + 60) "15min"
                     print "Proactive calendar reminders activated."
                 mem.close_locked hlc
+            --! Proactive new-mail check (see email_notify_new above): same
+            --! idempotent registration pattern as calendar_check, just
+            --! hourly instead of every 15min (a lightweight importance
+            --! judgment runs per new message, no need to check as often as
+            --! upcoming-appointment reminders).
+            if mcp.is_connected "google" && allowed != nil && allowed != ""
+                hle: mem.open_locked nil
+                dbhe: get hle "h"
+                has_email_check: false
+                for e in (sched.list dbhe allowed)
+                    if (get e "kind") == "email_check"
+                        has_email_check: true
+                if !has_email_check
+                    sched.schedule dbhe "email_check" allowed "" (now + 120) "hourly"
+                    print "Proactive email checks activated."
+                mem.close_locked hle
             --! Daily proactive self-initiative (see sched_tick, kind
             --! "proaktiv"): once a day, Muninn looks into its memory on its
             --! own (open tasks, started work, topics) and only speaks up if

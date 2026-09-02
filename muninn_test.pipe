@@ -799,6 +799,17 @@ test "mark_fired schiebt 5min-Aufgabe auf den naechsten Takt (Hintergrund-Job-Ch
     expect_eq (len due2) 1 "in 5 Minuten wieder faellig (1000 + 300)"
     mem.close h
 
+test "mark_fired schiebt hourly-Aufgabe auf den naechsten Takt (E-Mail-Check)"
+    h: mem.init_db ":memory:"
+    sched.init_scheduler h
+    id: sched.schedule h "email_check" "42" "" 1000 "hourly"
+    sched.mark_fired h id "hourly" 1000
+    due: sched.due h 1000
+    expect_eq (len due) 0 "gleich nicht mehr faellig"
+    due2: sched.due h 4600
+    expect_eq (len due2) 1 "in einer Stunde wieder faellig (1000 + 3600)"
+    mem.close h
+
 test "docker_tools: create_job/get_job/update_job-Rundlauf"
     h: mem.init_db ":memory:"
     jid: dt.create_job h "42" "test-container" "Testbeschreibung"
