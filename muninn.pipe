@@ -108,6 +108,14 @@ fn setup_sandbox servers
     --! built entirely from a fixed template (only the already locally saved
     --! file path is inserted, see shell_quote).
     push wl "pdftotext"
+    --! "rsvg-convert" added to the whitelist: tool_icon_holen (swarm.pipe)
+    --! calls it directly via exec() to rasterize a fetched Iconify SVG into
+    --! a PNG (python-docx/office-powerpoint-mcp-server's picture-insert
+    --! tools only accept raster images, not SVG — confirmed against
+    --! python-docx's add_picture, which shells out to Pillow) — no MCP
+    --! server for this, fixed command template (only the already locally
+    --! saved SVG/PNG paths are inserted, see shell_quote there).
+    push wl "rsvg-convert"
     allow_exec: (len wl) > 0
     set SANDBOX_STATE "gen" ((get SANDBOX_STATE "gen") + 1)
     name: "muninn-" ++ (to_str (get SANDBOX_STATE "gen"))

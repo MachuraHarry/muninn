@@ -261,9 +261,9 @@ ENVEOF
     ENV_WIZARD_RAN=1
 }
 
-log "System packages (git, curl, ffmpeg, ca-certificates, make, poppler-utils)"
+log "System packages (git, curl, ffmpeg, ca-certificates, make, poppler-utils, librsvg2-bin)"
 spin "Updating package index" apt-get update -qq
-spin "Installing system packages" apt-get install -y -qq git curl ffmpeg ca-certificates make poppler-utils
+spin "Installing system packages" apt-get install -y -qq git curl ffmpeg ca-certificates make poppler-utils librsvg2-bin
 
 log "Go ${GO_VERSION}+ (Ubuntu's apt package is too old for pipe's go.mod)"
 current_go=""

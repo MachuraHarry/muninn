@@ -154,6 +154,47 @@ fn tool_bericht_veroeffentlichen title text
         return "Veroeffentlichung fehlgeschlagen."
     "Veroeffentlicht: " ++ url
 
+--! Escapes a path for embedding as ONE host-side argv token in an exec()
+--! command string — same duplicated-locally pattern as docker_tools.pipe's
+--! own copy (see the comment there: an extra import here would needlessly
+--! risk the sqlite-shadowing bug that motivated keeping this un-exported).
+fn shell_quote s
+    s: replace_all s "\\" "\\\\"
+    s: replace_all s "\"" "\\\""
+    s
+
+--! Tool: finds a free, open-source icon (Iconify, 200'000+ icons, no API
+--! key) matching a search term and saves it as a ready-to-use PNG in
+--! mcp_data/icons/ -- for embedding into presentations/documents
+--! (werkzeug_praesentation's manage_image, werkzeug_dokument's add_picture)
+--! or sending directly (bild_senden). PNG, not SVG: neither python-docx
+--! nor office-powerpoint-mcp-server can embed SVG directly, only raster
+--! images -- rsvg-convert (see setup_sandbox's exec whitelist) rasterizes
+--! the fetched SVG.
+fn tool_icon_holen suchbegriff farbe groesse
+    if suchbegriff == nil || (trim suchbegriff) == ""
+        return "Suchbegriff fehlt."
+    ids: web.web_icon_search (trim suchbegriff) 1
+    if (len ids) == 0
+        return "Kein passendes Icon gefunden fuer '" ++ suchbegriff ++ "'."
+    icon_id: at ids 0
+    px: "128"
+    if groesse != nil && groesse != ""
+        px: to_str groesse
+    svg: web.web_icon_svg icon_id farbe px
+    if svg == nil
+        return "Icon '" ++ icon_id ++ "' konnte nicht abgerufen werden."
+    safe_name: replace_all icon_id ":" "_"
+    make_dir "/root/muninn/mcp_data/icons"
+    svg_path: "/root/muninn/mcp_data/icons/" ++ safe_name ++ ".svg"
+    png_path: "/root/muninn/mcp_data/icons/" ++ safe_name ++ ".png"
+    write_file svg_path svg
+    cmd: "rsvg-convert -w " ++ px ++ " -h " ++ px ++ " -o \"" ++ (shell_quote png_path) ++ "\" \"" ++ (shell_quote svg_path) ++ "\""
+    r: exec cmd
+    if (get r "status") != 0
+        return "SVG->PNG-Umwandlung fehlgeschlagen (" ++ icon_id ++ "): " ++ (get r "output")
+    "Icon gespeichert: " ++ png_path ++ " (" ++ icon_id ++ ")"
+
 --! Tool: create a long-term goal (a genuine ongoing objective, NOT a
 --! one-off task that's done as soon as this conversation ends -- e.g.
 --! "learn Spanish this year", not "create a text file"). Shows up in
@@ -625,10 +666,11 @@ export fn init_gremium _
     ai_tool "rezept_speichern" "Permanently store a reusable workflow recipe (a proven sequence of steps for a recurring task)." {name: "Short, unique recipe name", schritte: "The individual steps in order, concrete and actionable"} tool_rezept_speichern
     ai_tool "rezepte_suchen" "Fetch stored workflow recipes, to solve recurring tasks following a proven pattern." {query: "Keywords about the task"} tool_rezepte_suchen
     ai_tool "bericht_veroeffentlichen" "Publish a long text (research summary, report, article) as a Telegraph page instead of sending it as plain text (which gets cut off at Telegram's length limit) — Telegram shows Telegraph pages with its fast, native-feeling Instant View reader." {title: "Short, descriptive page title", text: "The full text, paragraphs separated by a blank line"} tool_bericht_veroeffentlichen
+    ai_tool "icon_holen" "Find a free, open-source icon (200'000+ icons, no API key) matching a search term and save it as a ready-to-use PNG file — for embedding into a presentation/document (werkzeug_praesentation/werkzeug_dokument) or sending directly." {suchbegriff: "What the icon should show, in English (e.g. 'chart', 'warning', 'github', 'email')", farbe: "Optional hex color e.g. '#ff6600' — empty/omit for the icon's default color", groesse: "Optional pixel size, e.g. '128' — empty/omit for 128"} tool_icon_holen
     ai_tool "ziel_anlegen" "Create a long-term goal (a genuine ongoing objective the user wants to work towards over time — NOT a one-off task that's finished once this conversation ends). Shows up in /goals on Telegram and the web dashboard." {text: "Short, clear description of the goal"} tool_ziel_anlegen
     ai_tool "ziel_erledigt" "Mark a previously created goal as done, by its id." {id: "The goal's id"} tool_ziel_erledigt
 
-    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen", "docker_pull_image", "docker_create_container", "docker_hintergrund_setup", "docker_job_status", "docker_jobs_abbrechen", "docker_environments_auflisten", "docker_environment_registrieren", "docker_environment_entfernen", "bild_senden", "datei_senden", "hintergrund_fortsetzen", "rezept_speichern", "rezepte_suchen", "ziel_anlegen", "ziel_erledigt", "bericht_veroeffentlichen"]
+    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen", "docker_pull_image", "docker_create_container", "docker_hintergrund_setup", "docker_job_status", "docker_jobs_abbrechen", "docker_environments_auflisten", "docker_environment_registrieren", "docker_environment_entfernen", "bild_senden", "datei_senden", "hintergrund_fortsetzen", "rezept_speichern", "rezepte_suchen", "ziel_anlegen", "ziel_erledigt", "bericht_veroeffentlichen", "icon_holen"]
     --! P5: ONE focused specialist agent PER connected MCP server instead of
     --! a jack-of-all-trades with every tool — automatically scales with
     --! every new MCP server (no code rework needed), and keeps the AI's
@@ -687,11 +729,13 @@ export fn init_gremium _
             --! Tool-Experimente, nie gespeichert). Der simple 3-Schritt-Pfad
             --! (create -> add_slide pro Folie -> save) ist isoliert getestet
             --! zuverlaessig und schnell.
-            extra_note: " Nutze IMMER den einfachen Weg: 'ppt_create_presentation' EINMAL aufrufen (liefert eine presentation_id), dann pro gewuenschter Folie 'ppt_add_slide' mit presentation_id+title+content, zum Schluss GENAU EINMAL 'ppt_save_presentation' mit presentation_id und file_path (IMMER unter '/root/muninn/mcp_data/<sprechender-name>.pptx'). Nutze NICHT das Vorlagen-/Template-System (create_presentation_from_templates, populate_placeholder, manage_text) — das braucht viel mehr Schritte und fuehrt oft dazu, dass die Praesentation nie gespeichert wird. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
+            push gtools "icon_holen"
+            extra_note: " Nutze IMMER den einfachen Weg: 'ppt_create_presentation' EINMAL aufrufen (liefert eine presentation_id), dann pro gewuenschter Folie 'ppt_add_slide' mit presentation_id+title+content, zum Schluss GENAU EINMAL 'ppt_save_presentation' mit presentation_id und file_path (IMMER unter '/root/muninn/mcp_data/<sprechender-name>.pptx'). Nutze NICHT das Vorlagen-/Template-System (create_presentation_from_templates, populate_placeholder, manage_text) — das braucht viel mehr Schritte und fuehrt oft dazu, dass die Praesentation nie gespeichert wird. Passt ein Icon thematisch zu einer Folie (z.B. ein Diagramm-Symbol fuer Zahlen, ein Warnsymbol fuer Risiken), hole es VORHER mit 'icon_holen' (liefert einen lokalen PNG-Pfad) und fuege es per 'ppt_manage_image' ein — optional, nur wenn es die Folie wirklich verbessert, nicht bei jeder Folie erzwingen. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
         if alias == "github"
             extra_note: " Werkzeuge mit Praefix 'github_'. Bei Fragen nach dem eigenen Account/Identitaet/Berechtigungen ('wem gehoert der Token', 'welcher Account') rufe 'github_get_me' auf, statt aus Repo-Suchergebnissen zu raten. 'github_list_*' fuer breites Durchsuchen mit einfachen Filtern (z.B. alle offenen Issues), 'github_search_*' fuer gezielte Anfragen mit Stichworten/Kriterien. Neue Issues/PRs: 'github_search_issues' bzw. 'github_search_pull_requests' VORHER nutzen, um Duplikate zu vermeiden. Repo/Owner immer explizit erfragen oder aus dem Gespraech ableiten — NIE raten. Aenderungen an bestehendem Code/Dateien immer ueber 'github_get_file_contents' (aktuellen Inhalt/SHA holen) vor 'github_create_or_update_file', nicht blind ueberschreiben."
         if alias == "dokument"
-            extra_note: " Nutze 'word_create_document' EINMAL mit filename (IMMER unter '/root/muninn/mcp_data/<sprechender-name>.docx') — das legt die Datei direkt an, KEIN separater Speicher-Schritt noetig. Danach 'word_add_heading'/'word_add_paragraph' etc. mit demselben filename pro Abschnitt — jeder Aufruf schreibt sofort in die Datei. 'word_convert_to_pdf' NUR wenn der Nutzer ausdruecklich ein PDF wollte (nicht von dir aus versuchen — auf diesem Server ist dafuer kein LibreOffice/Word installiert, der Versuch schlaegt IMMER fehl und bringt nur eine unnoetige Fehlermeldung). Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
+            push gtools "icon_holen"
+            extra_note: " Nutze 'word_create_document' EINMAL mit filename (IMMER unter '/root/muninn/mcp_data/<sprechender-name>.docx') — das legt die Datei direkt an, KEIN separater Speicher-Schritt noetig. Danach 'word_add_heading'/'word_add_paragraph' etc. mit demselben filename pro Abschnitt — jeder Aufruf schreibt sofort in die Datei. 'word_convert_to_pdf' NUR wenn der Nutzer ausdruecklich ein PDF wollte (nicht von dir aus versuchen — auf diesem Server ist dafuer kein LibreOffice/Word installiert, der Versuch schlaegt IMMER fehl und bringt nur eine unnoetige Fehlermeldung). Passt ein Icon thematisch zu einem Abschnitt, hole es VORHER mit 'icon_holen' (liefert einen lokalen PNG-Pfad) und fuege es per 'word_add_picture' ein — optional, nur wenn es das Dokument wirklich verbessert. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
         agent_name: "werkzeug_" ++ alias
         push specialist_names agent_name
         specialist_desc: specialist_desc ++ "- '" ++ agent_name ++ "': Werkzeuge aus '" ++ alias ++ "' (" ++ (join gtools ", ") ++ ")\n"

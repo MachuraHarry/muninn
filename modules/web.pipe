@@ -213,6 +213,60 @@ export fn research query
     set out "sources" sources
     out
 
+--! Searches Iconify (api.iconify.design, iconify.design) for icon ids
+--! matching query — 200'000+ free, open-source icons across 200+ sets
+--! (Material Design Icons, Font Awesome, Tabler, ...), no API key, no
+--! account. Returns a list of icon ids like "mdi:github" (empty on
+--! error/no results).
+export fn web_icon_search query limit
+    url: "https://api.iconify.design/search?query=" ++ (url_encode query) ++ "&limit=" ++ (to_str limit)
+    hdrs: {}
+    r: nil
+    try
+        r: http_request "GET" url hdrs
+    catch
+        return []
+    j: nil
+    try
+        j: parse_json (get r "body")
+    catch
+        return []
+    if j == nil
+        return []
+    icons: get j "icons"
+    if icons == nil
+        return []
+    icons
+
+--! Fetches one icon as raw SVG text, in the given color and size (both
+--! optional — nil/"" for the icon's defaults, i.e. currentColor/1em).
+--! icon_id: e.g. "mdi:github" (from web_icon_search). Returns nil on error
+--! or if icon_id isn't in the expected "prefix:name" shape.
+export fn web_icon_svg icon_id color size
+    parts: split icon_id ":"
+    if (len parts) != 2
+        return nil
+    prefix: at parts 0
+    name: at parts 1
+    url: "https://api.iconify.design/" ++ prefix ++ "/" ++ name ++ ".svg"
+    qs: []
+    if color != nil && color != ""
+        push qs ("color=" ++ (url_encode color))
+    if size != nil && size != ""
+        push qs ("width=" ++ (url_encode size))
+        push qs ("height=" ++ (url_encode size))
+    if (len qs) > 0
+        url: url ++ "?" ++ (join qs "&")
+    hdrs: {}
+    r: nil
+    try
+        r: http_request "GET" url hdrs
+    catch
+        return nil
+    if (get r "status") != 200
+        return nil
+    get r "body"
+
 --! Creates a new Telegraph (telegra.ph) account and returns its
 --! access_token, or nil on any error. Call once and persist the token
 --! (see tool_bericht_veroeffentlichen in swarm.pipe) — every subsequent
