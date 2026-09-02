@@ -59,6 +59,18 @@ if ! command -v docker >/dev/null 2>&1; then
 else
     echo "Docker $(docker --version) already installed, skipping."
 fi
+# The package installing successfully doesn't mean the daemon is actually
+# running (e.g. restricted/nested virtualization on some budget VPS
+# providers can leave the systemd unit failed to start) — check explicitly
+# instead of silently completing while Muninn's Docker features would be
+# broken.
+if docker info >/dev/null 2>&1; then
+    echo "Docker daemon is up and responding."
+else
+    echo "WARNING: Docker is installed but the daemon isn't responding (checked 'docker info')." >&2
+    echo "         Muninn's Docker features (docker_tools.pipe, mcp-docker-server) won't work" >&2
+    echo "         until this is fixed. Check: systemctl status docker" >&2
+fi
 
 log "uv/uvx (for the Python-based MCP servers: Google Workspace, PowerPoint, Word)"
 if [ ! -x "$HOME/.local/bin/uvx" ]; then
