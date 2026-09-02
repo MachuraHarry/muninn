@@ -108,9 +108,20 @@ fn tg_html text
     t: regex_replace "&" "&amp;" text
     t: regex_replace "<" "&lt;" t
     t: regex_replace ">" "&gt;" t
+    --! Fenced code blocks (```lang\ncode\n```) BEFORE every other markdown
+    --! pass below, so markdown-look-alike characters inside real code (e.g.
+    --! Python's **kwargs, a Markdown table using |) never get misread as
+    --! formatting by the passes that follow. class="language-$1" is empty
+    --! (harmless, Telegram just renders a plain block) when no language tag
+    --! was given.
+    t: regex_replace "```([a-zA-Z0-9_+-]*)\\n?([\\s\\S]*?)```" "<pre><code class=\"language-$1\">$2</code></pre>" t
     t: regex_replace "\\*\\*(.+?)\\*\\*" "<b>$1</b>" t
     t: regex_replace "__(.+?)__" "<b>$1</b>" t
     t: regex_replace "\\*(.+?)\\*" "<i>$1</i>" t
+    t: regex_replace "~~(.+?)~~" "<s>$1</s>" t
+    --! Spoiler (Discord-style ||text||, a convention models already know
+    --! from training) -> Telegram's tap-to-reveal spoiler.
+    t: regex_replace "\\|\\|(.+?)\\|\\|" "<tg-spoiler>$1</tg-spoiler>" t
     t: regex_replace "`([^`]+)`" "<code>$1</code>" t
     t: regex_replace "\\[([^\\]]+)\\]\\(([^)]+)\\)" "<a href=\"$2\">$1</a>" t
     t
