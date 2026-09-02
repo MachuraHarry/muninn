@@ -130,15 +130,41 @@ test "add_memory und top_memories nach Importance"
     expect_eq (get (at top 0) "content") "Espresso-Vorliebe" "hoechste Importance zuerst"
     mem.close h
 
-test "recipes liefert nur Rezepte, wichtigste zuerst"
+test "recipe_search liefert nur Rezepte, wichtigste zuerst (leere Query)"
     h: mem.init_db ":memory:"
-    mem.add_memory h "REZEPT: BTC-Kurs — btc-echo.de abrufen, zusammenfassen" "rezept" 4 "test" "rezept"
+    mem.add_memory h "REZEPT: BTC-Kurs — btc-echo.de abrufen, zusammenfassen" "rezept" 4 "test" "BTC-Kurs"
     mem.add_memory h "Ganz normale Erinnerung" "permanent" 5 "test" "x"
-    mem.add_memory h "REZEPT: Wetterbericht — wetter.com abrufen, kurz vorlesen" "rezept" 2 "test" "rezept"
-    rs: mem.recipes h
+    mem.add_memory h "REZEPT: Wetterbericht — wetter.com abrufen, kurz vorlesen" "rezept" 2 "test" "Wetterbericht"
+    rs: mem.recipe_search h nil 5
     expect_eq (len rs) 2 "nur die zwei Rezepte"
     expect_eq (at rs 0) "REZEPT: BTC-Kurs — btc-echo.de abrufen, zusammenfassen" "wichtigstes Rezept zuerst"
     expect_eq (at rs 1) "REZEPT: Wetterbericht — wetter.com abrufen, kurz vorlesen" "zweites Rezept danach"
+    mem.close h
+
+test "recipe_search findet das thematisch passende Rezept per Query zuerst"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "REZEPT: BTC-Kurs — btc-echo.de abrufen, zusammenfassen" "rezept" 2 "test" "BTC-Kurs"
+    mem.add_memory h "REZEPT: Wetterbericht — wetter.com abrufen, kurz vorlesen" "rezept" 4 "test" "Wetterbericht"
+    rs: mem.recipe_search h "Wetter Vorhersage" 1
+    expect_eq (len rs) 1 "genau ein Treffer"
+    expect_eq (at rs 0) "REZEPT: Wetterbericht — wetter.com abrufen, kurz vorlesen" "Wetter-Rezept trotz niedrigerer Importance zuerst"
+    mem.close h
+
+test "add_memory aktualisiert ein Rezept mit gleichem Namen statt zu duplizieren"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "REZEPT: BTC-Kurs — alte Version" "rezept" 3 "test" "BTC-Kurs"
+    mem.add_memory h "REZEPT: BTC-Kurs — neue, bessere Version" "rezept" 4 "test" "BTC-Kurs"
+    expect_eq (mem.memory_count h) 1 "immer noch nur eine Zeile, kein Duplikat"
+    rs: mem.recipe_search h nil 5
+    expect_eq (at rs 0) "REZEPT: BTC-Kurs — neue, bessere Version" "Inhalt wurde aktualisiert"
+    mem.close h
+
+test "tool_rezepte_suchen filtert tatsaechlich nach query"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "REZEPT: BTC-Kurs — btc-echo.de abrufen" "rezept" 4 "test" "BTC-Kurs"
+    mem.add_memory h "REZEPT: Wetterbericht — wetter.com abrufen" "rezept" 2 "test" "Wetterbericht"
+    rs: mem.recipe_search h "Bitcoin Kurs" 1
+    expect_eq (at rs 0) "REZEPT: BTC-Kurs — btc-echo.de abrufen" "Query grenzt auf das passende Rezept ein"
     mem.close h
 
 test "set_importance aendert die Importance einer Erinnerung"

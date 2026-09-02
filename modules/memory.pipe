@@ -351,8 +351,34 @@ export fn add_memory h content kind importance source tags
                     newimp: 5
                 db_exec h ("UPDATE memories SET importance = " ++ (to_str newimp) ++ ", ts = '" ++ (sql_escape (now_ts 0)) ++ "' WHERE id = " ++ (to_str eid))
                 return eid
-    db_exec h ("INSERT INTO memories (content, kind, importance, source, ts, tags) VALUES ('" ++ (sql_escape content) ++ "', '" ++ (sql_escape kind) ++ "', " ++ (to_str importance) ++ ", '" ++ (sql_escape source) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "', '" ++ (sql_escape tags) ++ "')")
-    rid: get (at (db_query h "SELECT max(id) AS mid FROM memories") 0) "mid"
+    --! Same idea for "rezept" (recipe): tags holds the recipe's own name
+    --! here (set by tool_rezept_speichern) — re-saving a recipe under the
+    --! same name updates it in place instead of piling up near-duplicate/
+    --! stale versions forever. Matched on tags (not content, unlike
+    --! "permanent" above), since a refined recipe's steps text is expected
+    --! to actually change between saves.
+    rid: nil
+    if kind == "rezept" && tags != nil && (trim tags) != ""
+        candidates: db_query h ("SELECT id, importance FROM memories WHERE kind = 'rezept' AND tags = '" ++ (sql_escape tags) ++ "'")
+        if (len candidates) > 0
+            eid: get (at candidates 0) "id"
+            eimp: get (at candidates 0) "importance"
+            newimp: eimp
+            if importance > eimp
+                newimp: importance
+            if newimp > 5
+                newimp: 5
+            db_exec h ("UPDATE memories SET content = '" ++ (sql_escape content) ++ "', importance = " ++ (to_str newimp) ++ ", ts = '" ++ (sql_escape (now_ts 0)) ++ "' WHERE id = " ++ (to_str eid))
+            --! Old embedding no longer matches the updated content — drop it,
+            --! the tail below recomputes and re-inserts it against the same
+            --! memory_id (same delete-then-reinsert idiom as delete_memory/
+            --! consolidate_memories elsewhere in this file; embeddings.memory_id
+            --! is a PRIMARY KEY, so a raw re-INSERT would conflict).
+            db_exec h ("DELETE FROM embeddings WHERE memory_id = " ++ (to_str eid))
+            rid: eid
+    if rid == nil
+        db_exec h ("INSERT INTO memories (content, kind, importance, source, ts, tags) VALUES ('" ++ (sql_escape content) ++ "', '" ++ (sql_escape kind) ++ "', " ++ (to_str importance) ++ ", '" ++ (sql_escape source) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "', '" ++ (sql_escape tags) ++ "')")
+        rid: get (at (db_query h "SELECT max(id) AS mid FROM memories") 0) "mid"
     vec: nil
     try
         vec: embed content
@@ -913,15 +939,74 @@ export fn retrieve_context h query k
                         set out (k - 1) perm_content
     out
 
---! All stored workflow recipes (kind "rezept"), most important first.
---! Deliberately without embedding search: recipes are rare and short — the
---! AI should pick the right one itself from the small list.
-export fn recipes h
-    rows: db_query h "SELECT content FROM memories WHERE kind = 'rezept' ORDER BY importance DESC, id DESC LIMIT 10"
-    out: []
+--! Query-aware search over stored workflow recipes (kind "rezept"): same
+--! hybrid keyword+embedding scoring as retrieve_context, scoped to just
+--! this kind. An empty/nil query (or a query with no real signal, e.g. a
+--! DeepSeek-only keyword-dominated miss) falls back to the top-k recipes
+--! by importance -- this is what the old flat `recipes` listing (removed)
+--! always did, so a caller that just wants "what recipes exist" still
+--! works exactly the same by passing an empty query.
+export fn recipe_search h query k
+    rows: db_query h "SELECT id, content, importance FROM memories WHERE kind = 'rezept' ORDER BY importance DESC, id DESC"
+    if (len rows) == 0
+        return []
+    top_k: fn rs
+        out: []
+        i: 0
+        while i < k && i < (len rs)
+            push out (get (at rs i) "content")
+            i: i + 1
+        out
+    if query == nil || (trim query) == ""
+        return top_k rows
+    vecs: db_query h "SELECT memory_id, vec FROM embeddings"
+    vecmap: {}
+    for v in vecs
+        set vecmap (to_str (get v "memory_id")) (get v "vec")
+    contents: []
     for r in rows
-        push out (get r "content")
-    out
+        push contents (get r "content")
+    n: len contents
+    terms: tokenize query
+    df: build_df contents
+    kw_denom: keyword_denom terms df n
+    qvec: nil
+    try
+        qvec: embed query
+    catch e
+        qvec: nil
+    sem_w: 0.25
+    kw_w: 0.75
+    if qvec != nil
+        if (len qvec) > 300
+            sem_w: 0.7
+            kw_w: 0.3
+    scored: []
+    any_signal: false
+    for r in rows
+        c: get r "content"
+        kw: 0
+        if kw_denom > 0
+            kw: (keyword_score (lower c) terms df n) / kw_denom
+        sem: 0
+        if qvec != nil
+            vj: get vecmap (to_str (get r "id"))
+            if vj != nil
+                cv: nil
+                try
+                    cv: parse_json vj
+                catch e2
+                    cv: nil
+                if cv != nil
+                    sem: cosine_sim qvec cv
+        score: (sem * sem_w) + (kw * kw_w)
+        if score > 0
+            any_signal: true
+        push scored {content: c, score: score}
+    if !any_signal
+        return top_k rows
+    ordered: sorted_by scored (fn x: (0 - (get x "score")))
+    top_k ordered
 
 --! Pure keyword search (deterministic, without embedding).
 export fn keyword_retrieve h query k

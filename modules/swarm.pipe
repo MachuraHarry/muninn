@@ -71,16 +71,20 @@ fn tool_rezept_speichern name schritte
         return "Rezept-Name fehlt."
     if schritte == nil || (trim schritte) == ""
         return "Rezept-Schritte fehlen."
-    mem.add_memory h ("REZEPT: " ++ (trim name) ++ " — " ++ (trim schritte)) "rezept" 4 "gremium" "rezept"
-    "Rezept gespeichert: " ++ (trim name)
+    n: trim name
+    --! tags holds the recipe's own name (not a literal placeholder) so
+    --! add_memory's kind="rezept" dedup branch can upsert by name instead
+    --! of piling up a new row every time the same recipe gets refined.
+    mem.add_memory h ("REZEPT: " ++ n ++ " — " ++ (trim schritte)) "rezept" 4 "gremium" n
+    "Rezept gespeichert: " ++ n
 
---! Tool: list stored workflow recipes, to handle a recurring task
---! following a proven pattern.
+--! Tool: search stored workflow recipes by relevance to the current task,
+--! to handle a recurring task following a proven pattern.
 fn tool_rezepte_suchen query
     h: cur_dbh 0
     if h == nil
         return "Keine Datenbank verbunden."
-    rs: mem.recipes h
+    rs: mem.recipe_search h query 5
     if (len rs) == 0
         return "Keine Rezepte gespeichert."
     out: ""
