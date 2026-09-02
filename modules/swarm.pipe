@@ -1,7 +1,7 @@
---! swarm.pipe — Muninns inneres Gremium (ai_swarm-Handoffs).
---! Agenten verfeinern eine Antwort: planer -> faktenwaechter -> kritiker -> registrator,
---! optional ueber "werkzeugmeister" mit Zugriff auf per MCP angebundene externe Tools (P1).
---! Hinweis: Map-Literale müssen in Pipe einzeilig sein, daher stehen die Configs einzeilig.
+--! swarm.pipe — Muninn's inner gremium (ai_swarm handoffs).
+--! Agents refine an answer: planer -> faktenwaechter -> kritiker -> registrator,
+--! optionally via "werkzeugmeister" with access to externally connected MCP tools (P1).
+--! Note: map literals must be single-line in Pipe, so the configs are single-line.
 import "modules/memory.pipe" as mem
 import "modules/web.pipe" as web
 import "modules/mcp.pipe" as mcp
@@ -9,45 +9,45 @@ import "modules/scheduler.pipe" as sched
 import "modules/docker_tools.pipe" as dt
 import "modules/telegram.pipe" as tel
 
---! Geteilter, mutabler Zustand: aktueller DB-Handle + Chat-Kontext fuer die Tools.
---! tz_offset/token werden einmalig beim Start gesetzt (set_tz_offset/set_token),
---! dbh/cid pro Lauf (run_gremium) — token+cid werden von tool_bild_senden/
---! tool_datei_senden gebraucht, um ueberhaupt an Telegram senden zu koennen.
+--! Shared, mutable state: current DB handle + chat context for the tools.
+--! tz_offset/token are set once at startup (set_tz_offset/set_token), dbh/cid
+--! per run (run_gremium) — token+cid are needed by tool_bild_senden/
+--! tool_datei_senden to be able to send to Telegram at all.
 STATE: {dbh: nil, cid: nil, tz_offset: 0, token: nil, google_email: nil}
 
 fn cur_dbh _
     get STATE "dbh"
 
---! Einmalig beim Start zu setzen (siehe setup_core in muninn.pipe).
+--! Set once at startup (see setup_core in muninn.pipe).
 export fn set_tz_offset off
     set STATE "tz_offset" off
     nil
 
---! Einmalig beim Start zu setzen (siehe setup_core in muninn.pipe). Getrennt
---! von set_tz_offset, damit der Telegram-Token — wie alle Secrets — nur an
---! genau einer Stelle im Code angefasst wird.
+--! Set once at startup (see setup_core in muninn.pipe). Kept separate from
+--! set_tz_offset, so the Telegram token — like all secrets — is only
+--! touched at exactly one place in the code.
 export fn set_token tok
     set STATE "token" tok
     nil
 
---! Einmalig beim Start zu setzen (siehe setup_core in muninn.pipe). Damit
---! entfaellt der frueher hier hart codierte Literal-Wert (ein Release-
---! Blocker: jede fremde Installation haette Harrys eigene E-Mail-Adresse
---! im System-Prompt gehabt statt der eigenen konfigurierten).
+--! Set once at startup (see setup_core in muninn.pipe). This removes the
+--! literal value that used to be hardcoded here (a release blocker: any
+--! third-party installation would have had Harry's own email address in
+--! the system prompt instead of its own configured one).
 export fn set_google_email email
     set STATE "google_email" email
     nil
 
---! Loest einen von einem Werkzeug (z.B. Playwright-Screenshot) gemeldeten,
---! meist RELATIVEN Pfad zu einem absoluten Pfad auf. Muninn laeuft immer aus
---! /root/muninn heraus (siehe alle Start-Kommandos in muninn.pipe).
+--! Resolves a mostly RELATIVE path reported by a tool (e.g. a Playwright
+--! screenshot) into an absolute path. Muninn always runs from /root/muninn
+--! (see all start commands in muninn.pipe).
 fn resolve_muninn_path path
     if (len path) > 0 && (substring path 0 1) == "/"
         path
     else
         "/root/muninn/" ++ path
 
---! Tool: relevante Erinnerungen aus der Seele abrufen.
+--! Tool: fetch relevant memories from the soul.
 fn tool_erinnerungen_suchen query
     h: cur_dbh 0
     if h == nil
@@ -60,9 +60,9 @@ fn tool_erinnerungen_suchen query
         out: out ++ "- " ++ c ++ "\n"
     out
 
---! Tool: ein wiederverwendbares Workflow-Rezept speichern (bewaehrte
---! Schrittfolge fuer eine wiederkehrende Aufgabe — z.B. 'BTC-Kurs: erst
---! btc-echo.de per web_fetch abrufen, dann als Sprachnachricht senden').
+--! Tool: store a reusable workflow recipe (a proven sequence of steps for
+--! a recurring task — e.g. 'BTC price: first fetch btc-echo.de via
+--! web_fetch, then send as a voice message').
 fn tool_rezept_speichern name schritte
     h: cur_dbh 0
     if h == nil
@@ -74,8 +74,8 @@ fn tool_rezept_speichern name schritte
     mem.add_memory h ("REZEPT: " ++ (trim name) ++ " — " ++ (trim schritte)) "rezept" 4 "gremium" "rezept"
     "Rezept gespeichert: " ++ (trim name)
 
---! Tool: gespeicherte Workflow-Rezepte auflisten, um eine wiederkehrende
---! Aufgabe nach bewaehrtem Muster abzuarbeiten.
+--! Tool: list stored workflow recipes, to handle a recurring task
+--! following a proven pattern.
 fn tool_rezepte_suchen query
     h: cur_dbh 0
     if h == nil
@@ -88,7 +88,7 @@ fn tool_rezepte_suchen query
         out: out ++ "- " ++ r ++ "\n"
     out
 
---! Tool: eine Erkenntnis dauerhaft merken.
+--! Tool: permanently remember a piece of information.
 fn tool_merken content kind
     h: cur_dbh 0
     if h == nil
@@ -96,7 +96,7 @@ fn tool_merken content kind
     mem.add_memory h content kind 3 "gremium" "gremium"
     "Gemerkt: " ++ content
 
---! Tool: im Web suchen (Titel + URL).
+--! Tool: search the web (title + URL).
 fn tool_web_search query
     results: web.web_results query 5
     if (len results) == 0
@@ -112,14 +112,14 @@ fn tool_web_search query
         i: i + 1
     out
 
---! Tool: eine Webseite abrufen (Fließtext, gekürzt).
+--! Tool: fetch a web page (body text, truncated).
 fn tool_web_fetch url
     text: web.web_fetch url
     if text == ""
         return "Seite nicht abrufbar."
     text
 
---! Tool: eine Erkenntnis mit Quellen-URL dauerhaft merken.
+--! Tool: permanently remember a piece of information with a source URL.
 fn tool_merken_quelle content source
     h: cur_dbh 0
     if h == nil
@@ -127,12 +127,13 @@ fn tool_merken_quelle content source
     mem.add_memory h content "fact" 3 source "web"
     "Gemerkt (Quelle: " ++ source ++ "): " ++ content
 
---! Tool: eine zeitgesteuerte Erinnerung planen (Ersatz fuer die alte, blinde
---! "task"-Klassifikation — jetzt entscheidet das Gremium selbst, mit vollem
---! Gespraechskontext, ob und wann etwas erinnert werden soll, statt dass ein
---! kontextfreier Klassifikations-Aufruf das vorab und unzuverlaessig festlegt).
---! text: die zu erinnernde Sache in natuerlicher Sprache samt Zeitangabe, z.B.
---! "morgen um 6 Uhr: Termin zur Arbeit" — sched.parse_reminder zerlegt das.
+--! Tool: schedule a time-based reminder (replacement for the old, blind
+--! "task" classification — now the gremium decides for itself, with full
+--! conversation context, whether and when something should be a reminder,
+--! instead of a context-free classification call deciding that in advance
+--! and unreliably). text: the thing to remember in natural language incl. a
+--! time reference, e.g. "tomorrow at 6am: appointment for work" —
+--! sched.parse_reminder parses that.
 fn tool_erinnerung_planen text
     h: cur_dbh 0
     cid: get STATE "cid"
@@ -143,123 +144,119 @@ fn tool_erinnerung_planen text
     sched.schedule h "reminder" (to_str cid) (get parsed "text") (get parsed "due") (get parsed "repeat")
     "Erinnerung geplant fuer " ++ (format_time ((get parsed "due") + tzo) "2006-01-02 15:04:05") ++ ": " ++ (get parsed "text")
 
---! Selbstwissen ueber Muninn, das allen Gremium-Agenten vorangestellt wird, damit
---! Meta-Fragen ueber Muninns eigene Faehigkeiten direkt beantwortet werden statt
---! faelschlich "kein Wissen" zu behaupten und eine Web-Recherche auszuloesen.
-SELF_ID: "Selbstwissen ueber Muninn (bei Fragen UEBER MUNINN SELBST — Faehigkeiten, Technik, Architektur — DIREKT aus diesem Wissen antworten, NIE 'kein Wissen' behaupten und dafuer KEINE Web-Recherche starten): Muninn ist ein persoenlicher KI-Agent, geschrieben in der Skriptsprache 'pipe' (ein Go-Interpreter). Muninn nutzt DeepSeek als LLM-Provider mit Tool-Use/Function-Calling, kann also im Prinzip auch Code lesen und schreiben. Muninn hat ein persistentes SQLite-Langzeitgedaechtnis (Erinnerungen + Wissensgraph), kann selbststaendig im Web recherchieren (DuckDuckGo + Wikipedia), Aufgaben und Ziele planen sowie ueber einen Executor ausfuehren, zeitgesteuerte Erinnerungen und ein taegliches Briefing setzen, Dokumente lernen (auch PDFs — Text wird automatisch per pdftotext extrahiert, keine reinen Bild-Scans ohne Text-Layer), Fotos verstehen/beschreiben (DeepSeek-Vision), Sprachnachrichten verstehen (lokale Transkription per whisper-transcribe-mcp, kein API-Key), auf Anfrage Bilder generieren (kostenloser KI-Bildgenerator, kein API-Key), GitHub-Repos in einem isolierten Docker-Container klonen und deren Testsuite ausfuehren (laeuft im Hintergrund, meldet sich automatisch mit den echten Testergebnissen), dauerhafte Docker-Umgebungen registrieren und wiederverwenden statt fuer jede Anfrage einen neuen Container anzulegen, und optional per MCP an externe Werkzeuge (z.B. Dateisystem) angebunden werden. Muninn laeuft per Telegram-Bot und Web-Dashboard.\n\n"
+--! Self-knowledge about Muninn, prepended to every gremium agent so that
+--! meta-questions about Muninn's own capabilities get answered directly
+--! instead of wrongly claiming "no knowledge" and triggering a web search.
+SELF_ID: "Self-knowledge about Muninn (for questions ABOUT MUNINN ITSELF — capabilities, technology, architecture — answer DIRECTLY from this knowledge, NEVER claim 'no knowledge' and start a web search for it): Muninn is a personal AI agent, written in the 'pipe' scripting language (a Go interpreter). Muninn uses DeepSeek as its LLM provider with tool use/function calling, so in principle it can also read and write code. Muninn has a persistent SQLite long-term memory (memories + knowledge graph), can independently research the web (DuckDuckGo + Wikipedia), plan tasks and goals and execute them via an executor, set time-based reminders and a daily briefing, learn documents (including PDFs — text is automatically extracted via pdftotext, not pure image scans without a text layer), understand/describe photos (DeepSeek Vision), understand voice messages (local transcription via whisper-transcribe-mcp, no API key), generate images on request (free AI image generator, no API key), clone GitHub repos in an isolated Docker container and run their test suite (runs in the background, automatically reports back with the real test results), register and reuse persistent Docker environments instead of creating a new container for every request, and optionally be connected to external tools via MCP (e.g. filesystem). Muninn runs via a Telegram bot and a web dashboard.\n\n"
 
---! Harte Handoff-Regel gegen vorzeitige Antworten: ohne diese Regel beendet ein
---! Agent den Swarm manchmal, indem er direkt Text ausgibt statt sein Handoff-
---! Werkzeug aufzurufen (beobachtet bei faktenwaechter auf Meta-Fragen — der Swarm
---! endete dort statt beim registrator, samt ungefiltertem internem Kommentar wie
---! "Ich habe mich im Gremium verheddert..."). Nur der registrator darf enden.
+--! Hard handoff rule against premature answers: without this rule, an agent
+--! sometimes ends the swarm by outputting text directly instead of calling
+--! its handoff tool (observed with faktenwaechter on meta-questions — the
+--! swarm ended there instead of at registrator, complete with an unfiltered
+--! internal comment like "I got tangled up in the gremium..."). Only the
+--! registrator is allowed to end.
 HANDOFF_RULE: "WICHTIG: Du bist NICHT der letzte Agent in der Kette und deine Textantwort geht NIE direkt an den Nutzer. Du MUSST am Ende IMMER dein Handoff-Werkzeug aufrufen, auch wenn du die Antwort schon fertig im Kopf hast — sonst bricht das Gespraech unsauber ab. Nur 'registrator' darf ohne Handoff enden.\n\n"
 
---! Ohne diese Regel diagnostiziert das Modell einen Parameter-/Validierungs-
---! fehler eines Werkzeugs faelschlich als "kaputte Anbindung" und gibt auf,
---! statt die Fehlermeldung zu lesen und mit korrigierten Parametern erneut
---! zu versuchen. Beobachtet live: docker_exec_command mit command als String
---! statt Array aufgerufen -> Zod-Fehler "Required at command" -> Antwort an
---! den Nutzer war "die Docker-Exec-Anbindung ist fehlerhaft", obwohl der
---! Aufruf mit korrektem Array-Parameter nachweislich funktioniert (Test:
---! "echo hallo-von-drinnen" kam korrekt aus dem Container zurueck).
+--! Without this rule, the model wrongly diagnoses a tool's parameter/
+--! validation error as a "broken connection" and gives up, instead of
+--! reading the error message and retrying with corrected parameters.
+--! Observed live: docker_exec_command called with command as a string
+--! instead of an array -> Zod error "Required at command" -> the reply to
+--! the user was "the Docker exec connection is broken", even though the
+--! call demonstrably works with the correct array parameter (test: "echo
+--! hello-from-inside" came back correctly from the container).
 RETRY_RULE: "Bekommst du von einem Werkzeug einen Fehler zu falschen/fehlenden Parametern (Validierungsfehler, 'Required', 'invalid arguments' o.ae.), ist das FAST IMMER ein Zeichen, dass DU die Parameter falsch uebergeben hast (falscher Typ, falscher Name, falsche Struktur) — NICHT, dass das Werkzeug oder seine Anbindung kaputt ist. Lies die Fehlermeldung genau, korrigiere deinen Aufruf entsprechend und versuche es SOFORT nochmal, bevor du dem Nutzer irgendetwas ueber eine 'fehlerhafte Anbindung' erzaehlst. Erst wenn auch ein korrigierter Versuch scheitert, ist ein echtes technisches Problem plausibel.\n\n"
 
---! Ohne diese Regel behauptet das Modell, ein Dienst/eine Web-Oberflaeche sei
---! erreichbar, nur weil ein Port gemappt wurde — ohne das je zu pruefen.
---! Beobachtet: ein frisch gestarteter Docker-Container wurde als "OpenCode-
---! Oberflaeche unter http://127.0.0.1:4096 erreichbar" beworben, obwohl die
---! Verbindung nur eine leere Antwort lieferte (kein Webserver im Container)
---! — und selbst nachdem 'docker_container_logs' LEERE Logs zeigte (ein
---! deutliches Warnsignal), wurde die Behauptung wiederholt statt korrigiert.
+--! Without this rule, the model claims a service/web UI is reachable just
+--! because a port was mapped — without ever checking. Observed: a freshly
+--! started Docker container was advertised as "OpenCode UI reachable at
+--! http://127.0.0.1:4096", even though the connection only returned an
+--! empty response (no web server in the container) — and even after
+--! 'docker_container_logs' showed EMPTY logs (a clear warning sign), the
+--! claim was repeated instead of corrected.
 VERIFY_CLAIM_RULE: "Behaupte NIEMALS, dass ein Dienst/eine Web-Oberflaeche/eine URL erreichbar oder funktionsfaehig ist, nur weil du einen Port gemappt oder einen Container gestartet hast — das beweist nur, dass der Container LAEUFT, nicht, dass darin etwas Sinnvolles auf diesem Port lauscht. Hast du ein Werkzeug zur Verifikation (z.B. 'docker_container_logs', 'web_fetch' auf die URL), nutze es und beziehe dich auf das TATSAECHLICHE Ergebnis. Zeigen Logs nichts oder wirkt ein Dienst inaktiv, sag das ehrlich ('Container laeuft, aber ob/was dort auf Port X reagiert, ist unklar') statt eine Erreichbarkeit zu behaupten, die du nicht geprueft hast.\n\n"
 
---! NUR fuer den Registrator (der einzige Agent, dessen Antwort OHNE Werkzeug-
---! Aufruf direkt als Endantwort an den Nutzer geht — jeder andere Agent wird
---! bei reinem Text ohne Werkzeugaufruf abgefangen und zur Wiederholung
---! gezwungen, siehe swarm.go). Live beobachtet: bei einer schwierigen
---! Ehrlichkeits-Abwaegung (VERIFY_CLAIM_RULE: "kann ich das wirklich
---! belegen?") schrieb das Modell seinen kompletten Denkprozess ("Ich muss...
---! Ich schaue... Ich sollte ehrlich sein...") ALS TEIL der an den Nutzer
---! gesendeten Nachricht aus, obwohl die entsprechende Anweisung im
---! Registrator-Prompt schon existierte — vermutlich zu weit hinten in einem
---! sehr langen Prompt-Block vergraben, um bei einer komplexen Abwaegung
---! zuverlaessig zu greifen. Als eigene, prominente Regel VOR diesem Block
---! platziert, mit konkretem Negativ-Beispiel (few-shot wirkt zuverlaessiger
---! als eine abstrakte Anweisung).
+--! ONLY for the registrator (the only agent whose answer goes directly to
+--! the user as the final answer WITHOUT a tool call — every other agent is
+--! intercepted on plain text with no tool call and forced to retry, see
+--! swarm.go). Observed live: during a difficult honesty trade-off
+--! (VERIFY_CLAIM_RULE: "can I really back this up?"), the model wrote out
+--! its entire thought process ("I need to check... Let me look... I should
+--! be honest...") AS PART OF the message sent to the user, even though the
+--! corresponding instruction already existed in the registrator prompt —
+--! presumably buried too far back in a very long prompt block to reliably
+--! kick in during a complex trade-off. Placed as its own, prominent rule
+--! BEFORE that block, with a concrete negative example (few-shot works more
+--! reliably than an abstract instruction).
 NO_REASONING_LEAK_RULE: "KRITISCH: deine Antwort geht DIREKT und UNGEFILTERT an den Nutzer in Telegram — gib AUSSCHLIESSLICH die fertige, finale Antwort aus, NIEMALS deinen Denkprozess davor, auch nicht bei einer schwierigen Abwaegung (z.B. zwischen Ehrlichkeit und einer unsicheren Behauptung, siehe VERIFY_CLAIM_RULE). Verboten sind Saetze wie 'Ich muss pruefen...', 'Ich schaue in den Gespraechsverlauf...', 'Der Nutzer sagt...', 'Ich sollte ehrlich sein...' als sichtbare Selbstanalyse VOR der eigentlichen Antwort. Triff die Abwaegung STILL fuer dich und gib NUR das Ergebnis aus. Beispiel einer VERBOTENEN Antwort: 'Ich muss die tatsaechlichen Logs pruefen... Der Nutzer sagt, das war erfolgreich... Ich sollte ehrlich sein... Nein, nicht vergessen — der Testlauf ist erfolgreich abgeschlossen!' — nur der LETZTE Satz waere die richtige, vollstaendige Antwort; alles davor darf nie im Chat erscheinen.\n\n"
 
---! Ohne diese Regel antwortet das Modell auf zeitabhaengige Fragen (Uhrzeit,
---! Wetter, aktuelle Ereignisse) faelschlich mit einer generischen "als
---! Sprachmodell habe ich keinen Echtzeitzugriff"-Ausrede, OBWOHL 'web_search'
---! verfuegbar ist — beobachtet bei "Wie viel Uhr ist es aktuell in
---! Deutschland?". question_needs_research (muninn.pipe) faengt das nur als
---! Notnagel ab, wenn die Formulierung zufaellig auf der Trigger-Liste steht.
+--! Without this rule, the model wrongly answers time-dependent questions
+--! (time, weather, current events) with a generic "as a language model I
+--! have no real-time access" excuse, EVEN THOUGH 'web_search' is available
+--! — observed with "What time is it currently in Germany?".
+--! question_needs_research (muninn.pipe) only catches this as a stopgap if
+--! the phrasing happens to be on the trigger list.
 TOOL_DISCIPLINE_RULE: "Fuer aktuelle/zeitabhaengige Informationen (Uhrzeit, Datum, Wetter, aktuelle Ereignisse, Kurse, Nachrichten) darfst du NIEMALS aus deinem eigenen Sprachmodell-Wissen antworten oder behaupten, du haettest 'keinen Echtzeitzugriff' — du HAST Zugriff via 'web_search'/'web_fetch'. Nutze sie in diesen Faellen IMMER, bevor du antwortest.\n\n"
 
---! Verwandt mit TOOL_DISCIPLINE_RULE, aber ein anderer Fehlermodus: die KI
---! RUFT web_search auf, bekommt Ergebnisse, die nicht relevant/aktuell genug
---! wirken (z.B. Wikipedia-Artikel statt Tagesnachrichten), und erfindet DANN
---! eine pauschale "meine Websuche ist technisch nicht verfuegbar"-Ausrede
---! statt ehrlich zu sagen, dass die Treffer nicht gut waren, oder es mit
---! einer praeziseren Anfrage/direktem web_fetch auf eine bekannte Quelle
---! (z.B. tagesschau.de) erneut zu versuchen. Beobachtet bei "Was sind die
---! aktuellen Nachrichten in Deutschland?" — web_search/web_fetch funktionierten
---! nachweislich (isoliert reproduziert), die KI behauptete trotzdem "an
---! technische Grenzen gestossen" und "derzeit nicht erreichbar".
+--! Related to TOOL_DISCIPLINE_RULE, but a different failure mode: the AI
+--! DOES call web_search, gets results that don't look relevant/current
+--! enough (e.g. Wikipedia articles instead of daily news), and THEN invents
+--! a blanket "my web search is technically unavailable" excuse instead of
+--! honestly saying the results weren't good, or retrying with a more
+--! precise query/a direct web_fetch on a known source (e.g. tagesschau.de).
+--! Observed with "What's the current news in Germany?" — web_search/
+--! web_fetch demonstrably worked (reproduced in isolation), the AI still
+--! claimed it had "hit technical limits" and was "currently unreachable".
 RESULT_HONESTY_RULE: "Behaupte NIEMALS pauschal, 'web_search'/'web_fetch' seien 'technisch nicht verfuegbar', 'derzeit nicht erreichbar' oder du seist an 'technische Grenzen gestossen' — das ist so gut wie nie wahr. Liefert ein Aufruf nur schlechte/irrelevante Treffer (z.B. alte Wikipedia-Artikel statt aktueller Nachrichten), ist das ein Qualitaetsproblem der TREFFER, kein Ausfall des Werkzeugs: versuche es mit einer praeziseren Suchanfrage erneut, oder rufe 'web_fetch' direkt auf einer bekannten Quelle auf (z.B. tagesschau.de fuer deutsche Nachrichten). Bleibt das Ergebnis danach immer noch duenn, sag ehrlich 'ich habe nur X gefunden, das war nicht sehr ergiebig' — NIE eine erfundene technische Ausrede.\n\n"
 
---! Ohne diese Regel erfindet das Modell bei zu vagen Anfragen ("Mach mal
---! irgendwas") entweder eine nicht stattgefundene Aktion ("dann mach ich eben
---! kurz den Mond an") oder bricht mit einem rohen internen Fehler ab (die alte
---! freie JSON-Schrittplanung im Executor tat genau das, ohne jeden Kontext —
---! deshalb ist dieser Pfad jetzt komplett durchs Gremium ersetzt, das echten
---! Kontext und echte Werkzeuge hat).
+--! Without this rule, the model responds to overly vague requests ("do
+--! something") either by inventing an action that never happened ("okay,
+--! I'll just turn on the moon") or by aborting with a raw internal error
+--! (the old free-form JSON step planning in the executor did exactly that,
+--! with no context at all — which is why this path is now completely
+--! replaced by the gremium, which has real context and real tools).
 HONESTY_RULE: "Ist eine Nutzeranfrage zu vage oder unspezifisch, um eine konkrete, sinnvolle Aktion daraus abzuleiten (z.B. 'mach mal irgendwas'), erfinde NIEMALS eine Aktion und behaupte NIEMALS, etwas getan zu haben, das nicht wirklich stattgefunden hat. Frage stattdessen freundlich und konkret nach, was genau gewuenscht ist. Fragt der Nutzer, WARUM du zuvor etwas Bestimmtes getan/geantwortet hast (z.B. 'wieso hast du recherchiert statt normal zu antworten?'), erfinde NIEMALS eine plausibel klingende, aber unbelegte technische Erklaerung (z.B. 'das war wohl ein versehentlich gesendeter Befehl') — wenn dir der tatsaechliche Grund aus der Konversation nicht wirklich ersichtlich ist, sag ehrlich, dass du es nicht genau weisst, statt eine Vermutung als Tatsache zu praesentieren.\n\n"
 
---! tg_html (telegram.pipe) wandelt **fett**/*kursiv*/`code`/[text](url)
---! zuverlaessig in Telegrams HTML-Parse-Mode um (robuster als Telegrams
---! eigenes strenges "Markdown", das bei unausgewogenen Entities still auf
---! Klartext zurueckfiel) — diese Grundformatierung darf die KI also normal
---! per CommonMark-Syntax nutzen. Was aber NIE gut rendert, egal welcher
---! Modus: Markdown-Ueberschriften (#), Tabellen, verschachtelte Listen —
---! die gibt es in Telegram-Chats schlicht nicht, diese Regel haelt die
---! Ausgabe deshalb strukturell einfach.
+--! tg_html (telegram.pipe) reliably converts **bold**/*italic*/`code`/
+--! [text](url) into Telegram's HTML parse mode (more robust than Telegram's
+--! own strict "Markdown", which silently fell back to plain text on
+--! unbalanced entities) — so the AI can normally use this basic formatting
+--! via CommonMark syntax. What never renders well, though, in any mode:
+--! Markdown headings (#), tables, nested lists — those simply don't exist
+--! in Telegram chats, so this rule keeps the output structurally simple.
 FORMAT_RULE: "Formatiere deine Antwort fuer einen Telegram-Chat, nicht fuer ein Dokument: keine Markdown-Ueberschriften (#), keine Tabellen, keine verschachtelten Listen. **Fettung**/*Kursiv*/`Code`/[Links](url) darfst du normal per CommonMark-Syntax nutzen, das wird zuverlaessig dargestellt. Kurze Absaetze statt langer Bloecke.\n\n"
 
---! Ohne diese Regel behauptet das Modell bei Fragen zu Muninns eigenen
---! Werkzeugen faelschlich Dinge wie "ich habe keinen Zugriff auf Werkzeuge" —
---! per Websuche auf generischen Hilfeseiten "recherchiert", die logischerweise
---! nicht wissen koennen, was DIESER konkrete Bot verbunden hat (beobachtet bei
---! "kannst du mit deinen Werkzeugen ein Google Workspace einrichten?", obwohl
---! filesystem+memory MCP-Server verbunden waren). tools_desc wird in
---! init_gremium dynamisch aus der ECHTEN, aktuell verbundenen Werkzeugliste
---! gebaut, nicht als statischer Text.
+--! Without this rule, the model wrongly claims things like "I have no
+--! access to tools" for questions about Muninn's own tools — "researched"
+--! via a web search on generic help pages, which logically can't know what
+--! THIS specific bot has connected (observed with "can you set up a Google
+--! Workspace with your tools?", even though filesystem+memory MCP servers
+--! were connected). tools_desc is built dynamically in init_gremium from
+--! the REAL, currently connected tool list, not as static text.
 --!
---! Ergaenzend: Ergebnisse von 'erinnerungen_suchen' duerfen nicht unbesehen als
---! Aussagen des Nutzers gelten — mem.retrieve_context markiert alles ausser
---! "permanent"/"document" (also KI-Recherche-Ergebnisse, Task-Protokolle) mit
---! einem Praefix. Beobachtet: eine alte AfD-Recherche wurde bei "Wofuer
---! interessiere ich mich?" als "klares Signal fuer politisches Interesse"
---! fehlinterpretiert, obwohl sie nur eine fruehere Recherche zu einer ANDEREN
---! Frage war, keine Aussage ueber den Nutzer.
+--! Additionally: results from 'erinnerungen_suchen' must not be taken at
+--! face value as statements by the user — mem.retrieve_context marks
+--! everything except "permanent"/"document" (i.e. AI research results, task
+--! logs) with a prefix. Observed: an old AfD research result was misread,
+--! on "What am I interested in?", as a "clear signal of political
+--! interest", even though it was just earlier research for a DIFFERENT
+--! question, not a statement about the user.
 SECURITY_HONESTY_RULE: "Gibst du Aussagen ueber die SICHERHEIT des Systems oder konkrete Systembefunde aus (Kernel-Versionen, Sandbox-/Container-Eigenschaften, Exploits wie 'Dirty Pipe', Seccomp-/Namespace-Status, UID-Mapping, Egress-Gates o.ae.), unterscheide STRENG nach Herkunft: (1) VERIFIZIERT ist nur, was du in DIESEM Lauf selbst per Werkzeug/eigener Ausgabe geprueft hast — nenne dann die konkrete Quelle (z.B. 'docker info zeigt: nur seccomp'). (2) Aus dem Gedaechtnis stammende Audit-Erkenntnisse darfst du zitieren, aber kennzeichne sie als 'aus frueheren Audits, aktuell nicht erneut geprueft'. (3) Reines Sprachmodell-Vorwissen ueber Sicherheitsluecken darfst du NIE als Befund UEBER DIESES System ausgeben. Markiere alles, was du nicht selbst in diesem Lauf geprueft hast, als 'ungeprueft'. Erfinde niemals Versionsnummern, Dateipfade oder Testergebnisse, um einen Report vollstaendiger wirken zu lassen.\n\n"
 
-MEMORY_HONESTY_RULE: "Ergebnisse von 'erinnerungen_suchen', die mit '[fruehere Recherche/Protokoll, KEINE Aussage des Nutzers]' markiert sind, sind KI-generierte Recherche-Ergebnisse oder Protokolle — KEINE Aussagen des Nutzers ueber sich selbst. Aus solchen Eintraegen darfst du NIEMALS auf Interessen, Meinungen oder Praeferenzen des Nutzers schliessen. Nur unmarkierte Eintraege sind tatsaechliche Aussagen des Nutzers. Findest du zu einer Frage nach Interessen/Vorlieben nur markierte oder gar keine Eintraege, sag ehrlich, dass dazu noch nichts Eindeutiges von ihm gespeichert ist, statt aus Recherche-Nebenprodukten eine Praeferenz zu konstruieren.\n\n"
+MEMORY_HONESTY_RULE: "Ergebnisse von 'erinnerungen_suchen', die mit '[earlier research/log entry, NOT a statement by the user]' markiert sind, sind KI-generierte Recherche-Ergebnisse oder Protokolle — KEINE Aussagen des Nutzers ueber sich selbst. Aus solchen Eintraegen darfst du NIEMALS auf Interessen, Meinungen oder Praeferenzen des Nutzers schliessen. Nur unmarkierte Eintraege sind tatsaechliche Aussagen des Nutzers. Findest du zu einer Frage nach Interessen/Vorlieben nur markierte oder gar keine Eintraege, sag ehrlich, dass dazu noch nichts Eindeutiges von ihm gespeichert ist, statt aus Recherche-Nebenprodukten eine Praeferenz zu konstruieren.\n\n"
 
---! Selbstwissen + echte, aktuelle Werkzeugliste als EIN Kontext-Block — fuer
---! Code AUSSERHALB des Gremiums, der trotzdem "als Muninn" antworten muss
---! (der Web-Recherche-Fallback in muninn.pipe: wenn das Gremium eine Frage
---! nicht beantworten kann, wird zusaetzlich recherchiert und ein eigener,
---! schlanker ai_chat-Aufruf formuliert die Antwort). Ohne dieses Wissen
---! behauptet ein bare ai_chat-Aufruf mit nur "Du bist Muninn, ein
---! persoenlicher KI-Assistent" als Prompt schnell faelschlich, gar keine
---! Werkzeuge/Systemzugriff zu haben — beobachtet live: "Ich kann keine
---! Docker-Container erstellen, ich bin ein textbasierter Recherche-
---! Assistent", obwohl werkzeug_docker das nachweislich kann (siehe
---! docker_tools.pipe, live mit einem echten nginx-Container getestet).
---! Absichtlich eine schlanke Teilmenge der init_gremium-Logik (nur die
---! Beschreibung, keine Agenten-Registrierung) statt diese zu duplizieren.
+--! Self-knowledge + the real, current tool list as ONE context block — for
+--! code OUTSIDE the gremium that still has to answer "as Muninn" (the web
+--! research fallback in muninn.pipe: when the gremium can't answer a
+--! question, extra research is done and its own, lean ai_chat call
+--! formulates the answer). Without this knowledge, a bare ai_chat call with
+--! only "You are Muninn, a personal AI assistant" as the prompt quickly and
+--! wrongly claims to have no tools/system access at all — observed live: "I
+--! can't create Docker containers, I'm a text-based research assistant",
+--! even though werkzeug_docker demonstrably can (see docker_tools.pipe,
+--! tested live with a real nginx container). Deliberately a lean subset of
+--! the init_gremium logic (just the description, no agent registration)
+--! instead of duplicating it.
 export fn self_context _
     local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen", "docker_pull_image", "docker_create_container"]
     mcp_groups: mcp.discovered_tools_by_source local_names
@@ -267,17 +264,17 @@ export fn self_context _
     for grp in mcp_groups
         for tn in (get grp "tools")
             push mcp_names tn
-    desc: "ECHTE, aktuell verfuegbare Werkzeuge: 'erinnerungen_suchen' (Gedaechtnis durchsuchen), 'merken'/'merken_quelle' (dauerhaft speichern), 'web_search'/'web_fetch' (im Internet recherchieren), 'erinnerung_planen' (Termin/Erinnerung planen)"
+    desc: "REAL, currently available tools: 'erinnerungen_suchen' (search memory), 'merken'/'merken_quelle' (store permanently), 'web_search'/'web_fetch' (research the internet), 'erinnerung_planen' (schedule an appointment/reminder)"
     if (len mcp_groups) > 0
-        desc: desc ++ ", sowie per MCP extern angebunden: " ++ (join mcp_names ", ") ++ ". Bei Docker gehoeren zusaetzlich 'docker_pull_image'/'docker_create_container' dazu (Image ziehen, Container starten — OHNE Volume-Mounts/--privileged, das ist Absicht, keine fehlende Faehigkeit)."
+        desc: desc ++ ", plus externally connected via MCP: " ++ (join mcp_names ", ") ++ ". For Docker, 'docker_pull_image'/'docker_create_container' are also included (pull an image, start a container — WITHOUT volume mounts/--privileged, that's intentional, not a missing capability)."
     else
-        desc: desc ++ ". Kein externer MCP-Server angebunden."
-    desc: desc ++ " Behaupte NIE pauschal, keine Werkzeuge/keinen Systemzugriff zu haben, wenn diese Liste nicht leer ist.\n\n"
+        desc: desc ++ ". No external MCP server connected."
+    desc: desc ++ " NEVER blanketly claim to have no tools/system access when this list isn't empty.\n\n"
     SELF_ID ++ desc
 
---! Tool: ein Bild (z.B. ein Screenshot, den ein anderes Werkzeug lokal
---! gespeichert hat) an den Nutzer in Telegram senden. Nutzt sendPhoto (zeigt
---! inline im Chat an, Telegram komprimiert/konvertiert).
+--! Tool: send an image (e.g. a screenshot that another tool saved locally)
+--! to the user on Telegram. Uses sendPhoto (shows inline in the chat,
+--! Telegram compresses/converts).
 fn tool_bild_senden path caption
     tok: get STATE "token"
     cid: get STATE "cid"
@@ -291,9 +288,9 @@ fn tool_bild_senden path caption
         return "Senden fehlgeschlagen: " ++ (to_str (get res))
     "Bild gesendet: " ++ full_path
 
---! Tool: eine beliebige Datei (z.B. ein per Filesystem-Werkzeug erzeugtes
---! Dokument) an den Nutzer in Telegram senden. Nutzt sendDocument (behaelt
---! Originalformat/-qualitaet, wird als Datei-Anhang statt inline gezeigt).
+--! Tool: send any file (e.g. a document created via the filesystem tool) to
+--! the user on Telegram. Uses sendDocument (keeps the original format/
+--! quality, shown as a file attachment instead of inline).
 fn tool_datei_senden path caption
     tok: get STATE "token"
     cid: get STATE "cid"
@@ -307,15 +304,15 @@ fn tool_datei_senden path caption
         return "Senden fehlgeschlagen: " ++ (to_str (get res))
     "Datei gesendet: " ++ full_path
 
---! Maximale Zeichenzahl fuer eine Sprachnachricht — Vorlesen ist fuer kurze,
---! lockere Antworten gedacht, nicht fuer lange/inhaltsreiche Texte (siehe
---! FORMAT_RULE-Ergaenzung unten).
+--! Maximum character count for a voice message — reading aloud is meant
+--! for short, casual replies, not long/content-heavy text (see the
+--! FORMAT_RULE addendum below).
 TTS_MAX_CHARS: 600
 
---! Fuehrt die feste Piper->ffmpeg-Pipeline (tts_synth.sh) aus. Kein Parameter
---! davon ist AI-kontrollierbar ausser dem Text selbst (Stimme/Encoding sind
---! im Skript fest verdrahtet) — analog zum docker_tools.pipe-Muster mit
---! festem Kommando-Template statt frei waehlbarer Flags.
+--! Runs the fixed Piper->ffmpeg pipeline (tts_synth.sh). None of its
+--! parameters are AI-controllable except the text itself (voice/encoding
+--! are hardwired in the script) — analogous to the docker_tools.pipe
+--! pattern with a fixed command template instead of freely chosen flags.
 fn tts_synthesize text
     dir: "/root/muninn/tts_tmp"
     id: (to_str now) ++ "_" ++ (to_str (random_range 100000 999999))
@@ -334,8 +331,8 @@ fn tts_synthesize text
     print ("tts_synthesize OK: " ++ ogg_path)
     {ok: true, ogg_path: ogg_path, error: nil}
 
---! Tool: Text als echte Sprachnachricht (statt Textnachricht) an den Nutzer
---! senden — lokale Piper-Synthese, kein Cloud-Dienst/API-Key noetig.
+--! Tool: send text as a real voice message (instead of a text message) to
+--! the user — local Piper synthesis, no cloud service/API key needed.
 fn tool_sprachnachricht_senden text
     tok: get STATE "token"
     cid: get STATE "cid"
@@ -358,16 +355,15 @@ fn tool_sprachnachricht_senden text
         return "Senden der Sprachnachricht fehlgeschlagen: " ++ (to_str res)
     "Sprachnachricht gesendet."
 
---! Tool: startet ein Docker-Setup, das laenger dauern darf (z.B.
---! Paketinstallation), OHNE die Antwort zu blockieren. 'docker run -d'
---! liefert zurueck, sobald der Container GESTARTET ist — die eigentliche
---! Einrichtung laeuft danach beim Docker-Daemon weiter, unabhaengig vom
---! Muninn-Prozess. Legt einen Job-Tracking-Eintrag an und plant per
---! Scheduler eine spaetere Pruefung ein (job_check, siehe muninn.pipe
---! sched_tick) — DAS ist das "cronjob-artige Abfragen", nicht ein Pipe-
---! Hintergrund-Thread (bewusst vermieden, siehe Kommentar bei
---! setup_sandbox in muninn.pipe: ein Pipe-Goroutine haette sich mit dem
---! per-Nachricht rotierenden Sandbox-Profil in die Quere kommen koennen).
+--! Tool: starts a Docker setup that's allowed to take longer (e.g. package
+--! installation), WITHOUT blocking the reply. 'docker run -d' returns as
+--! soon as the container has STARTED — the actual setup then continues on
+--! the Docker daemon, independent of the Muninn process. Creates a job
+--! tracking entry and schedules a later check via the scheduler (job_check,
+--! see sched_tick in muninn.pipe) — THAT is the "cronjob-like polling", not
+--! a Pipe background thread (deliberately avoided, see the setup_sandbox
+--! comment in muninn.pipe: a Pipe goroutine could have gotten in the way of
+--! the per-message-rotating sandbox profile).
 fn tool_docker_hintergrund_setup image name setup_command beschreibung
     tok: get STATE "token"
     cid: get STATE "cid"
@@ -383,9 +379,10 @@ fn tool_docker_hintergrund_setup image name setup_command beschreibung
     sched.schedule dbh "job_check" cid (to_str jid) due "5min"
     "Setup gestartet (Container '" ++ real_name ++ "'). Ich melde mich automatisch, sobald es fertig ist — du musst nicht warten."
 
---! Tool (werkzeug_docker): Status der zuletzt gestarteten Hintergrund-
---! Docker-Jobs dieses Chats abrufen — siehe docker_tools.pipe fuer den
---! Live-Befund, der das noetig machte (wiederholte parallele Duplikat-Jobs).
+--! Tool (werkzeug_docker): fetch the status of the most recently started
+--! background Docker jobs for this chat — see docker_tools.pipe for the
+--! live finding that made this necessary (repeated parallel duplicate
+--! jobs).
 fn tool_docker_job_status _
     dbh: get STATE "dbh"
     cid: get STATE "cid"
@@ -393,15 +390,15 @@ fn tool_docker_job_status _
         return "Kein Chat-/Datenbank-Kontext verfuegbar."
     dt.tool_docker_job_status dbh cid
 
---! Tool (Registrator): bricht SOFORT alle laufenden Hintergrund-Docker-Jobs
---! UND geplanten Hintergrund-Fortsetzungen (job_check/task_check) dieses
---! Chats ab — Sicherheitsnetz fuer natuerlichsprachliche Abbruch-Bitten
---! mitten im Gespraech; /stop (muninn.pipe) ist der ZUVERLAESSIGE,
---! deterministische Hauptweg, der nie von einer KI-Entscheidung abhaengt.
---! Siehe RESULT_HONESTY_RULE: dieses Werkzeug MUSS tatsaechlich aufgerufen
---! werden, ein Abbruch darf NIE nur behauptet werden (live beobachtet: die
---! KI sagte zweimal "alles abgebrochen", startete aber im selben Zug einen
---! neuen Job, weil es vorher schlicht kein echtes Abbruch-Werkzeug gab).
+--! Tool (registrator): IMMEDIATELY cancels all running background Docker
+--! jobs AND scheduled background continuations (job_check/task_check) for
+--! this chat — a safety net for natural-language cancellation requests
+--! mid-conversation; /stop (muninn.pipe) is the RELIABLE, deterministic
+--! main path that never depends on an AI decision. See RESULT_HONESTY_RULE:
+--! this tool MUST actually be called, a cancellation must NEVER just be
+--! claimed (observed live: the AI said "everything cancelled" twice, but
+--! started a new job in the same breath, because there simply wasn't a real
+--! cancellation tool before).
 fn tool_docker_jobs_abbrechen _
     dbh: get STATE "dbh"
     cid: get STATE "cid"
@@ -415,10 +412,10 @@ fn tool_docker_jobs_abbrechen _
             n_sched: n_sched + 1
     "Abgebrochen: " ++ (to_str (len cancelled)) ++ " laufende(r) Docker-Hintergrund-Job(s) (Container entfernt), " ++ (to_str n_sched) ++ " geplante Fortsetzung(en) storniert."
 
---! Tool (werkzeug_docker): registriert einen Container als dauerhafte,
---! wiederverwendbare Umgebung — siehe Kommentar bei
---! docker_tools.pipe:tool_docker_environment_registrieren fuer die
---! Abgrenzung zu einmaligen docker_hintergrund_setup-Jobs.
+--! Tool (werkzeug_docker): registers a container as a persistent, reusable
+--! environment — see the comment at
+--! docker_tools.pipe:tool_docker_environment_registrieren for the
+--! distinction from one-off docker_hintergrund_setup jobs.
 fn tool_docker_environment_registrieren container_name purpose installed
     dbh: get STATE "dbh"
     cid: get STATE "cid"
@@ -426,7 +423,7 @@ fn tool_docker_environment_registrieren container_name purpose installed
         return "Kein Chat-/Datenbank-Kontext verfuegbar."
     dt.tool_docker_environment_registrieren dbh cid container_name purpose installed
 
---! Tool (werkzeug_docker): listet registrierte dauerhafte Umgebungen.
+--! Tool (werkzeug_docker): lists registered persistent environments.
 fn tool_docker_environments_auflisten _
     dbh: get STATE "dbh"
     cid: get STATE "cid"
@@ -434,7 +431,7 @@ fn tool_docker_environments_auflisten _
         return "Kein Chat-/Datenbank-Kontext verfuegbar."
     dt.tool_docker_environments_auflisten dbh cid
 
---! Tool (werkzeug_docker): entfernt eine registrierte dauerhafte Umgebung.
+--! Tool (werkzeug_docker): removes a registered persistent environment.
 fn tool_docker_environment_entfernen container_name
     dbh: get STATE "dbh"
     cid: get STATE "cid"
@@ -442,17 +439,15 @@ fn tool_docker_environment_entfernen container_name
         return "Kein Chat-/Datenbank-Kontext verfuegbar."
     dt.tool_docker_environment_entfernen dbh cid container_name
 
---! Tool (nur Registrator): stellt eine BELIEBIGE Aufgabe zurueck, die
---! offensichtlich mehr Zeit/mehr Runden braucht, als in diesem einen
---! Gremiums-Lauf uebrig sind — nicht nur Docker (siehe
---! tool_docker_hintergrund_setup fuer den SPEZIFISCHEN, guenstiger zu
---! pruefenden Fall). Legt einen Fortschritts-Checkpoint an und plant per
---! Scheduler eine Fortsetzung ein: beim naechsten Tick bekommt das
---! Gremium ein FRISCHES Rundenbudget und arbeitet mit dem gespeicherten
---! Fortschritt weiter (siehe muninn.pipe sched_tick, Zweig "task_check").
---! Kann dabei ERNEUT aufgerufen werden, wenn wieder nicht genug Zeit
---! bleibt — so entsteht eine Kette beliebig vieler Fortsetzungen, bis die
---! Aufgabe wirklich fertig ist.
+--! Tool (registrator only): defers ANY task that obviously needs more
+--! time/more rounds than are left in this one gremium run — not just
+--! Docker (see tool_docker_hintergrund_setup for the SPECIFIC, cheaper-to-
+--! check case). Creates a progress checkpoint and schedules a continuation
+--! via the scheduler: on the next tick the gremium gets a FRESH round
+--! budget and continues working with the saved progress (see sched_tick in
+--! muninn.pipe, branch "task_check"). Can be called AGAIN if there still
+--! isn't enough time — this creates a chain of as many continuations as
+--! needed until the task is truly done.
 fn tool_hintergrund_fortsetzen zusammenfassung fortschritt
     cid: get STATE "cid"
     dbh: get STATE "dbh"
@@ -465,10 +460,10 @@ fn tool_hintergrund_fortsetzen zusammenfassung fortschritt
     sched.schedule dbh "task_check" cid (to_str task_id) due ""
     "Hintergrund-Fortsetzung eingeplant (#" ++ (to_str task_id) ++ "). Antworte dem Nutzer JETZT kurz, dass du weiterarbeitest und dich automatisch meldest, sobald fertig — behaupte NICHT, dass die Aufgabe schon fertig ist."
 
---! URL-Encoding fuer den Prompt-Teil der Pollinations-Bild-URL (die Standard-
---! urlencode oben in telegram.pipe ist privat/dort nicht importierbar,
---! daher eine eigene, kleine Variante mit den fuer Bildprompts relevanten
---! Sonderzeichen).
+--! URL encoding for the prompt part of the Pollinations image URL (the
+--! standard urlencode above in telegram.pipe is private/not importable
+--! there, hence its own small variant with the special characters relevant
+--! for image prompts).
 fn pollinations_urlencode s
     s: replace_all s "%" "%25"
     s: replace_all s " " "%20"
@@ -485,33 +480,33 @@ fn pollinations_urlencode s
     s: replace_all s "?" "%3F"
     s
 
---! Ruft Pollinations.ai's offene Bild-URL-API auf — kostenlos, KEIN API-Key
---! noetig (anonyme Nutzung laut offizieller Doku erlaubt, ca. 1 Anfrage/15s,
---! evtl. kleines Wasserzeichen). Live getestet: der eigentliche, per npm
---! vertriebene MCP-Server verlangt inzwischen einen Key, die darunterliegende
---! klassische HTTP-API (image.pollinations.ai/prompt/...) aber weiterhin
---! nicht. http_request statt http_get: 30s statt 10s Timeout — ein frischer,
---! noch nie generierter Prompt braucht live beobachtet bis zu ~6s, ein
---! einzelner 10s-Timeout-Ausrutscher trat live einmal auf.
+--! Calls Pollinations.ai's open image URL API — free, NO API key needed
+--! (anonymous use allowed per the official docs, about 1 request/15s,
+--! possibly a small watermark). Tested live: the actual MCP server
+--! distributed via npm now requires a key, but the underlying classic HTTP
+--! API (image.pollinations.ai/prompt/...) still doesn't. http_request
+--! instead of http_get: 30s instead of 10s timeout — a fresh, never-before-
+--! generated prompt was observed live to need up to ~6s, a single 10s
+--! timeout hiccup occurred once live.
 fn pollinations_generate prompt width height
     seed: random_range 100000 999999
     url: "https://image.pollinations.ai/prompt/" ++ (pollinations_urlencode prompt) ++ "?width=" ++ (to_str width) ++ "&height=" ++ (to_str height) ++ "&seed=" ++ (to_str seed) ++ "&nologo=true"
     r: http_request "GET" url {}
     if (get r "status") != 200
-        return {ok: false, path: nil, error: "HTTP " ++ (to_str (get r "status")) ++ " von Pollinations.ai"}
+        return {ok: false, path: nil, error: "HTTP " ++ (to_str (get r "status")) ++ " from Pollinations.ai"}
     body: get r "body"
     if body == nil || (len body) < 100
-        return {ok: false, path: nil, error: "Leere oder ungueltige Bildantwort."}
+        return {ok: false, path: nil, error: "Empty or invalid image response."}
     path: "/root/muninn/mcp_data/bild_" ++ (to_str now) ++ "_" ++ (to_str seed) ++ ".jpg"
     write_file path body
     {ok: true, path: path, error: nil}
 
---! Tool: ein Bild per KI (Pollinations.ai, kostenlos, kein API-Key) aus einer
---! Textbeschreibung erzeugen UND direkt an den Nutzer senden — Generieren
---! und Senden bewusst in EINEM Werkzeugaufruf (analog zu
---! tool_sprachnachricht_senden), damit die KI das nicht als zwei separate
---! Schritte falsch verketten kann (z.B. Bild erzeugen, aber den Pfad beim
---! Senden falsch angeben).
+--! Tool: generate an image via AI (Pollinations.ai, free, no API key) from
+--! a text description AND send it directly to the user — generating and
+--! sending deliberately combined into ONE tool call (analogous to
+--! tool_sprachnachricht_senden), so the AI can't wrongly chain this as two
+--! separate steps (e.g. generate an image but pass the wrong path when
+--! sending it).
 fn tool_bild_erstellen prompt
     tok: get STATE "token"
     cid: get STATE "cid"
@@ -529,60 +524,61 @@ fn tool_bild_erstellen prompt
         return "Bild erstellt, aber Senden fehlgeschlagen: " ++ (to_str res)
     "Bild erstellt und gesendet."
 
---! Registriert Tools und Gremium-Agenten (einmalig beim Start).
---! Bindet zusaetzlich alle bereits per mcp.connect_servers verbundenen MCP-Tools
---! (Dateisystem, GitHub, ...) an einen eigenen "werkzeugmeister"-Agenten (P1).
+--! Registers tools and gremium agents (once at startup). Additionally
+--! binds all MCP tools already connected via mcp.connect_servers
+--! (filesystem, GitHub, ...) to their own "werkzeugmeister" agent (P1).
 export fn init_gremium _
-    ai_tool "erinnerungen_suchen" "Relevante Erinnerungen aus Muninns Langzeitgedaechtnis abrufen, um Fakten zu belegen." {query: "Suchanfrage"} tool_erinnerungen_suchen
-    ai_tool "merken" "Eine wichtige dauerhafte Erkenntnis ueber den Nutzer speichern." {content: "Inhalt", kind: "Kategorie"} tool_merken
-    ai_tool "web_search" "Im Internet suchen; liefert Titel und URLs der Top-Treffer." {query: "Suchbegriffe"} tool_web_search
-    ai_tool "web_fetch" "Eine Webseite abrufen und deren Fließtext liefern." {url: "Vollständige URL"} tool_web_fetch
-    ai_tool "merken_quelle" "Eine aus dem Web gewonnene Erkenntnis dauerhaft mit Quellen-URL speichern." {content: "Erkenntnis", source: "Quellen-URL"} tool_merken_quelle
-    ai_tool "erinnerung_planen" "Eine zeitgesteuerte Erinnerung fuer den Nutzer planen (z.B. bei Terminen/Verpflichtungen mit Zeitangabe)." {text: "Was erinnert werden soll, inkl. Zeitangabe in natuerlicher Sprache"} tool_erinnerung_planen
-    --! Bewusst eingeschraenkte Docker-Erweiterung (Image ziehen, Container
-    --! anlegen) — siehe docker_tools.pipe fuer die Sicherheitsbegruendung.
-    --! Ergaenzt den MCP-Server "docker" (verwaltet nur BESTEHENDE Container).
-    ai_tool "docker_pull_image" "Ein Docker-Image von einer Registry herunterladen (z.B. 'nginx:latest')." {image: "Image-Name inkl. optionalem Tag"} dt.tool_docker_pull_image
-    ai_tool "docker_create_container" "Einen neuen Container aus einem Image starten. KEINE Volume-Mounts moeglich, KEIN --privileged. Standardmaessig nur auf localhost erreichbar (public='true' fuer oeffentlich, nur wenn explizit gewuenscht)." {image: "Image-Name (ggf. vorher mit docker_pull_image geholt)", name: "Container-Name", host_port: "Port auf dem Host", container_port: "Port im Container", public: "'true' fuer oeffentlich erreichbar, sonst nur localhost"} dt.tool_docker_create_container
-    ai_tool "docker_hintergrund_setup" "Ein Docker-Setup starten, das LAENGER dauern darf (z.B. Paketinstallation) — blockiert NICHT, meldet sich automatisch per Scheduler, sobald fertig. Fuer schnelle Container aus einem fertigen Image stattdessen 'docker_create_container' nutzen." {image: "Image-Name (Basis-Image, z.B. 'ubuntu:22.04')", name: "Container-Name", setup_command: "Shell-Befehl(e), die IM Container ausgefuehrt werden (z.B. Paketinstallation) — && erlaubt, laeuft isoliert im Container", beschreibung: "Kurze Beschreibung der Aufgabe fuer die spaetere Rueckmeldung"} tool_docker_hintergrund_setup
-    ai_tool "docker_job_status" "Zeigt den Status der zuletzt gestarteten Hintergrund-Docker-Jobs dieses Chats. IMMER zuerst aufrufen, bevor du fuer eine Aufgabe, fuer die schon ein Job laufen KOENNTE (z.B. nach einer Fehlermeldung oder auf 'wie weit bist du'), einen neuen Job startest — NIEMALS blind einen zweiten, parallelen Job fuer dieselbe Aufgabe starten." {} tool_docker_job_status
-    ai_tool "docker_jobs_abbrechen" "Bricht SOFORT alle laufenden Hintergrund-Docker-Jobs UND geplanten Hintergrund-Fortsetzungen dieses Chats ab (Container werden entfernt, Scheduler-Eintraege storniert)." {} tool_docker_jobs_abbrechen
-    ai_tool "docker_environments_auflisten" "Zeigt registrierte DAUERHAFTE, wiederverwendbare Docker-Umgebungen dieses Chats (Name, Zweck, installierte Tools). IMMER zuerst aufrufen, bevor du fuer eine Anfrage, die irgendeine Linux-/Docker-Umgebung braucht, einen NEUEN Container anlegst — pruefe, ob eine bestehende Umgebung schon passt." {} tool_docker_environments_auflisten
-    ai_tool "docker_environment_registrieren" "Registriert einen Container als dauerhafte, wiederverwendbare Umgebung (Name, Zweck, installierte Tools) — NUR fuer Container, die bewusst laenger/dauerhaft laufen sollen (z.B. eine Test-/Entwicklungsumgebung), NICHT fuer einmalige Test-/Build-Laeufe (die tracked 'docker_hintergrund_setup' bereits selbst und sollen fertig werden/aufgeraeumt werden)." {container_name: "Name des laufenden Containers", purpose: "Wofuer diese Umgebung gedacht ist (kurz, konkret)", installed: "Was installiert ist (Sprache/Version, Tools, Pakete)"} tool_docker_environment_registrieren
-    ai_tool "docker_environment_entfernen" "Entfernt eine registrierte dauerhafte Umgebung (Container UND Registrierung) — wenn der Nutzer sagt, sie nicht mehr zu brauchen." {container_name: "Name der zu entfernenden Umgebung"} tool_docker_environment_entfernen
-    --! Bilder/Dateien an den Nutzer senden (z.B. ein Screenshot, den
-    --! werkzeug_browser lokal gespeichert hat, oder eine per Filesystem-
-    --! Werkzeug erzeugte Datei) — ohne das kann Muninn nur ÜBER Dateien
-    --! reden, sie aber nicht tatsaechlich verschicken.
-    ai_tool "bild_senden" "Ein Bild (Screenshot o.ae.) aus einer lokalen Datei an den Nutzer in Telegram senden (zeigt inline im Chat)." {path: "Pfad zur Bilddatei (relativ zu /root/muninn oder absolut)", caption: "Optionale Bildunterschrift"} tool_bild_senden
-    ai_tool "datei_senden" "Eine beliebige lokale Datei an den Nutzer in Telegram senden (als Datei-Anhang, Originalformat)." {path: "Pfad zur Datei (relativ zu /root/muninn oder absolut)", caption: "Optionale Beschreibung"} tool_datei_senden
-    ai_tool "sprachnachricht_senden" "Text als gesprochene Sprachnachricht (statt Textnachricht) an den Nutzer senden — lokale Sprachsynthese, kein Cloud-Dienst." {text: "Der zu sprechende Text (kurz halten, max. ca. 600 Zeichen — keine Links/Listen/Code, die klingen als Sprache nicht sinnvoll)"} tool_sprachnachricht_senden
-    ai_tool "bild_erstellen" "Ein NEUES Bild aus einer Textbeschreibung per KI generieren und direkt an den Nutzer senden (kostenlos, kein API-Key). NICHT fuer bereits vorhandene Dateien/Screenshots — dafuer 'bild_senden'." {prompt: "Detaillierte Bildbeschreibung auf Englisch (bessere Ergebnisse als Deutsch)"} tool_bild_erstellen
-    ai_tool "hintergrund_fortsetzen" "Eine BELIEBIGE Aufgabe zurueckstellen, die erkennbar mehr Zeit/Runden braucht als jetzt uebrig sind (nicht nur Docker) — Muninn arbeitet automatisch mit frischem Rundenbudget weiter und meldet sich, sobald fertig. Kann bei Bedarf mehrfach hintereinander aufgerufen werden." {zusammenfassung: "Kurze Zusammenfassung der urspruenglichen Aufgabe", fortschritt: "Was bisher erledigt ist und was noch zu tun ist, moeglichst konkret"} tool_hintergrund_fortsetzen
-    ai_tool "rezept_speichern" "Ein wiederverwendbares Workflow-Rezept (bewaehrte Schrittfolge fuer eine wiederkehrende Aufgabe) dauerhaft speichern." {name: "Kurzer, eindeutiger Rezept-Name", schritte: "Die einzelnen Schritte der Reihe nach, konkret und umsetzbar"} tool_rezept_speichern
-    ai_tool "rezepte_suchen" "Gespeicherte Workflow-Rezepte abrufen, um wiederkehrende Aufgaben nach bewaehrtem Muster zu loesen." {query: "Stichworte zur Aufgabe"} tool_rezepte_suchen
+    ai_tool "erinnerungen_suchen" "Fetch relevant memories from Muninn's long-term memory to support facts." {query: "Search query"} tool_erinnerungen_suchen
+    ai_tool "merken" "Store an important, permanent piece of information about the user." {content: "Content", kind: "Category"} tool_merken
+    ai_tool "web_search" "Search the internet; returns titles and URLs of the top results." {query: "Search terms"} tool_web_search
+    ai_tool "web_fetch" "Fetch a web page and return its body text." {url: "Full URL"} tool_web_fetch
+    ai_tool "merken_quelle" "Permanently store a piece of information obtained from the web, with its source URL." {content: "Information", source: "Source URL"} tool_merken_quelle
+    ai_tool "erinnerung_planen" "Schedule a time-based reminder for the user (e.g. for appointments/obligations with a time reference)." {text: "What should be remembered, including a time reference in natural language"} tool_erinnerung_planen
+    --! Deliberately restricted Docker extension (pull image, create
+    --! container) — see docker_tools.pipe for the security rationale.
+    --! Complements the "docker" MCP server (which only manages EXISTING
+    --! containers).
+    ai_tool "docker_pull_image" "Download a Docker image from a registry (e.g. 'nginx:latest')." {image: "Image name incl. optional tag"} dt.tool_docker_pull_image
+    ai_tool "docker_create_container" "Start a new container from an image. NO volume mounts possible, NO --privileged. Reachable on localhost only by default (public='true' for public, only if explicitly requested)." {image: "Image name (pull with docker_pull_image first if needed)", name: "Container name", host_port: "Port on the host", container_port: "Port inside the container", public: "'true' to be publicly reachable, otherwise localhost only"} dt.tool_docker_create_container
+    ai_tool "docker_hintergrund_setup" "Start a Docker setup that's allowed to take LONGER (e.g. package installation) — does NOT block, automatically reports back via the scheduler once done. For a quick container from a ready-made image, use 'docker_create_container' instead." {image: "Image name (base image, e.g. 'ubuntu:22.04')", name: "Container name", setup_command: "Shell command(s) run INSIDE the container (e.g. package installation) — && allowed, runs isolated inside the container", beschreibung: "Short description of the task for the later report-back"} tool_docker_hintergrund_setup
+    ai_tool "docker_job_status" "Shows the status of the most recently started background Docker jobs for this chat. ALWAYS call first before starting a new job for a task that a job COULD already be running for (e.g. after an error message or on 'how far along are you') — NEVER blindly start a second, parallel job for the same task." {} tool_docker_job_status
+    ai_tool "docker_jobs_abbrechen" "IMMEDIATELY cancels all running background Docker jobs AND scheduled background continuations for this chat (containers are removed, scheduler entries cancelled)." {} tool_docker_jobs_abbrechen
+    ai_tool "docker_environments_auflisten" "Shows registered PERSISTENT, reusable Docker environments for this chat (name, purpose, installed tools). ALWAYS call first before creating a NEW container for a request that just needs some Linux/Docker environment — check whether an existing environment already fits." {} tool_docker_environments_auflisten
+    ai_tool "docker_environment_registrieren" "Registers a container as a persistent, reusable environment (name, purpose, installed tools) — ONLY for containers deliberately meant to run longer/permanently (e.g. a test/dev environment), NOT for one-off test/build runs (which 'docker_hintergrund_setup' already tracks itself and which are meant to finish/be cleaned up)." {container_name: "Name of the running container", purpose: "What this environment is for (short, concrete)", installed: "What is installed (language/version, tools, packages)"} tool_docker_environment_registrieren
+    ai_tool "docker_environment_entfernen" "Removes a registered persistent environment (container AND registration) — when the user says they no longer need it." {container_name: "Name of the environment to remove"} tool_docker_environment_entfernen
+    --! Send images/files to the user (e.g. a screenshot that
+    --! werkzeug_browser saved locally, or a file created via the
+    --! filesystem tool) — without this, Muninn can only talk ABOUT files
+    --! but not actually send them.
+    ai_tool "bild_senden" "Send an image (screenshot or similar) from a local file to the user on Telegram (shows inline in the chat)." {path: "Path to the image file (relative to /root/muninn or absolute)", caption: "Optional caption"} tool_bild_senden
+    ai_tool "datei_senden" "Send any local file to the user on Telegram (as a file attachment, original format)." {path: "Path to the file (relative to /root/muninn or absolute)", caption: "Optional description"} tool_datei_senden
+    ai_tool "sprachnachricht_senden" "Send text as a spoken voice message (instead of a text message) to the user — local speech synthesis, no cloud service." {text: "The text to speak (keep it short, max. ~600 characters — no links/lists/code, those don't make sense spoken aloud)"} tool_sprachnachricht_senden
+    ai_tool "bild_erstellen" "Generate a NEW image from a text description via AI and send it directly to the user (free, no API key). NOT for already-existing files/screenshots — use 'bild_senden' for that." {prompt: "Detailed image description in English (better results than German)"} tool_bild_erstellen
+    ai_tool "hintergrund_fortsetzen" "Defer ANY task that visibly needs more time/rounds than are currently left (not just Docker) — Muninn automatically continues with a fresh round budget and reports back once done. Can be called multiple times in a row if needed." {zusammenfassung: "Short summary of the original task", fortschritt: "What has been done so far and what remains, as concrete as possible"} tool_hintergrund_fortsetzen
+    ai_tool "rezept_speichern" "Permanently store a reusable workflow recipe (a proven sequence of steps for a recurring task)." {name: "Short, unique recipe name", schritte: "The individual steps in order, concrete and actionable"} tool_rezept_speichern
+    ai_tool "rezepte_suchen" "Fetch stored workflow recipes, to solve recurring tasks following a proven pattern." {query: "Keywords about the task"} tool_rezepte_suchen
 
     local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen", "docker_pull_image", "docker_create_container", "docker_hintergrund_setup", "docker_job_status", "docker_jobs_abbrechen", "docker_environments_auflisten", "docker_environment_registrieren", "docker_environment_entfernen", "bild_senden", "datei_senden", "hintergrund_fortsetzen", "rezept_speichern", "rezepte_suchen"]
-    --! P5: EIN fokussierter Spezial-Agent PRO angebundenem MCP-Server statt
-    --! eines Alleskoenners mit allen Werkzeugen — skaliert automatisch mit
-    --! jedem neuen MCP-Server (kein Code-Umbau noetig), und haelt die
-    --! Tool-Auswahl der KI pro Agent klein und treffsicher, statt sie bei
-    --! sehr vielen Werkzeugen mit einer riesigen flachen Liste zu ueberfordern.
+    --! P5: ONE focused specialist agent PER connected MCP server instead of
+    --! a jack-of-all-trades with every tool — automatically scales with
+    --! every new MCP server (no code rework needed), and keeps the AI's
+    --! tool selection per agent small and accurate, instead of overwhelming
+    --! it with one huge flat list across very many tools.
     mcp_groups: mcp.discovered_tools_by_source local_names
     has_mcp: (len mcp_groups) > 0
     mcp_names: []
     specialist_names: []
     specialist_desc: ""
-    --! Zweipass-Aufbau: im ersten Durchlauf ist specialist_names erst
-    --! TEILWEISE gefuellt (waechst mit jeder Iteration) — ein Spezialist,
-    --! der frueh in mcp_groups steht, wuerde beim direkten Registrieren also
-    --! NICHT an spaeter registrierte Spezialisten weiterleiten koennen. Erst
-    --! Metadaten sammeln, DANACH im zweiten Durchlauf mit der vollstaendigen
-    --! Liste registrieren — sonst kann z.B. 'werkzeug_google' (Gmail-Suche)
-    --! nach getaner Arbeit nicht direkt an 'werkzeug_dokument' (Bericht
-    --! schreiben) uebergeben, wenn 'dokument' erst SPAETER in mcp_groups
-    --! auftaucht (beobachtet live: "Suche Rechnungen aus E-Mails und
-    --! schreib dazu einen Bericht" scheiterte genau daran).
+    --! Two-pass build: on the first pass, specialist_names is only
+    --! PARTIALLY filled (grows with every iteration) — a specialist that
+    --! comes early in mcp_groups would therefore NOT be able to hand off to
+    --! specialists registered later if registered directly. Collect
+    --! metadata first, THEN register with the complete list on the second
+    --! pass — otherwise e.g. 'werkzeug_google' (Gmail search) can't hand
+    --! off directly to 'werkzeug_dokument' (write a report) once its work
+    --! is done, if 'dokument' only appears LATER in mcp_groups (observed
+    --! live: "search invoices from emails and write a report about them"
+    --! failed exactly because of this).
     specialist_meta: []
     for grp in mcp_groups
         alias: get grp "alias"
@@ -593,10 +589,10 @@ export fn init_gremium _
             push mcp_names tn
         extra_note: ""
         if alias == "docker"
-            --! Nur der Docker-Spezialist bekommt zusaetzlich die lokalen,
-            --! eingeschraenkten Image-Pull/Container-Erstellen-Werkzeuge (siehe
-            --! docker_tools.pipe) — die MCP-Werkzeuge aus '" ++ alias ++ "'
-            --! koennen das nicht, nur bestehende Container verwalten.
+            --! Only the Docker specialist additionally gets the local,
+            --! restricted image-pull/create-container tools (see
+            --! docker_tools.pipe) — the MCP tools from '" ++ alias ++ "'
+            --! can't do that, they only manage existing containers.
             push gtools "docker_pull_image"
             push gtools "docker_create_container"
             push gtools "docker_hintergrund_setup"
@@ -643,22 +639,22 @@ export fn init_gremium _
                 push peer_handoff sn
         swarm_agent agent_name {system: SELF_ID ++ HANDOFF_RULE ++ RETRY_RULE ++ VERIFY_CLAIM_RULE ++ RESULT_HONESTY_RULE ++ "Du bist der Spezial-Agent fuer '" ++ alias ++ "' im Gremium von Muninn. Du hast NUR Zugriff auf die per MCP aus '" ++ alias ++ "' angebundenen Werkzeuge." ++ extra_note ++ " WICHTIG: Nutze das Selbstwissen oben aktiv, bevor du eine Anfrage bearbeitest — geht es z.B. um 'Pipe', ist damit hoechstwahrscheinlich Muninns EIGENE Skriptsprache gemeint (siehe Selbstwissen), NICHT Unix-Pipes/das Shell-Symbol '|', auch wenn Letzteres dein allgemeines Sprachmodell-Vorwissen naheliegender erscheinen laesst. Ist bei einem Begriff aus der Nutzeranfrage unklar, ob Muninn selbst oder etwas Allgemeines gemeint ist, bevorzuge den Bezug zu Muninn selbst oder frage im Zweifel kurz nach — erfinde NIE einfach die allgemeinere, thematisch nahliegendere Bedeutung. Brauchst du fuer die Anfrage mehrere dieser Werkzeuge nacheinander (z.B. erst einen Ort/eine ID nachschlagen, dann damit die eigentlichen Daten abrufen), rufe sie ALLE in dieser einen Runde nacheinander auf, BEVOR du weiterleitest — nicht nach jedem einzelnen Werkzeug zurueckspringen, das verbraucht unnoetig Runden. Braucht die Anfrage NACH deiner Arbeit noch eine ANDERE Faehigkeit (z.B. hast du recherchiert/Daten geholt, aber die sollen jetzt in ein Dokument/eine Praesentation), leite DIREKT an den passenden anderen werkzeug_<alias>-Spezialisten weiter (siehe Spezialisten-Liste oben) statt nur an 'kritiker' — der kann selbst keine Dokumente/Praesentationen erzeugen oder andere Werkzeuge bedienen. KRITISCH: Verlangt DEINE eigene Rolle ein konkretes Ergebnis (z.B. eine erstellte Datei, ein angelegter Container, ein gesendeter Termin) — du bist genau dafuer der zustaendige Spezialist —, dann MUSST du mindestens eines deiner eigenen Werkzeuge tatsaechlich aufrufen, BEVOR du weiterleitest. Formuliere das Ergebnis NIEMALS nur als Text/Vorschlag und leite NIEMALS direkt weiter, ohne selbst gehandelt zu haben — ein anderer Agent kann deine Werkzeuge nicht nachtraeglich fuer dich aufrufen, die Aufgabe bliebe dann faktisch unerledigt, auch wenn der Text danach fertig klingt. Ist deine Arbeit fertig und wird nichts Weiteres gebraucht, rufe 'kritiker' auf, um dein Ergebnis weiterzugeben.", tools: gtools, handoff: peer_handoff}
 
-    --! Dynamisch aus dem ECHTEN Zustand gebaut (nicht statischer Text wie
-    --! SELF_ID) — siehe Kommentar bei MEMORY_HONESTY_RULE oben.
-    tools_desc: "ECHTE, aktuell verfuegbare Werkzeuge (fuer Fragen ueber deine eigenen Faehigkeiten/Werkzeuge IMMER diese Liste nutzen — NIE 'web_search', das Internet weiss nicht, welche Werkzeuge DU verbunden hast): 'erinnerungen_suchen' (Muninns Gedaechtnis durchsuchen), 'merken'/'merken_quelle' (dauerhaft speichern), 'web_search'/'web_fetch' (im Internet recherchieren), 'erinnerung_planen' (Termin/Erinnerung planen), 'bild_erstellen' (ein neues Bild aus einer Textbeschreibung per KI generieren und senden), 'hintergrund_fortsetzen' (eine zu lange dauernde Aufgabe zurueckstellen und automatisch weiterarbeiten), 'rezept_speichern'/'rezepte_suchen' (bewaehrte Arbeitsablaeufe als Rezepte speichern und wiederverwenden)"
+    --! Built dynamically from the REAL state (not static text like
+    --! SELF_ID) — see the comment at MEMORY_HONESTY_RULE above.
+    tools_desc: "REAL, currently available tools (for questions about your own capabilities/tools, ALWAYS use this list — NEVER 'web_search', the internet doesn't know which tools YOU have connected): 'erinnerungen_suchen' (search Muninn's memory), 'merken'/'merken_quelle' (store permanently), 'web_search'/'web_fetch' (research the internet), 'erinnerung_planen' (schedule an appointment/reminder), 'bild_erstellen' (generate a new image from a text description via AI and send it), 'hintergrund_fortsetzen' (defer a task that's taking too long and continue automatically), 'rezept_speichern'/'rezepte_suchen' (store and reuse proven workflows as recipes)"
     if has_mcp
-        tools_desc: tools_desc ++ ", sowie per MCP extern angebunden: " ++ (join mcp_names ", ") ++ ". Verfuegbare Werkzeug-Spezialisten im Gremium:\n" ++ specialist_desc
+        tools_desc: tools_desc ++ ", plus externally connected via MCP: " ++ (join mcp_names ", ") ++ ". Available tool specialists in the gremium:\n" ++ specialist_desc
     else
-        tools_desc: tools_desc ++ ". Aktuell ist KEIN externer MCP-Server angebunden — Aktionen in Drittsystemen (Cloud-Dienste, Google Workspace, GitHub etc.) sind daher NICHT moeglich, bis ein passender MCP-Server konfiguriert wird."
-    tools_desc: tools_desc ++ " Fehlt ein gefragtes Werkzeug in dieser Liste, sag ehrlich, dass es aktuell nicht angebunden ist — behaupte NIE pauschal 'ich habe keinen Zugriff auf Werkzeuge', wenn diese Liste nicht leer ist.\n\n"
+        tools_desc: tools_desc ++ ". Currently NO external MCP server is connected — actions in third-party systems (cloud services, Google Workspace, GitHub, etc.) are therefore NOT possible until a suitable MCP server is configured."
+    tools_desc: tools_desc ++ " If a requested tool is missing from this list, honestly say it isn't currently connected — NEVER blanketly claim 'I have no access to tools' when this list isn't empty.\n\n"
 
-    --! "registrator" ist hier bewusst mit dabei (nicht nur bei kritiker_handoff):
-    --! reine Bildgenerierungs-Anfragen ('erstelle mir ein Bild von...') sollen
-    --! DIREKT von planer an registrator gehen (der 'bild_erstellen' hat),
-    --! ohne unnoetigen Umweg ueber faktenwaechter/kritiker — live beobachtet,
-    --! dass ohne dieses Handoff-Ziel eine simple Bildanfrage 16 Runden lang
-    --! zwischen den anderen Agenten hin- und hersprang, bevor sie zufaellig
-    --! bei registrator landete.
+    --! "registrator" is deliberately included here (not just for
+    --! kritiker_handoff): pure image-generation requests ('make me an
+    --! image of...') should go DIRECTLY from planer to registrator (who
+    --! has 'bild_erstellen'), without an unnecessary detour via
+    --! faktenwaechter/kritiker — observed live that without this handoff
+    --! target, a simple image request bounced between the other agents for
+    --! 16 rounds before landing on registrator by chance.
     planer_handoff: ["faktenwaechter", "kritiker", "registrator"]
     kritiker_handoff: ["faktenwaechter", "registrator"]
     faktenwaechter_handoff: ["kritiker", "planer"]
@@ -677,12 +673,12 @@ export fn init_gremium _
 
     nil
 
---! Backstop: die HANDOFF_RULE reduziert vorzeitige Enden (Agent gibt Text aus
---! statt sein Handoff-Werkzeug aufzurufen), aber garantiert es nicht —
---! beobachtet bei "Wer bin ich?": Pfad endete bei faktenwaechter statt
---! registrator, samt rohem "an den Kritiker weitergeleitet"-Kommentar. Statt
---! uns allein auf Prompt-Befolgung zu verlassen, hier ein deterministischer
---! Nachputz-Schritt. Von run_gremium UND run_gremium_stream geteilt.
+--! Backstop: HANDOFF_RULE reduces premature endings (an agent outputs text
+--! instead of calling its handoff tool), but doesn't guarantee it —
+--! observed with "Who am I?": the path ended at faktenwaechter instead of
+--! registrator, complete with a raw "handed off to the critic" comment.
+--! Instead of relying solely on prompt compliance, a deterministic cleanup
+--! step here. Shared by run_gremium AND run_gremium_stream.
 fn apply_registrator_backstop res
     path: get res "path"
     if (len path) > 0 && (at path ((len path) - 1)) != "registrator"
@@ -694,31 +690,30 @@ fn apply_registrator_backstop res
         set res "content" cleaned
     res
 
---! Fuehrt das Gremium aus. Liefert {content, path, rounds}. cid: Chat-Kontext
---! fuer tool_erinnerung_planen (siehe STATE-Kommentar oben).
---! Rundenlimit 150 (vorher 50): live beobachtet, dass ein einzelner
---! Werkzeug-Aufruf pro Runde verbraucht wird — ein ausfuehrliches,
---! mehrkapitliges Dokument allein braucht schon ca. 30-50 Runden nur fuer
---! die add_heading/add_paragraph-Aufrufe, zusaetzlich zur vorherigen
---! Recherche. Mit 50 riss das Gremium mitten in einem gut gefuellten
---! Dokument ab ("max rounds exceeded"), OHNE ueberhaupt an 'registrator'
---! zu uebergeben — schlimmer als eine unvollstaendige Antwort, denn dann
---! bekommt der Nutzer ueberhaupt keine Antwort mehr (Absturz statt
---! Teilergebnis). Kurze Anfragen brauchen weiterhin nur wenige Runden;
---! das hoehere Limit ist nur ein Sicherheitsnetz fuer sehr umfangreiche
---! Recherche+Dokument-Aufgaben.
+--! Runs the gremium. Returns {content, path, rounds}. cid: chat context
+--! for tool_erinnerung_planen (see the STATE comment above).
+--! Round limit 150 (previously 50): observed live that a single tool call
+--! consumes one round — an extensive, multi-chapter document alone
+--! already needs about 30-50 rounds just for the add_heading/add_paragraph
+--! calls, on top of the prior research. At 50, the gremium broke off mid
+--! way through a well-filled document ("max rounds exceeded"), WITHOUT
+--! ever handing off to 'registrator' — worse than an incomplete answer,
+--! because then the user gets no answer at all (a crash instead of a
+--! partial result). Short requests still only need a few rounds; the
+--! higher limit is just a safety net for very extensive research+document
+--! tasks.
 export fn run_gremium dbh cid task
     set STATE "dbh" dbh
     set STATE "cid" cid
     res: ai_swarm_trace task "planer" 150
     apply_registrator_backstop res
 
---! Wie run_gremium, aber mit Live-Fortschritt: on_update wird als
---! on_update(agent, event, detail, args_json) bei jedem Schwarm-Schritt
---! aufgerufen (event: "start"|"tool"|"handoff"|"final", args_json nur bei
---! "tool" gefuellt — die rohen JSON-Argumente des Aufrufs, siehe
---! ai_swarm_stream). Bleibt UI-neutral — Telegram-spezifisches
---! Formatieren/Editieren passiert beim Aufrufer (muninn.pipe), nicht hier.
+--! Like run_gremium, but with live progress: on_update is called as
+--! on_update(agent, event, detail, args_json) on every swarm step (event:
+--! "start"|"tool"|"handoff"|"final", args_json only populated for "tool"
+--! — the raw JSON arguments of the call, see ai_swarm_stream). Stays
+--! UI-neutral — Telegram-specific formatting/editing happens at the
+--! caller (muninn.pipe), not here.
 export fn run_gremium_stream dbh cid task on_update
     set STATE "dbh" dbh
     set STATE "cid" cid
