@@ -878,9 +878,23 @@ Browser-Freigabe pro Google-Konto. Details:
   zurückgegebene Freigabe-URL an den Nutzer weiterreichen, statt zu behaupten,
   das Verbinden ginge nicht.
 
-Einmalige Einrichtung (aus der Ferne): SSH-Port-Forward auf den OAuth-Callback
-(`ssh -L 8000:localhost:8000 user@server`), dann in Telegram „Verbinde mein
-Google-Konto" schreiben und den zurückgegebenen Link im eigenen Browser öffnen.
+**Einmalige Einrichtung (aus der Ferne, ohne SSH-Tunnel)**: Der OAuth-Callback-
+Server des MCP-Servers bindet standardmäßig nur auf `localhost` — bei einem
+entfernten Server ist „localhost" im Consent-Link dann der eigene Rechner
+des Nutzers, nicht der Server, weshalb früher ein SSH-Port-Forward
+(`ssh -L 8000:localhost:8000 user@server`) nötig war. Bind-Adresse und
+Redirect-URL sind im MCP-Server aber komplett entkoppelt konfigurierbar
+(`WORKSPACE_MCP_BASE_URI`/`GOOGLE_OAUTH_REDIRECT_URI`, siehe `.env.example`):
+`WORKSPACE_MCP_BASE_URI=http://0.0.0.0` lässt den Callback-Server von außen
+erreichbar lauschen, `GOOGLE_OAUTH_REDIRECT_URI` zeigt stattdessen auf die
+echte Server-Domain (z.B. `http://dein-server.example.com:8000/oauth2callback`)
+statt auf `localhost` — dieselbe URL muss 1:1 als „Authorized redirect URI"
+in der Google Cloud Console eingetragen werden. Google lehnt dabei eine
+nackte IP-Adresse ab (verlangt eine öffentliche Top-Level-Domain) — die vom
+Hoster vergebene Server-Domain (`hostname -f`) funktioniert. Port 8000 muss
+von außen erreichbar sein (ggf. Cloud-/VPS-Firewall öffnen). Danach einfach
+in Telegram „Verbinde mein Google-Konto" schreiben und den zurückgegebenen
+Link direkt im eigenen Browser öffnen — kein SSH mehr nötig (live verifiziert).
 
 ### Sprachnachrichten (`tts_synth.sh`)
 
