@@ -1,28 +1,27 @@
---! memory.pipe — Muninns persistente "Seele".
---! Alles Gedächtnis liegt in einer sqlite-Datei; die Seele wird ohne KI-Call
---! wiederhergestellt. Eingehende Nachrichten werden klassifiziert und verdichtet.
+--! memory.pipe — Muninn's persistent "soul".
+--! All memory lives in a sqlite file; the soul is restored without any AI
+--! call. Incoming messages are classified and condensed.
 import "sqlite"
 
 DB_PATH: "muninn.db"
 LOCK_PATH: "muninn.db.lock"
 
---! Nur EINMAL pro Modul-INSTANZ loggen, ob embed() grundsaetzlich fehlschlaegt
---! (z.B. weil embed() zwingend OPENAI_API_KEY braucht, das Muninn bewusst
---! nicht setzt — DeepSeek-only-Policy) — sonst wuerde das bei JEDEM
---! add_memory/retrieve_context erneut geloggt (haeufigster Pfad im ganzen
---! System), reine Log-Blaehung ohne neue Information nach dem ersten Mal.
---! Achtung: jede Datei, die "modules/memory.pipe" importiert, bekommt ihre
---! EIGENE Modulinstanz mit eigenem EMBED_STATE (bestaetigte Pipe-Eigenheit,
---! siehe sqlite-Shadowing-Bug weiter oben in dieser Session) — im echten
---! Prozess importieren 6 Dateien memory.pipe direkt oder indirekt
---! (muninn.pipe, swarm.pipe, docker_tools.pipe, scheduler.pipe,
---! dashboard.pipe, executor.pipe), die Warnung kann also bis zu ~6x statt
---! exakt 1x erscheinen — immer noch weit weniger als bei jedem einzelnen
---! add_memory-Aufruf.
+--! Only log ONCE per module INSTANCE whether embed() fundamentally fails
+--! (e.g. because embed() strictly needs OPENAI_API_KEY, which Muninn
+--! deliberately doesn't set — DeepSeek-only policy) — otherwise this would
+--! get logged again on EVERY add_memory/retrieve_context (the most frequent
+--! path in the whole system), pure log bloat with no new information after
+--! the first time. Note: every file that imports "modules/memory.pipe" gets
+--! its OWN module instance with its own EMBED_STATE (confirmed Pipe quirk,
+--! see the sqlite shadowing bug earlier in this session) — in the real
+--! process, 6 files import memory.pipe directly or indirectly (muninn.pipe,
+--! swarm.pipe, docker_tools.pipe, scheduler.pipe, dashboard.pipe,
+--! executor.pipe), so the warning can appear up to ~6x instead of exactly
+--! once — still far less than on every individual add_memory call.
 EMBED_STATE: {warned: false}
 
---! Öffnet die Datenbank und legt das Schema an (idempotent).
---! path: optionaler Dateipfad (z.B. ":memory:"); nil = DB_PATH.
+--! Opens the database and creates the schema (idempotent).
+--! path: optional file path (e.g. ":memory:"); nil = DB_PATH.
 export fn init_db path
     p: DB_PATH
     if path != nil && path != ""
@@ -41,20 +40,19 @@ export fn init_db path
     db_exec h "CREATE TABLE IF NOT EXISTS error_log (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT, message TEXT, ts TEXT)"
     h
 
---! Schließt die Datenbank und persistiert die Änderungen auf die Datei.
+--! Closes the database and persists the changes to the file.
 export fn close h
     db_close h
 
---! Oeffnet die (Datei-)Datenbank exklusiv gesperrt gegen andere Muninn-
---! Prozesse (Telegram-Loop, Dashboard, Konsolidierung — alle koennen
---! gleichzeitig laufen). Noetig, weil das reine-Pipe-sqlite-Modul beim
---! Oeffnen einen Snapshot in den Speicher laedt und beim Schliessen die
---! GESAMTE Datei atomar zurueckschreibt, ohne eigene prozessuebergreifende
---! Sperre: zwei Prozesse, die "gleichzeitig" (auch nur Sekunden auseinander)
---! oeffnen/schreiben/schliessen, koennen sich sonst gegenseitig committete
---! Schreibvorgaenge stillschweigend ueberschreiben (live reproduziert). Fuer
---! ":memory:"-Datenbanken (Tests) ist das irrelevant — dort ohne Lock nutzen.
---! Liefert {h, lock}; IMMER zusammen mit close_locked verwenden.
+--! Opens the (file) database with an exclusive lock against other Muninn
+--! processes (Telegram loop, dashboard, consolidation — all of which can
+--! run concurrently). Needed because the pure-Pipe sqlite module loads a
+--! snapshot into memory on open and atomically writes back the ENTIRE file
+--! on close, with no cross-process lock of its own: two processes that open/
+--! write/close "concurrently" (even just seconds apart) can otherwise
+--! silently overwrite each other's committed writes (reproduced live). For
+--! ":memory:" databases (tests) this is irrelevant — use without a lock
+--! there. Returns {h, lock}; ALWAYS use together with close_locked.
 export fn open_locked path
     lock: file_lock LOCK_PATH
     out: {}
@@ -62,14 +60,14 @@ export fn open_locked path
     set out "lock" lock
     out
 
---! Schliesst eine mit open_locked geoeffnete Datenbank und gibt die Sperre
---! wieder frei (Reihenfolge wichtig: erst db schliessen/committen, dann
---! entsperren — sonst koennte ein wartender Prozess vor dem Commit lesen).
+--! Closes a database opened with open_locked and releases the lock again
+--! (order matters: close/commit the db first, then unlock — otherwise a
+--! waiting process could read before the commit).
 export fn close_locked handle
     close (get handle "h")
     file_unlock (get handle "lock")
 
---! Setzt einen Meta-Schlüssel (INSERT oder UPDATE).
+--! Sets a meta key (INSERT or UPDATE).
 export fn meta_set h key value
     rows: db_query h ("SELECT mkey FROM meta WHERE mkey = '" ++ (sql_escape key) ++ "'")
     if (len rows) > 0
@@ -77,7 +75,7 @@ export fn meta_set h key value
     else
         db_exec h ("INSERT INTO meta (mkey, mval) VALUES ('" ++ (sql_escape key) ++ "', '" ++ (sql_escape value) ++ "')")
 
---! Liest einen Meta-Schlüssel (oder "").
+--! Reads a meta key (or "").
 export fn meta_get h key
     rows: db_query h ("SELECT mval FROM meta WHERE mkey = '" ++ (sql_escape key) ++ "'")
     if (len rows) > 0
@@ -85,10 +83,10 @@ export fn meta_get h key
     else
         ""
 
---! Neue Session-ID (fortlaufend über meta gezählt) — ein "Session" ist hier
---! ein Prozesslauf von `pipe muninn.pipe` (Start bis Neustart/Absturz), weil
---! ai_cost/ai_tokens reine In-Prozess-Zaehler sind, die bei jedem Neustart
---! wieder bei 0 anfangen. Beim Start einmal aufrufen.
+--! New session ID (sequential, counted via meta) — a "session" here is
+--! one process run of `pipe muninn.pipe` (start until restart/crash),
+--! because ai_cost/ai_tokens are purely in-process counters that start
+--! back at 0 on every restart. Call once at startup.
 export fn next_session_id h
     cur: meta_get h "session_counter"
     n: 0
@@ -98,12 +96,12 @@ export fn next_session_id h
     meta_set h "session_counter" (to_str n)
     n
 
---! Nutzer-Einstellungen (/settings in muninn.pipe): pro Chat ueber die
---! bestehende meta-Tabelle gespeichert (eigener Schluessel-Namensraum
---! "settings:<chat_id>:<key>") statt einer neuen Tabelle — spart eine
---! Migration, meta ist schon fuer genau sowas (beliebige Key-Value-Paare) da.
---! Unbekannter/leerer Wert -> default statt Fehler, damit ein Chat ohne
---! jemals gesetzte Einstellungen ganz normal mit den Standardwerten laeuft.
+--! User settings (/settings in muninn.pipe): stored per chat via the
+--! existing meta table (its own key namespace "settings:<chat_id>:<key>")
+--! instead of a new table — saves a migration, meta already exists for
+--! exactly this (arbitrary key-value pairs). Unknown/empty value -> default
+--! instead of an error, so a chat with no settings ever set still runs
+--! normally with the default values.
 export fn setting_get h chat_id key default
     v: meta_get h ("settings:" ++ (to_str chat_id) ++ ":" ++ key)
     if v == nil || v == ""
@@ -114,10 +112,9 @@ export fn setting_get h chat_id key default
 export fn setting_set h chat_id key value
     meta_set h ("settings:" ++ (to_str chat_id) ++ ":" ++ key) value
 
---! Naechster Wert beim Durchklicken eines Einstellungswertes im Telegram-
---! Menue (siehe handle_callback in muninn.pipe). Reine Werte-Rotation ohne
---! DB-Zugriff, damit sie auch fuers Bauen der Anzeige-Labels wiederverwendbar
---! bleibt.
+--! Next value when cycling through a setting in the Telegram menu (see
+--! handle_callback in muninn.pipe). Pure value rotation without DB access,
+--! so it stays reusable for building the display labels too.
 export fn setting_cycle key cur
     if key == "style"
         if cur == "knapp"
@@ -151,14 +148,14 @@ export fn setting_cycle key cur
                 else
                     cur
 
---! Anzeige-Text fuer einen Einstellungswert im Telegram-Menue.
+--! Display text for a setting value in the Telegram menu.
 export fn setting_label key value
     if key == "style"
         if value == "knapp"
-            "Knapp"
+            "Brief"
         else
             if value == "ausfuehrlich"
-                "Ausführlich"
+                "Detailed"
             else
                 "Normal"
     else
@@ -166,59 +163,59 @@ export fn setting_label key value
             if value == "en"
                 "English"
             else
-                "Deutsch"
+                "German"
         else
             if key == "proaktiv"
                 if value == "on"
-                    "An"
+                    "On"
                 else
-                    "Aus"
+                    "Off"
             else
                 if key == "gedaechtnis"
                     if value == "locker"
-                        "Locker (vergisst langsam)"
+                        "Relaxed (forgets slowly)"
                     else
                         if value == "streng"
-                            "Streng (vergisst schnell)"
+                            "Strict (forgets quickly)"
                         else
                             "Normal"
                 else
                     value
 
---! Baut einen "[SYSTEM]"-Hinweis fuer Stil/Sprache aus den Chat-Einstellungen,
---! der dem Gremiums-Task vorangestellt wird (siehe run_gremium(_stream)-
---! Aufrufstellen in muninn.pipe/dashboard.pipe) — Agenten-Prompts selbst sind
---! statisch (init_gremium laeuft nur EINMAL beim Start), daher hier statt dort
---! injiziert, nach demselben Muster wie der bestehende Rundenbudget-Hinweis
---! in swarm.go. Leer ("") bei reinen Standardeinstellungen, kein Rauschen.
+--! Builds a "[SYSTEM]" note for style/language from the chat settings,
+--! prepended to the gremium task (see the run_gremium(_stream) call sites in
+--! muninn.pipe/dashboard.pipe) — the agent prompts themselves are static
+--! (init_gremium only runs ONCE at startup), so this gets injected here
+--! instead, following the same pattern as the existing round-budget note in
+--! swarm.go. Empty ("") for pure default settings, no noise.
 export fn settings_prompt_prefix h chat_id
     style: setting_get h chat_id "style" "normal"
     sprache: setting_get h chat_id "sprache" "de"
     p: ""
     if sprache == "en"
-        p: p ++ "[SYSTEM] Antworte in dieser gesamten Konversation auf ENGLISCH statt Deutsch, unabhaengig von der Sprache der Nutzeranfrage. "
+        p: p ++ "[SYSTEM] Reply in this entire conversation in ENGLISH instead of German, regardless of the language of the user's request. "
     if style == "knapp"
-        p: p ++ "[SYSTEM] Der Nutzer wuenscht knappe Antworten — fasse dich kurz, nur das Wesentliche, keine langen Erklaerungen. "
+        p: p ++ "[SYSTEM] The user wants brief replies — keep it short, essentials only, no long explanations. "
     else
         if style == "ausfuehrlich"
-            p: p ++ "[SYSTEM] Der Nutzer wuenscht ausfuehrliche Antworten — erklaere Hintergrund/Kontext, wo sinnvoll, statt nur der knappen Kernaussage. "
+            p: p ++ "[SYSTEM] The user wants detailed replies — explain background/context where useful, instead of just the brief core statement. "
     if p == ""
         p
     else
         p ++ "\n\n"
 
---! Ob proaktive (unaufgeforderte) Nachrichten fuer diesen Chat erlaubt sind
---! (Eigenimpuls, proaktive Kalender-Erinnerungen — siehe sched_tick in
---! muninn.pipe). Das taegliche Briefing ist davon bewusst AUSGENOMMEN: das
---! hat der Nutzer per /briefing explizit selbst aktiviert, ist also schon
---! opt-in und keine unaufgeforderte Ueberraschung.
+--! Whether proactive (unsolicited) messages are allowed for this chat
+--! (self-initiative, proactive calendar reminders — see sched_tick in
+--! muninn.pipe). The daily briefing is deliberately EXCLUDED from this: the
+--! user explicitly activated it themselves via /briefing, so it's already
+--! opt-in and not an unsolicited surprise.
 export fn setting_proaktiv_enabled h chat_id
     (setting_get h chat_id "proaktiv" "on") == "on"
 
---! decay/forget-Tage fuer consolidate_memories, gesteuert ueber die
---! "gedaechtnis"-Einstellung. "normal" entspricht den bisherigen festen
---! Werten (14/30) — bewusst mit dieser Funktion unveraendert, damit sich
---! am Standardverhalten nichts aendert, wenn niemand die Einstellung anfasst.
+--! decay/forget days for consolidate_memories, controlled via the
+--! "gedaechtnis" setting. "normal" matches the previous fixed values
+--! (14/30) — deliberately unchanged by this function, so default behavior
+--! stays the same if nobody touches the setting.
 export fn setting_consolidate_days h chat_id
     g: setting_get h chat_id "gedaechtnis" "normal"
     out: {}
@@ -234,23 +231,22 @@ export fn setting_consolidate_days h chat_id
             set out "forget" 30
     out
 
---! Schreibt einen Kosten-Schnappschuss (kumulierte Werte des laufenden
---! Prozesses laut ai_cost/ai_tokens, nicht als Delta). Nur aufrufen, wenn
---! sich seit dem letzten Schnappschuss etwas geaendert hat (Aufrufer-
---! Verantwortung, siehe muninn.pipe) — sonst waechst die Tabelle unnoetig.
+--! Writes a cost snapshot (cumulative values of the running process per
+--! ai_cost/ai_tokens, not as a delta). Only call when something has changed
+--! since the last snapshot (caller's responsibility, see muninn.pipe) —
+--! otherwise the table grows needlessly.
 export fn log_cost h session_id cost_usd tokens calls cache_hits cache_misses
     db_exec h ("INSERT INTO cost_log (session_id, ts, cost_usd, tokens, calls, cache_hits, cache_misses) VALUES (" ++ (to_str session_id) ++ ", '" ++ (sql_escape (now_ts 0)) ++ "', " ++ (to_str cost_usd) ++ ", " ++ (to_str tokens) ++ ", " ++ (to_str calls) ++ ", " ++ (to_str cache_hits) ++ ", " ++ (to_str cache_misses) ++ ")")
     nil
 
---! Aggregiert cost_log zu einer Zusammenfassung: Gesamtkosten/-tokens/-calls
---! ueber alle Sessions (Summe der jeweiligen Session-Maxima, da die Werte
---! PRO SESSION monoton steigende Zaehler sind) plus eine Liste pro Session
---! {session_id, cost_usd, tokens, calls, cache_hits, cache_misses, first_ts,
---! last_ts}, neueste zuerst. Aggregation bewusst in Pipe statt per SQL
---! GROUP BY/MAX (die reine-Pipe-sqlite-Engine hat an anderer Stelle bereits
---! nicht dokumentierte SQL-Funktionen stillschweigend ignoriert, siehe
---! add_memory-Kommentar weiter unten — hier daher lieber verifizierbar in
---! Pipe selbst gerechnet).
+--! Aggregates cost_log into a summary: total cost/tokens/calls across all
+--! sessions (sum of each session's maxima, since the values are monotonically
+--! increasing counters PER SESSION) plus a list per session {session_id,
+--! cost_usd, tokens, calls, cache_hits, cache_misses, first_ts, last_ts},
+--! newest first. Aggregation deliberately done in Pipe instead of via SQL
+--! GROUP BY/MAX (the pure-Pipe sqlite engine has elsewhere already silently
+--! ignored undocumented SQL functions, see the add_memory comment further
+--! below — hence computed verifiably in Pipe itself here).
 export fn cost_summary h
     rows: db_query h "SELECT session_id, ts, cost_usd, tokens, calls, cache_hits, cache_misses FROM cost_log ORDER BY id ASC"
     sessions: {}
@@ -297,52 +293,51 @@ export fn cost_summary h
     set out "sessions" reversed
     out
 
---! SQL-Sicherheits-Escape für Strings in einfachen Anführungszeichen.
+--! SQL safety escape for strings in single quotes.
 export fn sql_escape s
     replace_all s "'" "''"
 
---! Duenne Durchreiche zu db_exec/db_query fuer Module, die selbst KEIN
---! eigenes "sqlite" importieren koennen — das sqlite-Modul exportiert eine
---! Funktion 'exec(handle, sql)', die den globalen exec()-Builtin
---! (Prozessausfuehrung) STILLSCHWEIGEND ueberschreibt, sobald "sqlite"
---! (egal ob bare oder mit 'as') im selben Dateiscope importiert wird (live
---! reproduziert: siehe docker_tools.pipe-Kommentar). docker_tools.pipe
---! braucht sowohl echtes exec() als auch DB-Zugriff auf DENSELBEN Handle
---! wie mem.open_locked/init_db (ein separates aliasiertes "sqlite"-Modul
---! dort erzeugt eine eigene, inkompatible Handle-Registry — "Invalid
---! database handle" beim Zugriff mit einem anderswo erzeugten Handle) —
---! diese beiden Durchreichen loesen beides, ohne dass docker_tools.pipe
---! selbst "sqlite" importieren muss.
+--! Thin pass-throughs to db_exec/db_query for modules that can't import
+--! their own "sqlite" — the sqlite module exports a function 'exec(handle,
+--! sql)' that SILENTLY overrides the global exec() builtin (process
+--! execution) as soon as "sqlite" (bare or aliased with 'as') is imported in
+--! the same file scope (reproduced live: see the docker_tools.pipe comment).
+--! docker_tools.pipe needs both real exec() and DB access to the SAME handle
+--! as mem.open_locked/init_db (a separately aliased "sqlite" module there
+--! creates its own, incompatible handle registry — "Invalid database
+--! handle" when accessed with a handle created elsewhere) — these two
+--! pass-throughs solve both, without docker_tools.pipe having to import
+--! "sqlite" itself.
 export fn raw_exec h sql
     db_exec h sql
 
 export fn raw_query h sql
     db_query h sql
 
---! Aktueller Zeitstempel im SQLite-"datetime('now')"-Format (sortierbarer String).
---! Hinweis: das reine-Pipe-sqlite-Modul wertet `datetime('now')` NICHT als
---! Funktion aus — es landet woertlich der String "now" in der Spalte. Deshalb
---! bauen wir den Zeitstempel hier selbst aus Pipes eigenen now/format_time-
---! Builtins und uebergeben ihn wie jeden anderen String-Wert.
+--! Current timestamp in SQLite's "datetime('now')" format (sortable string).
+--! Note: the pure-Pipe sqlite module does NOT evaluate `datetime('now')` as
+--! a function — the literal string "now" ends up in the column. So we build
+--! the timestamp here ourselves from Pipe's own now/format_time builtins and
+--! pass it along like any other string value.
 export fn now_ts _
     format_time now "2006-01-02 15:04:05"
 
---! Merkt eine Erinnerung (kind: one of memory/task/fact/question; importance 1-5).
---! Berechnet ein Embedding und speichert es für die RAG-Suche. Liefert die id.
---! Verhindert Dubletten bei "permanent" (dauerhafte Nutzerfakten wie "Ich bin
---! Harry..."): derselbe Inhalt (Groß-/Kleinschreibung und Whitespace egal) wird
---! nicht erneut eingefuegt, sondern nur in der Wichtigkeit angehoben — sonst
---! haeuft sich bei wiederholten Aussagen dieselbe Erinnerung mehrfach an, ohne
---! dass die Retrieval-Qualitaet steigt. Andere kinds (v.a. "document" —
---! ingest_document speichert bewusst mehrere Chunks, auch inhaltsgleiche) sind
---! davon NICHT betroffen.
+--! Stores a memory (kind: one of memory/task/fact/question; importance 1-5).
+--! Computes an embedding and stores it for RAG search. Returns the id.
+--! Prevents duplicates for "permanent" (permanent user facts like "I am
+--! Harry..."): the same content (case and whitespace don't matter) is not
+--! inserted again, only its importance is raised — otherwise the same
+--! memory piles up repeatedly on repeated statements, without improving
+--! retrieval quality. Other kinds (especially "document" — ingest_document
+--! deliberately stores multiple chunks, even identical-content ones) are
+--! NOT affected by this.
 export fn add_memory h content kind importance source tags
     if kind == "permanent"
-        --! Normalisierung MUSS in Pipe passieren, nicht in SQL: das reine-Pipe-
-        --! sqlite-Modul (~/.pipe/modules/sqlite.pipe, eval_expr/"func") kennt nur
-        --! count/sum/avg/min/max als Funktionen — lower()/trim() im WHERE fallen
-        --! auf den unveraenderten Rohwert zurueck (dieselbe Klasse Einschraenkung
-        --! wie beim datetime('now')-Workaround bei now_ts oben).
+        --! Normalization MUST happen in Pipe, not in SQL: the pure-Pipe
+        --! sqlite module (~/.pipe/modules/sqlite.pipe, eval_expr/"func") only
+        --! knows count/sum/avg/min/max as functions — lower()/trim() in a
+        --! WHERE clause fall back to the unchanged raw value (the same class
+        --! of limitation as the datetime('now') workaround in now_ts above).
         norm: lower (trim content)
         candidates: db_query h "SELECT id, content, importance FROM memories WHERE kind = 'permanent'"
         for c in candidates
@@ -362,13 +357,12 @@ export fn add_memory h content kind importance source tags
     try
         vec: embed content
     catch e
-        --! Degradiert stillschweigend auf Keyword-only-Suche (siehe
-        --! retrieve_context) — funktioniert, aber schlechter. EINMAL pro
-        --! Prozesslauf loggen (siehe EMBED_STATE oben), damit ein dauerhaft
-        --! kaputtes Embedding nicht unbemerkt bleibt, ohne bei jedem
-        --! add_memory erneut zu spammen.
+        --! Silently degrades to keyword-only search (see retrieve_context)
+        --! — works, but worse. Log ONCE per process run (see EMBED_STATE
+        --! above), so a permanently broken embedding doesn't go unnoticed,
+        --! without spamming on every add_memory.
         if (get EMBED_STATE "warned") == false
-            print ("embed() fehlgeschlagen (Erinnerungen werden ab jetzt ohne Embedding gespeichert, nur Keyword-Suche): " ++ (to_str e))
+            print ("embed() failed (memories will be stored without embeddings from now on, keyword search only): " ++ (to_str e))
             log_error h "embed" (to_str e)
             set EMBED_STATE "warned" true
         vec: nil
@@ -377,18 +371,18 @@ export fn add_memory h content kind importance source tags
     auto_link h content
     rid
 
---! Protokolliert ein eingehendes Ereignis (für Audit/Debug).
+--! Logs an incoming event (for audit/debug).
 export fn log_event h chat_id text kind
     db_exec h ("INSERT INTO events (chat_id, msg, kind, ts) VALUES ('" ++ (sql_escape chat_id) ++ "', '" ++ (sql_escape text) ++ "', '" ++ (sql_escape kind) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "')")
 
---! Dokument-Ingestion (P2): URLs/hochgeladene Textdateien in die Wissensbasis
---! aufnehmen. PDFs/Binärformate sind bewusst außen vor — Pipe ist ein
---! dependency-freies Binary ohne PDF-Bibliothek; dafür wäre ein angebundener
---! MCP-Server mit Extraktion der naheliegende Weg (P1).
+--! Document ingestion (P2): bring URLs/uploaded text files into the
+--! knowledge base. PDFs/binary formats are deliberately out of scope — Pipe
+--! is a dependency-free binary with no PDF library; a connected MCP server
+--! with extraction would be the natural path for that (P1).
 
---! Zerlegt einen langen Text in Chunks von bis zu max_len Zeichen, bevorzugt an
---! Absatzgrenzen (Leerzeile), sonst hart geschnitten. Reine Funktion (kein
---! KI/Netz), deterministisch testbar.
+--! Splits a long text into chunks of up to max_len characters, preferring
+--! paragraph boundaries (blank line), otherwise hard-cut. Pure function (no
+--! AI/network), deterministically testable.
 export fn chunk_text text max_len
     text: trim text
     out: []
@@ -423,12 +417,12 @@ export fn chunk_text text max_len
         push out cur
     out
 
---! Nimmt einen bereits als Text vorliegenden Dokumentinhalt (von einer URL oder
---! einer hochgeladenen Datei) in die Wissensbasis auf: zerlegt ihn in Chunks
---! und speichert jeden als eigene Erinnerung (kind "document", inkl. Embedding
---! fuer RAG und Auto-Verknuepfung ueber add_memory). max_chunks begrenzt
---! Kosten/Dauer bei sehr grossen Dokumenten (weitere Chunks werden verworfen).
---! Liefert {chunks_total, chunks_ingested}.
+--! Takes document content already available as text (from a URL or an
+--! uploaded file) into the knowledge base: splits it into chunks and stores
+--! each as its own memory (kind "document", incl. embedding for RAG and
+--! auto-linking via add_memory). max_chunks limits cost/duration for very
+--! large documents (further chunks are discarded). Returns {chunks_total,
+--! chunks_ingested}.
 export fn ingest_document h text source title max_chunks
     chunks: chunk_text text 1200
     total: len chunks
@@ -445,7 +439,7 @@ export fn ingest_document h text source title max_chunks
     set out "chunks_ingested" n
     out
 
---! Zaehlt Entitaeten und Relationen im Wissensgraphen (Status/Debug).
+--! Counts entities and relations in the knowledge graph (status/debug).
 export fn graph_counts h
     e: get (at (db_query h "SELECT COUNT(*) AS c FROM entities") 0) "c"
     r: get (at (db_query h "SELECT COUNT(*) AS c FROM relations") 0) "c"
@@ -454,16 +448,16 @@ export fn graph_counts h
     set out "relations" r
     out
 
---! Anzahl aktiver Threads (Status/Debug, Web-Dashboard P3).
+--! Number of active threads (status/debug, web dashboard P3).
 export fn active_thread_count h
     get (at (db_query h "SELECT COUNT(*) AS c FROM threads WHERE state = 'active'") 0) "c"
 
---! Erinnerungen MIT id fuer Verwaltung (Web-Dashboard P3). Ohne q: die n
---! wichtigsten. Mit q: einfache LIKE-Stichwortsuche ueber content, neueste
---! zuerst (kein Embedding-Ranking — fuer eine schnelle Verwaltungsliste reicht
---! das; fuer inhaltliche Fragen bleibt retrieve_context zustaendig).
---! q: Stichwortfilter (LIKE ueber content) oder nil/"". kind: exakter kind-Filter
---! oder nil/"". Beide kombinierbar.
+--! Memories WITH id for management (web dashboard P3). Without q: the n
+--! most important. With q: simple LIKE keyword search over content, newest
+--! first (no embedding ranking — good enough for a quick management list;
+--! retrieve_context remains responsible for actual content questions).
+--! q: keyword filter (LIKE over content) or nil/"". kind: exact kind filter
+--! or nil/"". Both combinable.
 export fn list_memories h q kind limit
     conds: []
     if q != nil && q != ""
@@ -478,22 +472,22 @@ export fn list_memories h q kind limit
         order_sql: " ORDER BY id DESC"
     db_query h ("SELECT id, content, kind, importance, ts, tags FROM memories" ++ where_sql ++ order_sql ++ " LIMIT " ++ (to_str limit))
 
---! Loescht eine Erinnerung inkl. ihres Embeddings (Web-Dashboard P3).
+--! Deletes a memory incl. its embedding (web dashboard P3).
 export fn delete_memory h id
     db_exec h ("DELETE FROM memories WHERE id = " ++ (to_str id))
     db_exec h ("DELETE FROM embeddings WHERE memory_id = " ++ (to_str id))
     "ok"
 
---! Holt die N wichtigsten Erinnerungen (hohe Importance zuerst).
+--! Fetches the N most important memories (high importance first).
 export fn top_memories h n
     db_query h ("SELECT content, kind, importance, ts, tags FROM memories ORDER BY importance DESC, id DESC LIMIT " ++ (to_str n))
 
---! Zählt Erinnerungen (Test-Helfer).
+--! Counts memories (test helper).
 export fn memory_count h
     rows: db_query h "SELECT COUNT(*) AS c FROM memories"
     get (at rows 0) "c"
 
---! Holt die N jüngsten Ereignisse (Audit/Debug).
+--! Fetches the N most recent events (audit/debug).
 export fn recent_events h n
     db_query h ("SELECT chat_id, msg, kind, ts FROM events ORDER BY id DESC LIMIT " ++ (to_str n))
 
@@ -513,14 +507,14 @@ export fn list_goals h limit
 export fn set_goal_status h id status
     db_exec h ("UPDATE goals SET status = '" ++ (sql_escape status) ++ "' WHERE id = " ++ (to_str id))
 
---! Setzt die Importance einer Erinnerung direkt (Web-Dashboard P3, manuelle
---! Kuratierung neben der automatischen Konsolidierung).
+--! Sets a memory's importance directly (web dashboard P3, manual curation
+--! alongside automatic consolidation).
 export fn set_importance h id importance
     db_exec h ("UPDATE memories SET importance = " ++ (to_str importance) ++ " WHERE id = " ++ (to_str id))
 
---! Passt die Importance ALLER Erinnerungen an, deren content exakt `content`
---! entspricht (Feedback-Lernen P4: 👍/👎 auf einer gespeicherten Antwort). delta
---! wird auf 1..5 geclampft. Liefert die Anzahl geänderter Erinnerungen.
+--! Adjusts the importance of ALL memories whose content exactly matches
+--! `content` (feedback learning P4: 👍/👎 on a stored answer). delta is
+--! clamped to 1..5. Returns the number of memories changed.
 export fn adjust_by_content h content delta
     rows: db_query h ("SELECT id, importance FROM memories WHERE content = '" ++ (sql_escape content) ++ "'")
     changed: 0
@@ -534,11 +528,11 @@ export fn adjust_by_content h content delta
         changed: changed + 1
     changed
 
---! Episodisches Gedaechtnis (P2): ein Thread pro Chat, in "threads" (title = chat_id
---! als String, state = aktiv/geschlossen) verwaltet — die Tabelle war zuvor angelegt,
---! aber ungenutzt. Nachrichten liegen chronologisch in "messages".
+--! Episodic memory (P2): one thread per chat, managed in "threads" (title =
+--! chat_id as a string, state = active/closed) — the table was created
+--! earlier but unused. Messages live chronologically in "messages".
 
---! Liefert die id des aktiven Threads eines Chats (legt bei Bedarf einen neuen an).
+--! Returns the id of a chat's active thread (creates a new one if needed).
 export fn active_thread h chat_id
     cid: to_str chat_id
     rows: db_query h ("SELECT id FROM threads WHERE title = '" ++ (sql_escape cid) ++ "' AND state = 'active'")
@@ -548,16 +542,16 @@ export fn active_thread h chat_id
         db_exec h ("INSERT INTO threads (title, state) VALUES ('" ++ (sql_escape cid) ++ "', 'active')")
         get (at (db_query h "SELECT max(id) AS mid FROM threads") 0) "mid"
 
---! Schliesst den aktiven Thread eines Chats (z.B. per /reset) — die naechste
---! active_thread-Anfrage legt einen frischen Thread ohne den alten Verlauf an.
+--! Closes a chat's active thread (e.g. via /reset) — the next active_thread
+--! call creates a fresh thread without the old history.
 export fn close_thread h chat_id
     db_exec h ("UPDATE threads SET state = 'closed' WHERE title = '" ++ (sql_escape (to_str chat_id)) ++ "' AND state = 'active'")
 
---! Fuegt eine Nachricht zu einem Thread hinzu. role: "user" oder "assistant".
+--! Adds a message to a thread. role: "user" or "assistant".
 export fn add_message h thread_id chat_id role content
     db_exec h ("INSERT INTO messages (thread_id, chat_id, role, content, ts) VALUES (" ++ (to_str thread_id) ++ ", '" ++ (sql_escape (to_str chat_id)) ++ "', '" ++ (sql_escape role) ++ "', '" ++ (sql_escape content) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "')")
 
---! Die letzten n Nachrichten eines Threads, chronologisch (aeltester zuerst).
+--! The last n messages of a thread, chronologically (oldest first).
 export fn thread_history h thread_id n
     rows: db_query h ("SELECT role, content FROM messages WHERE thread_id = " ++ (to_str thread_id) ++ " ORDER BY id DESC LIMIT " ++ (to_str n))
     out: []
@@ -567,58 +561,57 @@ export fn thread_history h thread_id n
         i: i - 1
     out
 
---! Formatiert eine Thread-Historie (Liste von {role, content}) als Prompt-Text.
+--! Formats a thread history (list of {role, content}) as prompt text.
 export fn format_history rows
     out: ""
     for r in rows
-        who: "Nutzer"
+        who: "User"
         if (get r "role") == "assistant"
             who: "Muninn"
         out: out ++ who ++ ": " ++ (get r "content") ++ "\n"
     out
 
---! Konsolidierung ("Traum", P2): periodischer Aufraeum-/Verdichtungsjob.
---! Nicht automatisch geplant (kein Scheduler vor P4) — manuell via
---! `pipe muninn.pipe consolidate` oder per externem Cron aufzurufen.
+--! Consolidation ("dream", P2): periodic cleanup/condensing job. Not
+--! automatically scheduled (no scheduler before P4) — call manually via
+--! `pipe muninn.pipe consolidate` or via an external cron.
 
---! Zeitstempel-String n Tage vor jetzt, im selben Format wie now_ts (fuer
---! Alters-Vergleiche als einfache String-WHERE-Bedingung).
+--! Timestamp string n days before now, in the same format as now_ts (for
+--! age comparisons as a simple string WHERE condition).
 export fn cutoff_ts days_ago
     format_time (now - (days_ago * 86400)) "2006-01-02 15:04:05"
 
---! Strukturiertes Fehler-Log fuer die Selbst-Diagnose (siehe muninn.pipe:
---! sched_tick "selbstdiagnose"). Ergaenzt (ersetzt NICHT) die bestehenden
---! print()-Aufrufe an denselben Stellen — journalctl bleibt die vollstaendige,
---! chronologische Aufzeichnung, error_log ist eine ZAEHLBARE, ueber Neustarts
---! hinweg persistente Teilmenge fuer automatisierte Auswertung. "tag" MUSS ein
---! stabiler, kurzer Bezeichner sein (z.B. "run_gremium_stream"), NICHT die
---! variable Fehlermeldung selbst — sonst gruppiert error_summary nichts
---! zusammen. Bewusst best-effort: ein fehlschlagender Log-Schreibversuch darf
---! selbst nie einen Fehler werfen (sonst koennte Fehler-Logging selbst neue
---! Fehler erzeugen).
+--! Structured error log for self-diagnosis (see muninn.pipe: sched_tick
+--! "selbstdiagnose"). Complements (does NOT replace) the existing print()
+--! calls at the same sites — journalctl remains the complete, chronological
+--! record, error_log is a COUNTABLE subset, persistent across restarts, for
+--! automated evaluation. "tag" MUST be a stable, short identifier (e.g.
+--! "run_gremium_stream"), NOT the variable error message itself — otherwise
+--! error_summary can't group anything together. Deliberately best-effort: a
+--! failed log write attempt must never itself throw an error (otherwise
+--! error logging could itself generate new errors).
 export fn log_error h tag message
     try
         db_exec h ("INSERT INTO error_log (tag, message, ts) VALUES ('" ++ (sql_escape tag) ++ "', '" ++ (sql_escape message) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "')")
     catch e
         nil
 
---! Fehler-Haeufigkeit je tag der letzten 'days' Tage, absteigend nach Anzahl
---! sortiert — Basis fuer die taegliche Selbst-Diagnose.
+--! Error frequency per tag over the last 'days' days, sorted descending by
+--! count — basis for the daily self-diagnosis.
 export fn error_summary h days
     cut: cutoff_ts days
     db_query h ("SELECT tag, COUNT(*) as cnt, MAX(ts) as last_ts FROM error_log WHERE ts > '" ++ (sql_escape cut) ++ "' GROUP BY tag ORDER BY cnt DESC")
 
---! Raeumt error_log-Eintraege aelter als 'days' Tage auf, Teil von
---! consolidate() — sonst waechst die Tabelle unbegrenzt.
+--! Cleans up error_log entries older than 'days' days, part of
+--! consolidate() — otherwise the table grows unbounded.
 export fn prune_error_log h days
     cut: cutoff_ts days
     db_exec h ("DELETE FROM error_log WHERE ts < '" ++ (sql_escape cut) ++ "'")
 
---! Verdichtet faellige Threads (geschlossen, oder aktiv aber seit
---! inactive_days ohne neue Nachricht) zu je einer Zusammenfassungs-Erinnerung
---! (kind "summary") und loescht danach deren Rohnachrichten. Zeilen mit dem
---! Legacy-Sentinel-Wert "now" (siehe now_ts-Kommentar) gelten als unbekannt alt
---! und werden nur ueber den "closed"-Zustand faellig, nie ueber Inaktivitaet.
+--! Condenses due threads (closed, or active but with no new message for
+--! inactive_days) into one summary memory each (kind "summary") and then
+--! deletes their raw messages. Rows with the legacy sentinel value "now"
+--! (see the now_ts comment) count as unknown age and only become due via
+--! the "closed" state, never via inactivity.
 export fn consolidate_threads h inactive_days
     cutoff: cutoff_ts inactive_days
     threads: db_query h "SELECT id, state FROM threads WHERE state = 'closed' OR state = 'active'"
@@ -641,17 +634,17 @@ export fn consolidate_threads h inactive_days
                     summary: summarize text
                 catch e
                     summary: substring text 0 800
-                add_memory h ("Gespraechs-Zusammenfassung: " ++ summary) "summary" 2 "consolidation" ("thread-" ++ (to_str tid))
+                add_memory h ("Conversation summary: " ++ summary) "summary" 2 "consolidation" ("thread-" ++ (to_str tid))
                 db_exec h ("DELETE FROM messages WHERE thread_id = " ++ (to_str tid))
                 done: done + 1
             db_exec h ("UPDATE threads SET state = 'archived' WHERE id = " ++ (to_str tid))
     done
 
---! Senkt die Importance alter, nicht-"permanent"er Erinnerungen um 1 pro Lauf
---! und vergisst (loescht) sie, sobald sie bei Importance 0 angekommen UND
---! aelter als forget_after_days sind. "permanent" (explizites "merke dir ...")
---! bleibt unangetastet — das ist bewusst dauerhaftes Wissen. Zeilen mit dem
---! Legacy-Sentinel "now" werden uebersprungen (Alter unbekannt).
+--! Lowers the importance of old, non-"permanent" memories by 1 per run and
+--! forgets (deletes) them once they've reached importance 0 AND are older
+--! than forget_after_days. "permanent" (explicit "remember that...") stays
+--! untouched — that's deliberately permanent knowledge. Rows with the legacy
+--! sentinel "now" are skipped (age unknown).
 export fn consolidate_memories h decay_after_days forget_after_days
     decay_cut: cutoff_ts decay_after_days
     forget_cut: cutoff_ts forget_after_days
@@ -676,12 +669,12 @@ export fn consolidate_memories h decay_after_days forget_after_days
     set out "forgotten" forgotten
     out
 
---! Haupt-Einstieg der Konsolidierung: Threads nach 3 Tagen Inaktivitaet
---! verdichten, nicht-permanente Erinnerungen ab decay_days um 1 Stufe altern
---! lassen, ab forget_days bei Importance 0 endgueltig vergessen. Bisheriger
---! fester Standard war 14/30 — jetzt ueber die "gedaechtnis"-Einstellung
---! steuerbar (siehe setting_consolidate_days), Aufrufer ohne Chat-Kontext
---! (z.B. der CLI-Cron-Modus) uebergeben weiterhin einfach 14/30 direkt.
+--! Main entry point of consolidation: condense threads after 3 days of
+--! inactivity, age non-permanent memories by 1 step starting at decay_days,
+--! permanently forget them at importance 0 starting at forget_days. The
+--! previous fixed default was 14/30 — now controllable via the "gedaechtnis"
+--! setting (see setting_consolidate_days), callers without chat context
+--! (e.g. the CLI cron mode) still simply pass 14/30 directly.
 export fn consolidate h decay_days forget_days
     threads_summarized: consolidate_threads h 3
     mres: consolidate_memories h decay_days forget_days
@@ -692,17 +685,17 @@ export fn consolidate h decay_days forget_days
     set out "memories_forgotten" (get mres "forgotten")
     out
 
---! Klassifiziert eine eingehende Nachricht via KI in eine Kategorie.
---! Fallback (kein AI): einfache Regel-Klassifikation.
+--! Classifies an incoming message into a category via AI.
+--! Fallback (no AI): simple rule-based classification.
 export fn classify_input text
     try
         classify text (["permanent", "reminder", "fleeting", "task", "goal", "question"])
     catch e
         rule_classify text
 
---! Regelbasierte Klassifikation (deterministisch, ohne KI) — für Tests und Fallback.
---! "erinnere" meint eine zeitbasierte Erinnerung (P4); "merke"/"denke an" eine
---! dauerhafte Erinnerung — die beiden waren zuvor eins ("permanent").
+--! Rule-based classification (deterministic, no AI) — for tests and fallback.
+--! "erinnere" (remind) means a time-based reminder (P4); "merke"/"denke an"
+--! (remember) a permanent memory — the two used to be one ("permanent").
 export fn rule_classify text
     t: lower text
     if contains t "erinnere"
@@ -719,29 +712,29 @@ export fn rule_classify text
                 else
                     "question"
 
---! Verdichtet Text via KI auf eine Kurzform (Fallback: unverändert).
+--! Condenses text via AI into a short form (fallback: unchanged).
 export fn condense text
     try
         summarize text
     catch e
         text
 
---! Verdichtet eine (Antwort-)Text zu einem kurzen Fakt fürs Merken (Fix: die
---! "Merken"-Funktion speicherte zuvor rohe, teils mit Gremium-Reasoning
---! verschmutzte Antworten wörtlich). KI-Kürzung mit deterministischem
---! Fallback auf die ersten 300 Zeichen (statt des kompletten Texts).
+--! Condenses an (answer) text into a short fact for remembering (fix: the
+--! "remember" function previously stored raw answers verbatim, sometimes
+--! polluted with gremium reasoning). AI shortening with a deterministic
+--! fallback to the first 300 characters (instead of the complete text).
 export fn condense_fact text
     try
         summarize text
     catch e
         substring text 0 300
 
---! Stoppwort-Prüfung (Deutsch + Englisch).
+--! Stopword check (German + English).
 fn is_stop t
     stops: split "a an the and or but if of in on at to for with about into is are was were be been being do does did doing how what which who this that these those it its as from by can could should would will not no nor your you we they he she has have had i me my them their there here when where why then than so too very just also using use der die das den dem des ein eine einer einem eines und oder aber wenn von im auf an zu zur zum für mit über ist sind war waren bin bist sein wird werden wie was welche wer dieser diese dieses es ich du er sie wir ihr man nicht kein keine auch als aus bei nach nur schon noch dann da hier dort warum wann" " "
     contains stops t
 
---! Zerlegt Text in relevante Kleinschreibungs-Tokens (ohne Stoppwörter).
+--! Splits text into relevant lowercase tokens (without stopwords).
 fn tokenize text
     low: lower text
     cleaned: regex_replace "[^a-z0-9äöüß_]+" " " low
@@ -752,7 +745,7 @@ fn tokenize text
             push out t
     out
 
---! Dokumenthäufigkeit: für jeden Token, in wie vielen Texten er vorkommt.
+--! Document frequency: for each token, how many texts it appears in.
 fn build_df contents
     df: {}
     for c in contents
@@ -768,7 +761,7 @@ fn build_df contents
                     set df t (cur + 1)
     df
 
---! TF-IDF-artiges Termgewicht (Float, damit die Division nicht ganzzahlig kollabiert).
+--! TF-IDF-like term weight (float, so the division doesn't collapse to an integer).
 fn term_weight t df n
     dfv: get df t
     if dfv == nil
@@ -788,9 +781,9 @@ fn keyword_score content_lower terms df n
             score: score + (term_weight t df n)
     score
 
---! RAG: hybride Suche (Keyword-TF-IDF + semantisches Embedding).
---! DeepSeek liefert nur 128-dim lexikalische Embeddings → Keyword dominiert (0.75).
---! Bei echten Embeddings (>300 dim, z.B. OpenAI) übernimmt Semantik (0.7).
+--! RAG: hybrid search (keyword TF-IDF + semantic embedding).
+--! DeepSeek only provides 128-dim lexical embeddings → keyword dominates (0.75).
+--! With real embeddings (>300 dim, e.g. OpenAI) semantics takes over (0.7).
 export fn retrieve_context h query k
     if query == nil || query == ""
         return []
@@ -820,22 +813,20 @@ export fn retrieve_context h query k
             sem_w: 0.7
             kw_w: 0.3
     scored: []
-    --! KRITISCHER BUG (live gefunden: "Wer bin ich?" fand trotz mehrfach
-    --! gespeicherter Identitaet "keinen Eintrag"): kw_denom ist 0, wenn ALLE
-    --! Query-Tokens Stoppwoerter sind ("wer"/"bin"/"ich" stehen alle in
-    --! is_stop) — dann bleibt kw=0 fuer JEDE Erinnerung. sem bleibt IMMER 0,
-    --! da embed() ohne OPENAI_API_KEY grundsaetzlich fehlschlaegt (siehe
-    --! EMBED_STATE oben). Score ist in diesem Fall fuer ALLE 249+ Erinnerungen
-    --! IDENTISCH 0 — der darunterliegende "if (len out) == 0"-Fallback griff
-    --! NIE, weil die Top-k-Auswahl trotz durchgaengig 0 Punkten trotzdem NICHT
-    --! leer ist (sorted_by liefert bei lauter Gleichstand einfach die ersten k
-    --! Eintraege der Eingabereihenfolge, hier: die NEUESTEN Erinnerungen nach
-    --! id DESC) — dem Gremium wurden also voellig beliebige juengste
-    --! Erinnerungen als "Kontext" untergeschoben, NIE die tatsaechlich
-    --! gespeicherte Identitaet. any_signal trackt jetzt explizit, ob
-    --! IRGENDEINE Erinnerung einen ECHTEN (> 0) Score hatte — nur dann wird
-    --! die Scored-Liste ueberhaupt verwendet, sonst greift der Fallback jetzt
-    --! wirklich.
+    --! CRITICAL BUG (found live: "Who am I?" found "no entry" despite the
+    --! identity being stored multiple times): kw_denom is 0 when ALL query
+    --! tokens are stopwords ("who"/"am"/"I" are all in is_stop) — then kw
+    --! stays 0 for EVERY memory. sem is ALWAYS 0, since embed() fundamentally
+    --! fails without OPENAI_API_KEY (see EMBED_STATE above). In this case the
+    --! score is IDENTICALLY 0 for ALL 249+ memories — the "if (len out) == 0"
+    --! fallback below never kicked in, because the top-k selection, despite
+    --! uniformly 0 points, still isn't empty (sorted_by, on a total tie,
+    --! simply returns the first k entries in input order, here: the NEWEST
+    --! memories by id DESC) — so the gremium was handed completely arbitrary
+    --! recent memories as "context", never the actually stored identity.
+    --! any_signal now explicitly tracks whether ANY memory had a REAL (> 0)
+    --! score — only then is the scored list used at all, otherwise the
+    --! fallback now actually kicks in.
     any_signal: false
     for r in rows
         c: get r "content"
@@ -864,49 +855,49 @@ export fn retrieve_context h query k
         while i < k && i < (len ordered)
             item: at ordered i
             c: get item "content"
-            --! Herkunfts-Kennzeichnung: "fact" & Co sind KI-Recherche-Ergebnisse oder
-            --! Task-Protokolle, KEINE Aussagen des Nutzers ueber sich selbst — ohne
-            --! diese Markierung haelt das Gremium sie sonst faelschlich fuer
-            --! Nutzerpraeferenzen (beobachtet: eine alte AfD-Recherche wurde bei
-            --! "Wofuer interessiere ich mich?" als "klares Signal fuer politisches
-            --! Interesse" fehlinterpretiert, obwohl es nur eine fruehere Recherche
-            --! zu einer ANDEREN Frage war). "permanent"/"document" bleiben
-            --! unmarkiert: das sind explizite Nutzeraussagen bzw. selbst gelehrte
-            --! Inhalte.
+            --! Provenance marking: "fact" & co. are AI research results or
+            --! task logs, NOT statements the user made about themselves —
+            --! without this marking the gremium otherwise mistakes them for
+            --! user preferences (observed: an old AfD research result was
+            --! misread, on "What am I interested in?", as a "clear signal of
+            --! political interest", even though it was just earlier research
+            --! for a DIFFERENT question). "permanent"/"document" stay
+            --! unmarked: those are explicit user statements or self-taught
+            --! content.
             k2: get item "kind"
             if k2 != "permanent" && k2 != "document"
-                c: "[fruehere Recherche/Protokoll, KEINE Aussage des Nutzers] " ++ c
+                c: "[earlier research/log entry, NOT a statement by the user] " ++ c
             push out c
             i: i + 1
     if (len out) == 0
-        --! Fallback: Fragen wie "Wer bin ich?" bestehen fast nur aus Stoppwoertern
-        --! (wer/bin/ich, siehe is_stop) und liefern daher IMMER 0 Keyword-Treffer,
-        --! egal was gespeichert ist. Ohne echte Embeddings (DeepSeek unterstuetzt
-        --! keine, OPENAI_API_KEY optional/leer, siehe Kommentar oben) gibt es sonst
-        --! keinen Signalweg zu dauerhaften Fakten — daher hier auf die wichtigsten
-        --! dauerhaften Erinnerungen zurueckfallen statt "nichts gefunden" zu liefern.
+        --! Fallback: questions like "Who am I?" consist almost entirely of
+        --! stopwords (who/am/I, see is_stop) and therefore ALWAYS yield 0
+        --! keyword hits, no matter what's stored. Without real embeddings
+        --! (DeepSeek doesn't support them, OPENAI_API_KEY optional/empty, see
+        --! comment above) there would otherwise be no signal path to
+        --! permanent facts — so fall back here to the most important
+        --! permanent memories instead of returning "nothing found".
         perm: db_query h ("SELECT content FROM memories WHERE kind = 'permanent' ORDER BY importance DESC, id DESC LIMIT " ++ (to_str k))
         for r in perm
             push out (get r "content")
     else
-        --! Live-Bug (P10, Folgefund): der obige Stoppwort-Fallback allein
-        --! reichte NICHT — das Gremium formuliert die Suchanfrage beim
-        --! Werkzeugaufruf oft frei um (z.B. "Wer bin ich?" -> "Nutzer
-        --! Identitaet Name persoenliche Daten"), was any_signal durchaus auf
-        --! true setzen kann (irgendeine andere, weniger wichtige Erinnerung
-        --! trifft zufaellig ein Wort), OHNE dass die eigentliche Identitaet
-        --! (rein lexikalisch komplett anders formuliert: "Ich bin Harry
-        --! Machura, geboren...") jemals im Ergebnis auftaucht. Deshalb hier
-        --! IMMER die wichtigste "permanent"-Erinnerung mit hineinmischen,
-        --! falls es eine gibt und sie noch nicht enthalten ist — das sind
-        --! per Definition explizite, dauerhafte Kernfakten des Nutzers
-        --! (Name, Geburtsdatum, Vorlieben), genau das, wonach bei
-        --! Identitaets-/Selbstfragen typischerweise gesucht wird. NUR ab k>=2:
-        --! bei k=1 will der Aufrufer explizit GENAU den einen besten Treffer,
-        --! den darf ein pauschaler Identitaets-Merge nicht ueberschreiben
-        --! (live als Testregression aufgefallen: ein k=1-Treffer mit echtem
-        --! Wortueberlappungs-Match wurde faelschlich durch eine andere, nur
-        --! zufaellig aeltere/neuere "permanent"-Erinnerung ersetzt).
+        --! Live bug (P10, follow-up finding): the stopword fallback above
+        --! alone was NOT enough — the gremium often freely rephrases the
+        --! search query on the tool call (e.g. "Who am I?" -> "user identity
+        --! name personal data"), which can well set any_signal to true (some
+        --! other, less important memory happens to match a word), WITHOUT
+        --! the actual identity (phrased in completely different lexical
+        --! terms: "I am Harry Machura, born...") ever showing up in the
+        --! result. So here we ALWAYS mix in the most important "permanent"
+        --! memory, if one exists and it isn't already included — by
+        --! definition those are explicit, permanent core facts about the
+        --! user (name, birthdate, preferences), exactly what identity/self
+        --! questions typically search for. ONLY from k>=2: at k=1 the caller
+        --! explicitly wants EXACTLY the one best match, which a blanket
+        --! identity merge must not overwrite (caught live as a test
+        --! regression: a k=1 match with a genuine word-overlap hit was
+        --! wrongly replaced by another "permanent" memory that was merely
+        --! coincidentally older/newer).
         if k >= 2
             top_perm: db_query h "SELECT content FROM memories WHERE kind = 'permanent' ORDER BY importance DESC, id DESC LIMIT 1"
             if (len top_perm) > 0
@@ -922,9 +913,9 @@ export fn retrieve_context h query k
                         set out (k - 1) perm_content
     out
 
---! Alle gespeicherten Workflow-Rezepte (kind "rezept"), wichtigste zuerst.
---! Bewusst ohne Embedding-Suche: Rezepte sind selten und kurz — die KI soll
---! aus der kleinen Liste selbst das passende waehlen.
+--! All stored workflow recipes (kind "rezept"), most important first.
+--! Deliberately without embedding search: recipes are rare and short — the
+--! AI should pick the right one itself from the small list.
 export fn recipes h
     rows: db_query h "SELECT content FROM memories WHERE kind = 'rezept' ORDER BY importance DESC, id DESC LIMIT 10"
     out: []
@@ -932,7 +923,7 @@ export fn recipes h
         push out (get r "content")
     out
 
---! Reine Stichwort-Suche (deterministisch, ohne Embedding).
+--! Pure keyword search (deterministic, without embedding).
 export fn keyword_retrieve h query k
     terms: tokenize query
     rows: db_query h "SELECT content FROM memories ORDER BY importance DESC, id DESC"
@@ -947,7 +938,7 @@ export fn keyword_retrieve h query k
                         push out c
     out
 
---! Wissensgraph: legt eine Entität an (oder liefert ihre id). kind: node/place/person/...
+--! Knowledge graph: creates an entity (or returns its id). kind: node/place/person/...
 export fn add_entity h name kind
     rows: db_query h ("SELECT id FROM entities WHERE name = '" ++ (sql_escape name) ++ "'")
     if (len rows) > 0
@@ -956,10 +947,10 @@ export fn add_entity h name kind
         db_exec h ("INSERT INTO entities (name, kind) VALUES ('" ++ (sql_escape name) ++ "', '" ++ (sql_escape kind) ++ "')")
         get (at (db_query h "SELECT max(id) AS mid FROM entities") 0) "mid"
 
---! Wissensgraph: verknüpft zwei Entitäten über eine Relation (dedupliziert:
---! dieselbe (from, to, rel)-Kombination wird nicht doppelt angelegt — wichtig,
---! da auto_link (P2) dieselbe Beziehung über mehrere Erinnerungen hinweg immer
---! wieder extrahieren kann).
+--! Knowledge graph: links two entities via a relation (deduplicated: the
+--! same (from, to, rel) combination is not created twice — important, since
+--! auto_link (P2) can repeatedly extract the same relationship across
+--! multiple memories).
 export fn add_relation h from_name to_name rel
     a: add_entity h from_name "node"
     b: add_entity h to_name "node"
@@ -968,15 +959,15 @@ export fn add_relation h from_name to_name rel
         db_exec h ("INSERT INTO relations (from_id, to_id, rel) VALUES (" ++ (to_str a) ++ ", " ++ (to_str b) ++ ", '" ++ (sql_escape rel) ++ "')")
     "ok"
 
---! Wissensgraph: alle Nachbarn einer Entität (mit Relation und Zielname).
+--! Knowledge graph: all neighbors of an entity (with relation and target name).
 export fn neighbors_of h name
     rows: db_query h ("SELECT r.rel, e2.name AS target FROM entities e1 JOIN relations r ON r.from_id = e1.id JOIN entities e2 ON e2.id = r.to_id WHERE e1.name = '" ++ (sql_escape name) ++ "'")
     rows
 
---! Auto-Entitäten (P2): schreibt Entitaeten/Relationen aus einem bereits
---! vorliegenden Extraktions-Ergebnis (Map mit "entities"/"relations") in den
---! Wissensgraphen. Von auto_link getrennt, damit diese Verarbeitung ohne KI
---! deterministisch testbar ist.
+--! Auto entities (P2): writes entities/relations from an already-available
+--! extraction result (map with "entities"/"relations") into the knowledge
+--! graph. Kept separate from auto_link so this processing is
+--! deterministically testable without AI.
 export fn apply_extraction h extraction
     if extraction == nil
         return nil
@@ -999,14 +990,14 @@ export fn apply_extraction h extraction
                 add_relation h f t rl
     nil
 
---! Extrahiert benannte Entitaeten + ihre Beziehungen aus einem Text via KI und
---! verknuepft sie automatisch im Wissensgraph (best-effort: ohne KI-Provider
---! oder bei Fehlern passiert nichts, der Aufrufer wird nicht unterbrochen).
+--! Extracts named entities + their relationships from a text via AI and
+--! automatically links them in the knowledge graph (best-effort: without an
+--! AI provider or on errors nothing happens, the caller is not interrupted).
 export fn auto_link h text
     if text == nil || (trim text) == ""
         return nil
     try
-        j: ai_chat_json "Extrahiere benannte Entitaeten (Personen, Orte, Organisationen, Dinge, Konzepte) und ihre Beziehungen aus dem Text. Antworte ausschliesslich als JSON-Objekt mit 'entities' (Liste von Objekten mit 'name' und 'kind') und 'relations' (Liste von Objekten mit 'from', 'to' und 'rel'). Nur eindeutig im Text genannte Entitaeten, keine Vermutungen. Ohne erkennbare Entitaeten: {\"entities\": [], \"relations\": []}." text
+        j: ai_chat_json "Extract named entities (people, places, organizations, things, concepts) and their relationships from the text. Respond exclusively as a JSON object with 'entities' (list of objects with 'name' and 'kind') and 'relations' (list of objects with 'from', 'to' and 'rel'). Only entities clearly named in the text, no guessing. With no recognizable entities: {\"entities\": [], \"relations\": []}." text
         apply_extraction h j
     catch e
         nil

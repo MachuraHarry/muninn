@@ -67,7 +67,7 @@ test "settings_prompt_prefix ist leer bei Standardeinstellungen, sonst mit Hinwe
     h: mem.init_db ":memory:"
     expect_eq (mem.settings_prompt_prefix h "1") "" "Standard -> kein Hinweis"
     mem.setting_set h "1" "sprache" "en"
-    expect_eq (contains (mem.settings_prompt_prefix h "1") "ENGLISCH") true "Sprache-Hinweis enthalten"
+    expect_eq (contains (mem.settings_prompt_prefix h "1") "ENGLISH") true "Sprache-Hinweis enthalten"
 
 test "setting_proaktiv_enabled folgt der Einstellung, Standard ist an"
     h: mem.init_db ":memory:"
@@ -217,7 +217,7 @@ test "thread_history begrenzt auf n juengste Nachrichten"
 test "format_history rendert Rollen lesbar"
     rows: [{role: "user", content: "Hallo"}, {role: "assistant", content: "Hi!"}]
     out: mem.format_history rows
-    expect_contains out "Nutzer: Hallo" "Nutzer-Zeile"
+    expect_contains out "User: Hallo" "Nutzer-Zeile"
     expect_contains out "Muninn: Hi!" "Muninn-Zeile"
 
 test "close_thread beendet den aktiven Thread; naechster Aufruf legt frischen an"
