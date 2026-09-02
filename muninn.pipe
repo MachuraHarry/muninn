@@ -1612,7 +1612,7 @@ else
         bind: dash_bind
         if bind == nil || bind == ""
             bind: "127.0.0.1:8787"
-        dash.start bind dash_token
+        dash.start bind dash_token grm.run_gremium
     else
         tok: cfg_get cfg "TELEGRAM_BOT_TOKEN"
         allowed: cfg_get cfg "TELEGRAM_ALLOWED_CHAT_ID"

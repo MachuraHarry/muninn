@@ -31,11 +31,27 @@
 import "pipe-web"
 import "sqlite"
 import "modules/memory.pipe" as mem
-import "modules/swarm.pipe" as grm
 import "modules/executor.pipe" as exe
 import "modules/web.pipe" as web
 
-DASH_STATE: {token: nil}
+--! run_gremium is injected by muninn.pipe's own `dash.start bind token
+--! grm.run_gremium` call rather than imported here directly (deliberately
+--! NOT `import "modules/swarm.pipe" as grm`) — a second, separate aliased
+--! import of swarm.pipe compiles its own isolated copy of that module,
+--! including its own independent STATE global (Pipe compiles each aliased
+--! import fresh into its own global slots, it does not share a singleton
+--! module instance across import sites). The tool closures actually
+--! registered via ai_tool/swarm_agent (tool_merken, tool_rezepte_suchen,
+--! ...) are bound to whichever swarm.pipe instance's init_gremium/ai_tool
+--! calls created them — muninn.pipe's own, since that's who calls
+--! init_gremium at startup. A dashboard-local grm.run_gremium would set
+--! STATE.dbh on ITS OWN, disconnected copy, leaving the real registered
+--! tools' cur_dbh nil — reproduced live: every DB-touching tool call from
+--! the dashboard chat failed with "Keine Datenbank verbunden", even
+--! erinnerungen_suchen, regardless of what was actually stored. Calling
+--! the injected function value instead reuses the SAME closure (and thus
+--! the SAME STATE) muninn.pipe's own init_gremium set up.
+DASH_STATE: {token: nil, run_gremium: nil}
 DASH_CHAT_ID: "dashboard"
 
 --! Checks the optional token (query param or header). Without a configured
@@ -723,7 +739,8 @@ fn dashboard_reply h text
     task: (mem.settings_prompt_prefix h DASH_CHAT_ID) ++ task
     answer: ""
     try
-        r: grm.run_gremium h DASH_CHAT_ID task
+        run_gremium: get DASH_STATE "run_gremium"
+        r: run_gremium h DASH_CHAT_ID task
         answer: get r "content"
     catch e
         --! As in muninn.pipe's handle_message: without this log, a real
@@ -747,8 +764,13 @@ fn dashboard_reply h text
     answer
 
 --! Starts the dashboard server (blocking). bind e.g. "127.0.0.1:8787".
-export fn start bind token
+--! run_gremium_fn: muninn.pipe's own grm.run_gremium, injected so the
+--! dashboard chat runs the gremium through the SAME swarm.pipe module
+--! instance (and thus the same STATE) as the Telegram path -- see the
+--! comment on DASH_STATE above.
+export fn start bind token run_gremium_fn
     set DASH_STATE "token" token
+    set DASH_STATE "run_gremium" run_gremium_fn
     a: app "Muninn Dashboard"
     use a auth_mw
     route_get a "/" page_handler
