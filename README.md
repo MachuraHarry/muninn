@@ -64,6 +64,28 @@ Anleitung, wie man Muninn im Alltag benutzt und was es alles kann, siehe
 - **MCP-Tool-Ökosystem** — beliebige externe Werkzeuge (Dateisystem, Browser, Docker,
   Dokumentations-Lookup, Google Workspace, Präsentationen/Dokumente, ...) per Model Context
   Protocol anbinden; laufen unter einem Sandbox-Profil mit eng gefasster exec-Whitelist.
+- **MCP-Server erst bei Bedarf verbinden** — statt beim Start alle konfigurierten Server
+  eager zu verbinden (früher spürbare Boot-Zeit bei mehreren Servern), verbindet Muninn nur,
+  was eine Nachricht per Keyword-Treffer tatsächlich braucht; der Planer kann einen
+  verfügbaren, aber noch inaktiven Server bei Bedarf selbst aktivieren (`werkzeug_aktivieren`).
+- **MCP-Registry-Suche mit Genehmigung** — fehlt ein passender MCP-Server, findet Muninn ihn
+  in der offiziellen Registry und schlägt ihn per Telegram-Button vor
+  (`mcp_registry_suchen`/`mcp_server_vorschlagen`); installiert wird NICHTS ohne explizite
+  Ja/Nein-Antwort — ein deterministisches Code-Gate blockiert dafür jede weitere Nachricht, bis
+  entschieden ist, nie dem KI-Ermessen überlassen.
+- **Rich Messages** — Antworten nutzen Telegrams natives Rich-Message-Format (echte Tabellen,
+  Überschriften, Listen statt nur Fett/Kursiv), wo es die Antwort klarer macht; fällt bei einem
+  inkompatiblen Client automatisch auf reinen Text zurück.
+- **Slideshot** — gestaltet auf Zuruf HTML-Folien in frei wählbarem Design/Format (z.B. 9:16
+  fürs Handy) und rendert sie zu PNG/PDF; steuert dafür selbst eine feste Schrittfolge durch ein
+  MCP-Protokoll, das eigentlich für einen interaktiven Client mit Rückfrage-UI gedacht ist.
+- **Workspaces & automatischer Datei-Index** — legt auf Wunsch benannte, wiederverwendbare
+  Arbeitsbereiche unter `mcp_data/` an, statt jede Anfrage in eine neue lose Datei zu schreiben;
+  jede gesendete Datei wird automatisch indexiert, ein täglicher Hintergrund-Job sortiert lose
+  Dateien thematisch ein (organisiert, löscht nie).
+- **Gezieltes Modell-Routing** — Recherche und die Slideshot-HTML-Erstellung laufen auf einem
+  stärkeren, teureren DeepSeek-Modell, Routing-/Formatierungsschritte bleiben beim günstigeren
+  Standardmodell — pro Agenten-Runde umschaltbar, kein Umweg über separate Gremiums-Läufe.
 - **Live-Status-Stream** — während das Gremium arbeitet, editiert Muninn EINE Telegram-Nachricht
   laufend weiter (welcher Agent aktiv ist, welches Werkzeug er aufruft), statt neuer
   Nachrichtenblöcke oder Schweigens bis zur Endantwort.
@@ -118,6 +140,12 @@ Anleitung, wie man Muninn im Alltag benutzt und was es alles kann, siehe
 | Proaktive Kalender-Erinnerungen + Briefing-Anreicherung | ✅ |
 | Präsentationen & Dokumente (PowerPoint/Word/PDF) erstellen + verschicken | ✅ |
 | Live-Status-Stream im Telegram-Chat (`ai_swarm_stream`) | ✅ |
+| MCP-Server bei Bedarf verbinden statt eager beim Start | ✅ |
+| MCP-Registry-Suche + deterministische Genehmigung neuer Server | ✅ |
+| Rich Messages (native Tabellen/Überschriften/Listen in Antworten) | ✅ |
+| Slideshot (HTML → PNG/PDF-Folien, frei wählbares Format) | ✅ |
+| Workspaces + automatischer Datei-Index + täglicher Aufräum-Job | ✅ |
+| Gezieltes Modell-Routing (stärkeres Modell für Recherche/Slideshot) | ✅ |
 | M5 — Discord | ⏳ geplant |
 
 Weitere Schritte: [Plan.md](Plan.md)
@@ -629,6 +657,19 @@ Konstanten):
 Die Tools erhalten DB-Handle, Chat-ID und Zeitzone über einen geteilten, mutablen
 Modul-State (`STATE`).
 
+**Gezieltes Modell-Routing.** `ai.ChatSwarm` liest Modell und Timeout
+(`ActiveConfig.Model`/`.Timeout`) bei jeder Runde frisch ein — `model_for_agent`/
+`timeout_for_agent` (`swarm.pipe`) nutzen das, um pro Agenten-Wechsel umzuschalten,
+aufgerufen aus `make_swarm_updater`s `"start"`-Event (`muninn.pipe`): `faktenwaechter`
+(Recherche) und `werkzeug_slideshot` (verfasst als einziger Spezialist selbst
+vollständiges HTML) laufen auf einem stärkeren, aber ~3x teureren DeepSeek-Modell mit
+längerem Timeout (300 statt 120s — ein reasoning-lastiger Lauf mit einer großen
+Einzelantwort riss live beim festen 120s-Limit ab), alle anderen Agenten bleiben beim
+günstigeren, schnelleren Standardmodell. `run_gremium_stream` setzt beide Werte am Ende
+IMMER zurück, unabhängig davon, welcher Agent den Lauf beendet hat — sonst würde ein
+nachfolgender, gremiumsfremder `ai_chat`-Aufruf (z.B. `/search`) unbeabsichtigt zum
+teureren Modell durchsickern.
+
 ### Autonomer Executor (`executor.pipe`)
 
 Plan-Infrastruktur mit Checkpoints — heute primär für **P4s langlaufende,
@@ -688,21 +729,44 @@ Briefing-/Erinnerungszeit, siehe `.env.example`.
 Externe Werkzeuge (Dateisystem, Browser, Docker, ...) werden per
 [Model Context Protocol](https://modelcontextprotocol.io) eingebunden, konfiguriert über
 `MCP_SERVERS` und/oder `MCP_AUTO_SERVERS` (beide JSON-Listen in `.env`, werden
-zusammengeführt und beim Start gemeinsam verbunden — `MCP_AUTO_SERVERS` trägt
-zusätzlich `keywords` für spätere On-Demand-Zuordnung im Executor):
+zusammengeführt — `MCP_AUTO_SERVERS` trägt zusätzlich `keywords` für die On-Demand-
+Zuordnung unten):
 
 - **`parse_mcp_config`** parst die Konfiguration robust (ungültiges JSON → `[]`, kein Absturz).
 - **`exec_whitelist_for`** extrahiert die Kommando-Basenamen aller `stdio`-Server für die
   Sandbox — nur genau diese Programme dürfen als Subprozess laufen.
-- **`connect_servers`** verbindet alle konfigurierten Server (`mcp_use_stdio`/`mcp_use_sse`)
-  best-effort: ein fehlschlagender Server blockiert die anderen nicht.
+- **`connect_servers`** verbindet Server (`mcp_use_stdio`/`mcp_use_sse`) best-effort: ein
+  fehlschlagender Server blockiert die anderen nicht.
 - **`discovered_tools_by_source`** gruppiert alle entdeckten Remote-Tool-Namen nach
   Herkunfts-Server (P5): jeder verbundene MCP-Server bekommt automatisch einen eigenen,
   fokussierten **`werkzeug_<alias>`**-Agenten im Gremium statt eines Alleskönners — skaliert
   von selbst mit jedem neu angebundenen Server, ohne Code-Änderung.
 
-Ist kein Server konfiguriert, bleibt `exec` im Sandbox-Profil deaktiviert — Muninn läuft
-unverändert wie zuvor.
+**Bei Bedarf verbinden statt eager beim Start.** Früher verband `setup_core` beim Boot
+ausnahmslos alle konfigurierten Server (spürbare Startzeit bei mehreren Servern). Heute
+verbindet eine Nachricht nur die Server, deren `keywords` im Text auftauchen
+(`ensure_mcp_for_task`); der Planer sieht in seinem System-Prompt zusätzlich alle
+konfigurierten, aber noch inaktiven Server und kann einen davon selbst aktivieren
+(`werkzeug_aktivieren`) — wirkt wegen `ai_swarm_stream`s eingefrorenem Agenten-Snapshot
+erst im nächsten Versuch der gleichen Aufgabe, `handle_message` erkennt das
+(`mcp_activated` im Rückgabewert von `run_gremium_stream`) und wiederholt die Aufgabe
+automatisch genau einmal, sobald der Server wirklich verbunden ist.
+
+**MCP-Registry-Suche mit deterministischer Genehmigung.** Kennt Muninn kein passendes
+Werkzeug für eine Anfrage, kann der `faktenwaechter` die offizielle MCP-Registry
+durchsuchen (`mcp_registry_suchen`) und einen Treffer per Telegram-Button vorschlagen
+(`mcp_server_vorschlagen`, `tool_mcp_server_vorschlagen` in `swarm.pipe`) — ein neuer
+Server läuft als uneingeschränkter lokaler Prozess (`npx -y <paket>`), daher **kein**
+KI-Ermessen hier: `handle_message` fängt in `muninn.pipe` JEDE weitere Nachricht
+deterministisch ab, solange ein Vorschlag unbeantwortet ist (nur "ja"/"nein" oder der
+Button lösen es), statt dem Gremium zu überlassen, eine unklare Folgenachricht als
+Zustimmung zu interpretieren — genau dafür gehärtet, nachdem live beobachtet wurde,
+dass eine unrelated Folgenachricht direkt nach einem Vorschlag als "installier's" gelesen
+wurde und einen unnötigen Docker-Umweg auslöste. Erst bei echter Zustimmung wird der
+Server dauerhaft in der Seele vermerkt (`custom_mcp_servers`) und verbunden.
+
+Ist kein Server konfiguriert oder aktiv verbunden, bleibt `exec` im Sandbox-Profil
+deaktiviert — Muninn läuft unverändert wie zuvor.
 
 **Aktuell konfiguriert** (`.env.example`, alle ohne API-Key nutzbar):
 
@@ -719,6 +783,11 @@ unverändert wie zuvor.
 | `praesentation` | `office-powerpoint-mcp-server` | PowerPoint-Präsentationen erstellen (.pptx) |
 | `dokument` | `office-word-mcp-server` | Word-Dokumente erstellen, inkl. PDF-Export (.docx/.pdf) |
 | `whisper` | eigenes Modul (`modules/whisper_server.py`) | Audio/Sprachnachrichten lokal transkribieren, kein API-Key |
+
+Zusätzlich zu dieser festen Liste kann die MCP-Registry-Suche (siehe oben) beliebige
+weitere, genehmigte Server dauerhaft ergänzen — z.B. `slideshot` (`slideshot-mcp`, siehe
+[Slideshot](#slideshot-swarmpipe) unten), so live hinzugekommen statt fest in
+`.env.example` vorkonfiguriert.
 
 ### Eingeschränkte Docker-Erweiterung (`docker_tools.pipe`)
 
@@ -975,6 +1044,65 @@ verifiziert (echte .pptx/.docx erstellt und über Telegram zugestellt):
 - Erzeugte Dateien landen immer unter `mcp_data/` (Prompt-Vorgabe, kein
   technischer Zwang) — vom Filesystem-MCP-Server ohnehin schon freigegeben.
 
+### Slideshot (`swarm.pipe`)
+
+Ein dritter Weg zu visuellen Ergebnissen neben PowerPoint/Word: der MCP-Server
+[`slideshot-mcp`](https://www.npmjs.com/package/slideshot-mcp) lässt die KI Folien direkt
+als HTML+CSS gestalten (freies Design/Format, z.B. 9:16 fürs Handy statt starrer
+PowerPoint-Vorlagen) und rendert sie per Headless-Chrome zu PNG/PDF/WebP/PPTX.
+
+- **Für einen interaktiven Client gebaut, nicht für autonome KI-Nutzung** — live per
+  direktem `tool_call` gegen den echten Server verifiziert: seine Tool-Antworten
+  verlangen an mehreren Stellen wörtlich, auf eine Nutzer-Bestätigung zu warten
+  ("STOP. WAIT for the user..."), etwas, das es in Muninns autonomem Gremiums-Lauf
+  nicht gibt. Der `werkzeug_slideshot`-Spezialist bekommt daher eine explizite
+  Übersteuerung samt der live verifizierten, festen Schrittfolge:
+  `discover_themes` → `create_slides` (nur Theme+Modus, liefert CSS-Vorlage + exakte
+  Zielgröße) → HTML selbst verfassen → `create_slides` erneut MIT dem fertigen HTML →
+  sofort `render_slides` (kein Zurückmelden dazwischen).
+- **Kein eingebautes 9:16-Format** — nur `portrait` (4:5), `landscape` (16:9),
+  `instagram` (1:1) sind vordefiniert; für 9:16 (häufigster Wunsch) explizit
+  `orientation:'custom'` mit `width:1080, height:1920`.
+- **`render_slides` übernimmt `formats` NICHT automatisch** von `create_slides` — ohne
+  erneute Angabe kam im Test ein falscher Dateityp zurück (PDF statt der angeforderten
+  PNGs).
+- **Bild-Einbettung**: der Renderer sieht nur den übergebenen HTML-String, kein
+  Dateisystem — ein Dateipfad in `<img src="...">` funktioniert nicht. Das eigene
+  Werkzeug `bild_als_base64` liest eine lokale Bilddatei (z.B. von `icon_holen`) und
+  liefert einen fertigen `data:image/...;base64,...`-URI zum Einbetten; ein
+  Fehlerergebnis wird NIE als `src` eingesetzt (ergäbe ein sichtbar kaputtes
+  Bild-Symbol im fertigen Slide) — dann bleibt das Bild einfach weg.
+- **Output liegt fest unter `/tmp/slideshot-output/`**, außerhalb von `mcp_data/` — als
+  zweite vertrauenswürdige Wurzel in `resolve_muninn_path`s `TRUSTED_PATH_ROOTS`
+  hinterlegt, sonst lehnen `bild_senden`/`datei_senden` den Versand als „außerhalb der
+  erlaubten Verzeichnisse" ab.
+
+### Workspaces & Datei-Index (`swarm.pipe`)
+
+Ohne Wiederverwendungs-Mechanismus legte jede Anfrage nach einem Bericht/einer
+Präsentation reflexhaft eine neue Datei an — live geprüft: `mcp_data/` sammelte binnen
+weniger Tage 60 lose Dateien, darunter acht fast identische Zwischenversionen
+desselben Dokuments. Zwei Ergänzungen dagegen, nach demselben Muster wie
+`docker_environments` (siehe oben) — eine benannte, dauerhafte Ressource, in einer
+eigenen Tabelle verwaltet:
+
+- **`file_index`** — jede über `bild_senden`/`datei_senden` tatsächlich verschickte
+  Datei wird automatisch erfasst (Pfad, Chat, Bildunterschrift, Workspace), ganz ohne
+  zusätzliche KI-Disziplin.
+- **Workspaces** (`workspace_erstellen`/`workspaces_auflisten`) — ein benannter,
+  wiederverwendbarer Unterordner unter `mcp_data/` für ein laufendes Thema/Projekt.
+  `registrator` sowie die `dokument`/`praesentation`-Spezialisten prüfen zuerst per
+  `workspaces_auflisten`, ob ein passender Workspace existiert, bevor sie eine neue,
+  lose Datei anlegen.
+- **Täglicher Aufräum-Job** (`workspace_aufraeumen`-Scheduler-Kind, 03:00 Uhr,
+  `organize_mcp_data`) — sortiert lose Top-Level-Dateien in thematische Unterordner:
+  EIN schlanker `ai_chat`-Aufruf schlägt die Gruppierung als JSON vor, danach läuft
+  alles deterministisch weiter (`make_dir`/`file_move`) — dieselbe
+  Propose-dann-Ausführen-Trennung wie beim MCP-Registry-Vorschlag oben. **Löscht nie
+  etwas**, bereits vorhandene Unterordner bleiben unangetastet; da jede noch nicht
+  indexierte lose Datei erfasst wird, räumt schon der ganz normale erste Lauf
+  automatisch den kompletten Bestand mit auf, kein separates Migrations-Skript nötig.
+
 ### Bildgenerierung (`swarm.pipe`, `bild_erstellen`)
 
 Der Registrator erzeugt auf Anfrage ("erstelle/generiere/zeichne mir ein
@@ -1171,12 +1299,25 @@ gitignorierten `.env` gelesen.
 - **Natives Befehlsmenü**: `tel_set_my_commands` (`setMyCommands`) registriert alle
   Befehle samt Beschreibung einmalig beim Start — Telegram speichert das
   serverseitig, sichtbar im `/`-Aufklapp-Menü und über den Menü-Button.
-- **Markdown-Normalisierung**: LLM-Ausgaben sind durchgehend CommonMark-Stil
-  (`**fett**`), Telegrams `Markdown`-Parse-Mode kennt aber nur einfache
-  Sternchen. `tg_markdown` normalisiert vor dem Senden; scheitert der Versand
-  trotzdem (z.B. unausgewogene Entities), wird automatisch als Klartext
-  nachgesendet, damit nie eine Antwort wegen eines Formatierungsfehlers
-  verlorengeht.
+- **Rich Messages** (`sendRichMessage`/`editMessageText`+`rich_message`, Bot API
+  10.1+): der Registrator schreibt GitHub-Flavored Markdown (echte Tabellen,
+  Überschriften, Listen — mehr als das alte reine Fett/Kursiv), `tel_send_rich_message`/
+  `tel_edit_rich_message` (`telegram.pipe`) verschicken es darüber; scheitert der
+  Versand (inkompatibler Client), fällt jede Funktion automatisch auf den
+  klassischen Text-Pfad direkt darunter zurück. Der Live-Status-Stream (die eine, laufend
+  editierte Nachricht während das Gremium arbeitet) bleibt bewusst reiner Text — für
+  eine sich mehrmals pro Sekunde ändernde Zeile bringt die Struktur nichts.
+- **Markdown-Normalisierung** (Fallback-Pfad): LLM-Ausgaben sind durchgehend
+  CommonMark-Stil (`**fett**`), Telegrams `HTML`-Parse-Mode kennt aber ein anderes
+  Format. `tg_html` normalisiert vor dem Senden; scheitert der Versand trotzdem (z.B.
+  unausgewogene Entities), wird automatisch als Klartext nachgesendet, damit nie eine
+  Antwort wegen eines Formatierungsfehlers verlorengeht.
+- **Feedback-Buttons lesen die Antwort aus der eigenen Seele, nicht aus Telegram** —
+  eine als Rich Message gesendete Nachricht hat serverseitig kein `text`-Feld mehr
+  (Inhalt liegt strukturiert unter `rich_message.blocks`). `mem.last_assistant_message`
+  liefert stattdessen Muninns eigene, zuletzt gespeicherte Antwort für diesen Chat, damit
+  👍/👎/„Remember"/„Dig deeper" unabhängig davon funktionieren, wie die Nachricht
+  tatsächlich gerendert wurde.
 - **Fotos**: `ai_vision` beantwortet Bildunterschriften/Standardfragen zu
   geschickten Fotos; DeepSeeks Standardmodell kann keine Bilder, `handle_photo`
   schaltet dafür kurz auf ein Vision-Modell um und danach zuverlässig zurück.
