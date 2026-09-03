@@ -699,8 +699,10 @@ fn handle_message token cid text dbh allowed uid
     crashed: false
     aborted: false
     abort_reason: ""
+    res_final: nil
     try
         res: grm.run_gremium_stream dbh cid task on_update round_check
+        res_final: res
         if (get res "aborted") == true
             aborted: true
             abort_reason: get res "abort_reason"
@@ -720,6 +722,7 @@ fn handle_message token cid text dbh allowed uid
         setup_sandbox all_mcp_servers
         try
             res2: grm.run_gremium_stream dbh cid task on_update round_check
+            res_final: res2
             if (get res2 "aborted") == true
                 aborted: true
                 abort_reason: get res2 "abort_reason"
@@ -755,6 +758,35 @@ fn handle_message token cid text dbh allowed uid
         --! saying that something went technically wrong.
         tel_finalize token cid message_id "Something went technically wrong (e.g. a brief connection drop to the AI provider) — please send your request again and I'll retry." nil
         return nil
+    --! Lazy MCP loading: 'planer' may have called 'werkzeug_aktivieren'
+    --! mid-run (see modules/swarm.pipe) — that connects a new specialist
+    --! and re-registers it immediately, but ai_swarm_stream freezes the
+    --! whole agent/tool set ONCE at the start of a run, so the newly
+    --! active specialist was never actually usable THIS run, only the
+    --! NEXT one. res_final's "mcp_activated" (set by run_gremium_stream)
+    --! tells us that happened — retry the SAME task exactly once more, now
+    --! that the specialist is really available, so the user still gets a
+    --! real answer from it in one exchange instead of a "not connected yet"
+    --! non-answer. Bounded to one extra attempt (this res's own
+    --! mcp_activated is never re-checked) — no retry loop possible.
+    if res_final != nil
+        activated: get res_final "mcp_activated"
+        if activated != nil && (len activated) > 0
+            print ("MCP activated mid-run, retrying once: " ++ (join activated ", "))
+            try
+                res3: grm.run_gremium_stream dbh cid task on_update round_check
+                if (get res3 "aborted") == true
+                    aborted: true
+                    abort_reason: get res3 "abort_reason"
+                else
+                    answer: get res3 "content"
+                    save_trace dbh cid res3
+            catch e3
+                print ("reactivation retry failed, keeping first answer: " ++ (to_str e3))
+                mem.log_error dbh "run_gremium_stream_reactivation_retry" (to_str e3)
+            if aborted
+                tel_finalize token cid message_id ("🛑 " ++ abort_reason) nil
+                return nil
     if question_needs_research answer
         tel_finalize token cid message_id "No knowledge of that. Researching..." nil
         do_search token cid dbh tnorm
@@ -1649,6 +1681,56 @@ fn handle_callback token dbh cbq allowed uid
         else
             tel.tel_edit_message_text_kb token cid message_id "Open goals — tap one to mark it done:" new_kb
         return nil
+    --! MCP registry proposal (see tool_mcp_server_vorschlagen in
+    --! swarm.pipe): the ONLY code path anywhere that actually persists/
+    --! connects a discovered server — deliberately gated behind a real
+    --! Telegram button tap, never automatic.
+    if (len data) > 12 && (substring data 0 12) == "mcp_add_yes:"
+        id: substring data 12 (len data)
+        raw: mem.meta_get dbh ("pending_mcp_add:" ++ id)
+        if raw == nil || raw == ""
+            tel.tel_send_message token cid "Dieser Vorschlag ist nicht mehr gueltig."
+        else
+            prop: nil
+            try
+                prop: parse_json raw
+            catch
+                prop: nil
+            alias: nil
+            if prop != nil
+                alias: get prop "alias"
+            already_configured: false
+            for s in all_mcp_servers
+                if (get s "alias") == alias
+                    already_configured: true
+            if alias == nil || (mcp.is_connected alias) || already_configured
+                tel.tel_send_message token cid ("Alias ist inzwischen bereits vergeben oder ungueltig — nicht hinzugefuegt.")
+            else
+                server: {alias: alias, type: "stdio", command: "npx", args: ["-y", (get prop "npm_paket")], keywords: [alias, (get prop "name")]}
+                push all_mcp_servers server
+                existing_raw: mem.meta_get dbh "custom_mcp_servers"
+                existing: []
+                if existing_raw != nil && existing_raw != ""
+                    try
+                        existing: parse_json existing_raw
+                    catch
+                        existing: []
+                push existing server
+                mem.meta_set dbh "custom_mcp_servers" (to_json existing)
+                connect_results: mcp.connect_servers [server]
+                r: at connect_results 0
+                if (get r "ok") == true
+                    grm.init_gremium 0
+                    tel.tel_send_message token cid ("✅ '" ++ alias ++ "' hinzugefuegt und verbunden.")
+                else
+                    tel.tel_send_message token cid ("❌ Hinzugefuegt, aber Verbindung fehlgeschlagen: " ++ (get r "error"))
+            mem.meta_set dbh ("pending_mcp_add:" ++ id) ""
+        return nil
+    if (len data) > 11 && (substring data 0 11) == "mcp_add_no:"
+        id: substring data 11 (len data)
+        mem.meta_set dbh ("pending_mcp_add:" ++ id) ""
+        tel.tel_send_message token cid "Verstanden, nicht hinzugefuegt."
+        return nil
     --! /settings menu (see settings_menu_text/settings_kb above): each
     --! button rotates its OWN setting to the next value (setting_cycle in
     --! memory.pipe) and rebuilds the menu directly in the same message
@@ -2089,28 +2171,28 @@ COST_STATE: {session_id: nil, last_calls: -1}
 --! Sandbox + AI + MCP + gremium in one go, shared between Telegram and
 --! web mode. Assumes secrets/config have already been read (before the
 --! sandbox!) — see the comments at setup_ai/setup_sandbox.
+--! Lazy MCP loading: no server is connected here anymore (this used to be
+--! a blocking mcp.connect_servers all_mcp_servers over EVERY configured
+--! server — confirmed live via journalctl at ~15s for 11 servers, on
+--! every single restart). Connecting now happens on demand: a fast
+--! keyword pre-match before each message (ensure_mcp_for_task, called
+--! from handle_message) or, failing that, the planer's own
+--! 'werkzeug_aktivieren' tool. See modules/swarm.pipe's
+--! set_available_servers/tool_werkzeug_aktivieren and the doc comment at
+--! init_gremium's "available but inactive" block for the full mechanism.
+--! setup_sandbox still needs the full config (command basenames for the
+--! exec whitelist), not live connections, so it is completely unaffected
+--! by this.
 fn setup_core mcp_servers deepseek_key
     setup_sandbox all_mcp_servers
     setup_ai deepseek_key
-    mcp_results: mcp.connect_servers all_mcp_servers
-    --! DB handle moved earlier (previously only opened after the connect
-    --! loop, for session_id), so that an MCP server that fails on EVERY
-    --! restart (e.g. an expired Google token) also ends up in the
-    --! error_log — not just in the journal — and so shows up via
-    --! self-diagnosis (sched_tick "selbstdiagnose") instead of only by
-    --! chance during a journalctl glance.
     hl: mem.open_locked nil
     dbh0: get hl "h"
-    for r in mcp_results
-        if get r "ok"
-            print ("MCP connected: " ++ (get r "alias"))
-        else
-            print ("MCP failed (" ++ (get r "alias") ++ "): " ++ (get r "error"))
-            mem.log_error dbh0 ("mcp_connect_startup:" ++ (get r "alias")) (get r "error")
     --! MUST be set before init_gremium: the Google specialist builds its
     --! system prompt (incl. the configured email) only ONCE at startup,
     --! setting it later would have no effect.
     grm.set_google_email user_google_email
+    grm.set_available_servers all_mcp_servers
     grm.init_gremium 0
     grm.set_tz_offset tz_offset
     set COST_STATE "session_id" (mem.next_session_id dbh0)
@@ -2188,6 +2270,26 @@ for configured_server in mcp_servers
     push all_mcp_servers configured_server
 for auto_server in mcp_auto_servers
     push all_mcp_servers auto_server
+--! Previously user-approved MCP servers (see handle_callback's
+--! "mcp_add_yes:" branch/tool_mcp_server_vorschlagen) — a durable,
+--! process-wide meta key, so an approved server survives a restart and
+--! flows through the exact same lazy-connect path as a .env-configured
+--! one (ensure_mcp_for_task/werkzeug_aktivieren), no special-casing.
+--! Short-lived DB open/close, same pattern used throughout this file for
+--! an isolated meta read/write (see poll_once's telegram_offset handling)
+--! — MUST happen before sandbox activation, like resolve_all_env above.
+hl_custom: mem.open_locked nil
+dbh_custom: get hl_custom "h"
+custom_raw: mem.meta_get dbh_custom "custom_mcp_servers"
+if custom_raw != nil && custom_raw != ""
+    try
+        custom_list: parse_json custom_raw
+        custom_list: mcp.resolve_all_env custom_list
+        for cs in custom_list
+            push all_mcp_servers cs
+    catch e_custom
+        print ("WARNING: custom_mcp_servers meta is invalid JSON, ignored: " ++ (to_str e_custom))
+mem.close_locked hl_custom
 user_google_email: nil
 for s in all_mcp_servers
     if (get s "alias") == "google"

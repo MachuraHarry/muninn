@@ -10,10 +10,12 @@ import "modules/docker_tools.pipe" as dt
 import "modules/telegram.pipe" as tel
 
 --! Shared, mutable state: current DB handle + chat context for the tools.
---! tz_offset/token are set once at startup (set_tz_offset/set_token), dbh/cid
---! per run (run_gremium) — token+cid are needed by tool_bild_senden/
---! tool_datei_senden to be able to send to Telegram at all.
-STATE: {dbh: nil, cid: nil, tz_offset: 0, token: nil, google_email: nil}
+--! tz_offset/token/available_servers are set once at startup
+--! (set_tz_offset/set_token/set_available_servers), dbh/cid per run
+--! (run_gremium) — token+cid are needed by tool_bild_senden/
+--! tool_datei_senden to be able to send to Telegram at all. mcp_activated
+--! is reset per run by run_gremium_stream (see tool_werkzeug_aktivieren).
+STATE: {dbh: nil, cid: nil, tz_offset: 0, token: nil, google_email: nil, available_servers: [], mcp_activated: []}
 
 fn cur_dbh _
     get STATE "dbh"
@@ -21,6 +23,16 @@ fn cur_dbh _
 --! Set once at startup (see setup_core in muninn.pipe).
 export fn set_tz_offset off
     set STATE "tz_offset" off
+    nil
+
+--! Set once at startup (see setup_core in muninn.pipe): the FULL configured
+--! server list (regardless of connection state), so init_gremium can tell
+--! agents which specialists exist but aren't active yet, and
+--! tool_werkzeug_aktivieren can look up a server's config by alias to
+--! connect it on demand. See the lazy-MCP-loading plan — setup_core no
+--! longer eagerly connects every server at boot.
+export fn set_available_servers list
+    set STATE "available_servers" list
     nil
 
 --! Set once at startup (see setup_core in muninn.pipe). Kept separate from
@@ -91,6 +103,135 @@ fn tool_rezepte_suchen query
     for r in rs
         out: out ++ "- " ++ r ++ "\n"
     out
+
+--! Tool: connects one configured-but-not-yet-active MCP server on demand
+--! (see the lazy-MCP-loading plan — Muninn no longer eagerly connects
+--! every server at boot, only the ones a message's keywords already
+--! matched, see ensure_mcp_for_task in muninn.pipe). CRITICAL LIMITATION
+--! the caller must be told (see the tool description in init_gremium):
+--! ai_swarm_stream freezes the whole agent/tool set ONCE at the start of
+--! THIS run — a specialist activated here, even though init_gremium is
+--! re-run synchronously right below and DOES take effect immediately at
+--! the process level, is only visible to the NEXT run_gremium_stream
+--! call, never to the rest of THIS one. muninn.pipe's handle_message
+--! detects this (via mcp_activated on the returned result, see
+--! run_gremium_stream below) and automatically retries the whole task
+--! once — so from the user's side it still resolves in one exchange, just
+--! with one extra round-trip.
+fn tool_werkzeug_aktivieren alias
+    if (mcp.is_connected alias)
+        return "Werkzeug '" ++ alias ++ "' ist bereits aktiv."
+    server: nil
+    for s in (get STATE "available_servers")
+        if (get s "alias") == alias
+            server: s
+    if server == nil
+        known: []
+        for s in (get STATE "available_servers")
+            a: get s "alias"
+            if a != nil && !(mcp.is_connected a)
+                push known a
+        return "Unbekannter Alias '" ++ alias ++ "'. Tatsaechlich verfuegbar, aber noch nicht aktiv: " ++ (join known ", ")
+    results: mcp.connect_servers [server]
+    r: at results 0
+    if (get r "ok") == true
+        push (get STATE "mcp_activated") alias
+        init_gremium 0
+        "Werkzeug '" ++ alias ++ "' aktiviert. Es steht erst im NAECHSTEN Versuch fuer diese Aufgabe zur Verfuegung, nicht in dieser Runde — leite JETZT normal an einen der bereits aktiven Agenten weiter (oder an registrator, falls nichts weiter noetig ist)."
+    else
+        "Aktivierung von '" ++ alias ++ "' fehlgeschlagen: " ++ (get r "error")
+
+--! Tool: searches the official MCP server registry (registry.modelcontextprotocol.io)
+--! for a server Muninn doesn't have yet. Only surfaces servers Muninn can
+--! actually connect to (npm-packaged stdio servers — Muninn has no
+--! generic HTTP/streamable-transport MCP client, so "remotes"-only
+--! registry entries, e.g. ones needing a third-party hub's bearer token,
+--! are silently skipped, they don't fit at all) and, among those, only
+--! ones needing no extra secret Harry would have to supply (no
+--! collection-a-new-API-key UX exists yet) — such entries are still
+--! MENTIONED, not silently dropped, so the model can tell the user
+--! honestly instead of pretending nothing was found.
+fn tool_mcp_registry_suchen query
+    url: "https://registry.modelcontextprotocol.io/v0.1/servers?search=" ++ (url_encode query)
+    data: nil
+    try
+        data: http_get_json url
+    catch e
+        return "Registry-Suche fehlgeschlagen: " ++ (to_str e)
+    servers: nil
+    if data != nil
+        servers: get data "servers"
+    if servers == nil || (len servers) == 0
+        return "Keine Treffer in der MCP-Registry fuer '" ++ query ++ "'."
+    matches: ""
+    n_matches: 0
+    skipped: ""
+    for entry in servers
+        srv: get entry "server"
+        if srv != nil && n_matches < 5
+            packages: get srv "packages"
+            found: nil
+            if packages != nil
+                for pkg in packages
+                    if found == nil && (get pkg "registryType") == "npm"
+                        transport: get pkg "transport"
+                        if transport != nil && (get transport "type") == "stdio"
+                            found: pkg
+            if found != nil
+                needs_secret: false
+                envs: get found "environmentVariables"
+                if envs != nil
+                    for ev in envs
+                        if (get ev "isRequired") == true
+                            needs_secret: true
+                name: get srv "name"
+                desc: get srv "description"
+                ident: get found "identifier"
+                if needs_secret
+                    skipped: skipped ++ "- " ++ name ++ " (braucht einen API-Key, uebersprungen)\n"
+                else
+                    matches: matches ++ "- " ++ name ++ " — " ++ desc ++ " (npm: " ++ ident ++ ")\n"
+                    n_matches: n_matches + 1
+    out: ""
+    if matches != ""
+        out: "Treffer:\n" ++ matches
+    if skipped != ""
+        out: out ++ "Ausserdem gefunden, aber uebersprungen:\n" ++ skipped
+    if out == ""
+        out: "Keine passenden, direkt nutzbaren Treffer (nur Remote-/HTTP-Server gefunden, die Muninn nicht verbinden kann)."
+    out
+
+--! Tool: proposes adding a new MCP server discovered via
+--! mcp_registry_suchen — sends Harry a Yes/No button, NEVER installs
+--! anything itself. See handle_callback's "mcp_add_yes:"/"mcp_add_no:"
+--! branches in muninn.pipe for what actually happens on tap.
+fn tool_mcp_server_vorschlagen alias name beschreibung npm_paket
+    if alias == nil || alias == ""
+        return "Kein Alias angegeben."
+    if (mcp.is_connected alias)
+        return "Alias '" ++ alias ++ "' ist bereits verbunden."
+    for s in (get STATE "available_servers")
+        if (get s "alias") == alias
+            return "Alias '" ++ alias ++ "' ist bereits konfiguriert."
+    h: cur_dbh 0
+    if h == nil
+        return "Keine Datenbank verbunden."
+    tok: get STATE "token"
+    cid: get STATE "cid"
+    if tok == nil || cid == nil
+        return "Kein Telegram-Kontext verfuegbar, kann keinen Vorschlag senden."
+    id: (to_str now) ++ "_" ++ (to_str (random_range 100000 999999))
+    mem.meta_set h ("pending_mcp_add:" ++ id) (to_json {alias: alias, name: name, beschreibung: beschreibung, npm_paket: npm_paket})
+    kb: []
+    row: []
+    push row (tel.tel_button "✅ Ja, hinzufuegen" ("mcp_add_yes:" ++ id))
+    push row (tel.tel_button "❌ Nein" ("mcp_add_no:" ++ id))
+    push kb row
+    text: "🔌 Neuer MCP-Server gefunden:\n\n**" ++ name ++ "** (`" ++ alias ++ "`)\n" ++ beschreibung ++ "\nnpm: " ++ npm_paket ++ "\n\nLaeuft bei Zustimmung als uneingeschraenkter lokaler Prozess (`npx -y " ++ npm_paket ++ "`) — bitte nur bestaetigen, wenn du der Quelle vertraust."
+    sendres: tel.tel_send_message_kb tok cid text kb
+    if (get sendres "ok") == false
+        return "Senden des Vorschlags fehlgeschlagen: " ++ (to_str (get sendres))
+    "Vorschlag an Harry gesendet, wartet auf Bestaetigung."
 
 --! Tool: permanently remember a piece of information.
 fn tool_merken content kind
@@ -669,8 +810,14 @@ export fn init_gremium _
     ai_tool "icon_holen" "Find a free, open-source icon (200'000+ icons, no API key) matching a search term and save it as a ready-to-use PNG file — for embedding into a presentation/document (werkzeug_praesentation/werkzeug_dokument) or sending directly." {suchbegriff: "What the icon should show, in English (e.g. 'chart', 'warning', 'github', 'email')", farbe: "Optional hex color e.g. '#ff6600' — empty/omit for the icon's default color", groesse: "Optional pixel size, e.g. '128' — empty/omit for 128"} tool_icon_holen
     ai_tool "ziel_anlegen" "Create a long-term goal (a genuine ongoing objective the user wants to work towards over time — NOT a one-off task that's finished once this conversation ends). Shows up in /goals on Telegram and the web dashboard." {text: "Short, clear description of the goal"} tool_ziel_anlegen
     ai_tool "ziel_erledigt" "Mark a previously created goal as done, by its id." {id: "The goal's id"} tool_ziel_erledigt
+    --! Lazy MCP loading (see the doc comment at tool_werkzeug_aktivieren):
+    --! only 'planer' gets this tool — it's the router that sees the
+    --! "available but inactive" list built below and decides handoffs.
+    ai_tool "werkzeug_aktivieren" "Activates a configured-but-not-yet-connected MCP specialist by alias, from the 'additionally available but NOT currently active' list below. Takes effect on the NEXT attempt at this task, NEVER this same round — after calling this, hand off normally to whichever agent can already help with what's possible right now, do not wait/retry yourself." {alias: "The exact alias from the inactive list, e.g. 'docker'"} tool_werkzeug_aktivieren
+    ai_tool "mcp_registry_suchen" "Search the official MCP server registry for a tool Muninn doesn't have connected AND isn't in the 'available but inactive' list either (check both lists FIRST — this is for something genuinely missing). Only returns servers Muninn could actually connect to (npm/stdio) and that need no extra API key setup. Use 'mcp_server_vorschlagen' afterward to propose adding one you found — NEVER claim you've added or connected something just from a search result." {query: "What kind of tool/service you're looking for, e.g. 'weather', 'slack'"} tool_mcp_registry_suchen
+    ai_tool "mcp_server_vorschlagen" "Propose adding a NEW MCP server you found via 'mcp_registry_suchen' — sends the user a message with Yes/No buttons. NEVER connects or persists anything by itself; only the user's own button tap does that. Call this only after a real registry search found a concrete npm/stdio match, never speculatively or from general knowledge." {alias: "Short, unique alias for the new server, e.g. 'weather'", name: "The server's name from the registry result", beschreibung: "One short sentence on what it does", npm_paket: "The exact npm package identifier from the registry result"} tool_mcp_server_vorschlagen
 
-    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen", "docker_pull_image", "docker_create_container", "docker_hintergrund_setup", "docker_job_status", "docker_jobs_abbrechen", "docker_environments_auflisten", "docker_environment_registrieren", "docker_environment_entfernen", "bild_senden", "datei_senden", "hintergrund_fortsetzen", "rezept_speichern", "rezepte_suchen", "ziel_anlegen", "ziel_erledigt", "bericht_veroeffentlichen", "icon_holen"]
+    local_names: ["erinnerungen_suchen", "merken", "web_search", "web_fetch", "merken_quelle", "erinnerung_planen", "docker_pull_image", "docker_create_container", "docker_hintergrund_setup", "docker_job_status", "docker_jobs_abbrechen", "docker_environments_auflisten", "docker_environment_registrieren", "docker_environment_entfernen", "bild_senden", "datei_senden", "hintergrund_fortsetzen", "rezept_speichern", "rezepte_suchen", "ziel_anlegen", "ziel_erledigt", "bericht_veroeffentlichen", "icon_holen", "werkzeug_aktivieren", "mcp_registry_suchen", "mcp_server_vorschlagen"]
     --! P5: ONE focused specialist agent PER connected MCP server instead of
     --! a jack-of-all-trades with every tool — automatically scales with
     --! every new MCP server (no code rework needed), and keeps the AI's
@@ -678,6 +825,21 @@ export fn init_gremium _
     --! it with one huge flat list across very many tools.
     mcp_groups: mcp.discovered_tools_by_source local_names
     has_mcp: (len mcp_groups) > 0
+    --! Lazy MCP loading: not every configured server is connected yet (see
+    --! muninn.pipe's setup_core/ensure_mcp_for_task/werkzeug_aktivieren
+    --! above) — list the ones that AREN'T, so planer/faktenwaechter/
+    --! registrator know they exist and can activate one via
+    --! 'werkzeug_aktivieren' instead of wrongly claiming a capability
+    --! doesn't exist at all just because it isn't active THIS moment.
+    inactive_desc: ""
+    for s in (get STATE "available_servers")
+        a: get s "alias"
+        if a != nil && a != "" && !(mcp.is_connected a)
+            kw: get s "keywords"
+            kw_text: ""
+            if kw != nil && (len kw) > 0
+                kw_text: " (" ++ (join kw ", ") ++ ")"
+            inactive_desc: inactive_desc ++ "- '" ++ a ++ "'" ++ kw_text ++ "\n"
     mcp_names: []
     specialist_names: []
     specialist_desc: ""
@@ -762,7 +924,10 @@ export fn init_gremium _
         tools_desc: tools_desc ++ ", plus externally connected via MCP: " ++ (join mcp_names ", ") ++ ". Available tool specialists in the gremium:\n" ++ specialist_desc
     else
         tools_desc: tools_desc ++ ". Currently NO external MCP server is connected — actions in third-party systems (cloud services, Google Workspace, GitHub, etc.) are therefore NOT possible until a suitable MCP server is configured."
-    tools_desc: tools_desc ++ " If a requested tool is missing from this list, honestly say it isn't currently connected — NEVER blanketly claim 'I have no access to tools' when this list isn't empty.\n\n"
+    tools_desc: tools_desc ++ " If a requested tool is missing from this list, honestly say it isn't currently connected — NEVER blanketly claim 'I have no access to tools' when this list isn't empty."
+    if inactive_desc != ""
+        tools_desc: tools_desc ++ " Additionally available but NOT currently active (lazy loading — only connects when actually needed):\n" ++ inactive_desc ++ "planer: call 'werkzeug_aktivieren' with one of these aliases if the CURRENT task genuinely needs it. It only takes effect on the NEXT attempt at this task, never this same round — after activating, hand off normally to whichever agent fits best for what you can already do right now (or 'kritiker'/'registrator' if nothing more is possible yet); do NOT wait or retry yourself."
+    tools_desc: tools_desc ++ "\n\n"
 
     --! "registrator" is deliberately included here (not just for
     --! kritiker_handoff): pure image-generation requests ('make me an
@@ -779,9 +944,9 @@ export fn init_gremium _
         push kritiker_handoff sn
         push faktenwaechter_handoff sn
 
-    swarm_agent "planer" {system: SELF_ID ++ tools_desc ++ HANDOFF_RULE ++ HONESTY_RULE ++ SECURITY_HONESTY_RULE ++ "Du bist der Planer im inneren Gremium von Muninn, einem persoenlichen KI-Agenten mit Langzeitgedaechtnis. Analysiere die Nutzeranfrage. Bei MEHRSCHRITTIGEN oder komplexen Aufgaben (mehrere Teilschritte oder mehrere Werkzeuge noetig): rufe ZUERST 'rezepte_suchen' auf — gibt es ein gespeichertes Rezept fuer genau diese Art Aufgabe, folge dessen Schritten (Weiterleitungen/Reihenfolge entsprechend dem Rezept). Zerlege grosse Aufgaben in klare Teilschritte und steuere sie der Reihe nach an die passenden Spezialisten; wiederholte Einzelschritte laufen ueber die Weiterleitungen der Spezialisten zurueck zu dir, dann gibst du den naechsten Teilschritt frei. Ist es eine Meta-Frage ueber Muninn selbst ODER seine Werkzeuge/Faehigkeiten, leite trotzdem an 'faktenwaechter' weiter (der beantwortet sie direkt aus dem Selbstwissen/der Werkzeugliste oben). Bei sonstigen Fakten- oder Gedaechtnisfragen leite ebenfalls an 'faktenwaechter' weiter. Verlangt die Anfrage RECHERCHE (z.B. 'suche im Netz', 'aktuelle Nachrichten') UND zusaetzlich EIN ERGEBNIS-WERKZEUG (z.B. 'schreib es in ein Dokument', 'als Praesentation') — auch 'Bericht'/'Report'/'Studie'/'Gutachten' zaehlen als Dokument-Ergebnis-Anfrage — leite ZUERST an 'faktenwaechter' weiter, NICHT direkt an den werkzeug_<alias>-Spezialisten: der recherchiert und reicht danach selbst an den passenden Spezialisten weiter, sobald er echte Inhalte hat. 'werkzeug_browser' ist NUR fuer echte Website-Interaktion (navigieren, klicken, Formulare, Screenshots) — NICHT fuer allgemeine Web-Recherche/Nachrichten, dafuer ist 'faktenwaechter' (web_search/web_fetch) zustaendig. Erfordert die Anfrage NUR ein konkretes externes Werkzeug ohne vorherige Recherche, leite an den PASSENDEN Werkzeug-Spezialisten aus der Liste oben weiter (nicht an einen falschen — waehle anhand der dort aufgefuehrten Werkzeugnamen). Verlangt die Anfrage NUR ein NEU zu generierendes Bild (z.B. 'erstelle/generiere/zeichne mir ein Bild von...') OHNE Recherche oder sonstige Aufgabe, leite DIREKT an 'registrator' weiter — der hat das Bild-Werkzeug 'bild_erstellen', kein Umweg ueber 'faktenwaechter'/'kritiker' noetig. Verlangt die Anfrage, laufende Hintergrund-Aufgaben/Docker-Jobs abzubrechen/zu stoppen, leite DIREKT an 'registrator' weiter (der hat 'docker_jobs_abbrechen') — das ist zeitkritisch, kein Umweg ueber Recherche/Kritik noetig. Siehst du den Hinweis '[SYSTEM] Only N of M rounds remain' bei einer mehrschrittigen, noch nicht fertigen Aufgabe: leite SOFORT an 'registrator' weiter (der nutzt 'hintergrund_fortsetzen') statt mitten in der Zerlegung zu scheitern. Sonst leite an 'kritiker' weiter. Gib selbst NIE die Endantwort und NIE internes Reasoning aus.", tools: ["rezepte_suchen"], handoff: planer_handoff}
+    swarm_agent "planer" {system: SELF_ID ++ tools_desc ++ HANDOFF_RULE ++ HONESTY_RULE ++ SECURITY_HONESTY_RULE ++ "Du bist der Planer im inneren Gremium von Muninn, einem persoenlichen KI-Agenten mit Langzeitgedaechtnis. Analysiere die Nutzeranfrage. Bei MEHRSCHRITTIGEN oder komplexen Aufgaben (mehrere Teilschritte oder mehrere Werkzeuge noetig): rufe ZUERST 'rezepte_suchen' auf — gibt es ein gespeichertes Rezept fuer genau diese Art Aufgabe, folge dessen Schritten (Weiterleitungen/Reihenfolge entsprechend dem Rezept). Zerlege grosse Aufgaben in klare Teilschritte und steuere sie der Reihe nach an die passenden Spezialisten; wiederholte Einzelschritte laufen ueber die Weiterleitungen der Spezialisten zurueck zu dir, dann gibst du den naechsten Teilschritt frei. Ist es eine Meta-Frage ueber Muninn selbst ODER seine Werkzeuge/Faehigkeiten, leite trotzdem an 'faktenwaechter' weiter (der beantwortet sie direkt aus dem Selbstwissen/der Werkzeugliste oben). Bei sonstigen Fakten- oder Gedaechtnisfragen leite ebenfalls an 'faktenwaechter' weiter. Verlangt die Anfrage RECHERCHE (z.B. 'suche im Netz', 'aktuelle Nachrichten') UND zusaetzlich EIN ERGEBNIS-WERKZEUG (z.B. 'schreib es in ein Dokument', 'als Praesentation') — auch 'Bericht'/'Report'/'Studie'/'Gutachten' zaehlen als Dokument-Ergebnis-Anfrage — leite ZUERST an 'faktenwaechter' weiter, NICHT direkt an den werkzeug_<alias>-Spezialisten: der recherchiert und reicht danach selbst an den passenden Spezialisten weiter, sobald er echte Inhalte hat. 'werkzeug_browser' ist NUR fuer echte Website-Interaktion (navigieren, klicken, Formulare, Screenshots) — NICHT fuer allgemeine Web-Recherche/Nachrichten, dafuer ist 'faktenwaechter' (web_search/web_fetch) zustaendig. Erfordert die Anfrage NUR ein konkretes externes Werkzeug ohne vorherige Recherche, leite an den PASSENDEN Werkzeug-Spezialisten aus der Liste oben weiter (nicht an einen falschen — waehle anhand der dort aufgefuehrten Werkzeugnamen). Verlangt die Anfrage NUR ein NEU zu generierendes Bild (z.B. 'erstelle/generiere/zeichne mir ein Bild von...') OHNE Recherche oder sonstige Aufgabe, leite DIREKT an 'registrator' weiter — der hat das Bild-Werkzeug 'bild_erstellen', kein Umweg ueber 'faktenwaechter'/'kritiker' noetig. Verlangt die Anfrage, laufende Hintergrund-Aufgaben/Docker-Jobs abzubrechen/zu stoppen, leite DIREKT an 'registrator' weiter (der hat 'docker_jobs_abbrechen') — das ist zeitkritisch, kein Umweg ueber Recherche/Kritik noetig. Siehst du den Hinweis '[SYSTEM] Only N of M rounds remain' bei einer mehrschrittigen, noch nicht fertigen Aufgabe: leite SOFORT an 'registrator' weiter (der nutzt 'hintergrund_fortsetzen') statt mitten in der Zerlegung zu scheitern. Sonst leite an 'kritiker' weiter. Gib selbst NIE die Endantwort und NIE internes Reasoning aus.", tools: ["rezepte_suchen", "werkzeug_aktivieren"], handoff: planer_handoff}
 
-    swarm_agent "faktenwaechter" {system: SELF_ID ++ tools_desc ++ HANDOFF_RULE ++ TOOL_DISCIPLINE_RULE ++ RESULT_HONESTY_RULE ++ MEMORY_HONESTY_RULE ++ SECURITY_HONESTY_RULE ++ "Du bist der Faktenwaechter im Gremium. Ist die Frage eine Meta-Frage ueber Muninn selbst ODER seine Werkzeuge/Faehigkeiten (z.B. 'kannst du mit deinen Werkzeugen X tun'), beantworte sie DIREKT aus dem Selbstwissen/der Werkzeugliste oben, OHNE 'web_search' aufzurufen — das Internet weiss nichts ueber DEINE Werkzeugverbindungen. Auch dann rufst du danach dein Handoff-Werkzeug 'kritiker' auf, du gibst NIE selbst die finale Antwort aus. Bei allen anderen Fragen stuetze jede Aussage auf Muninns Gedaechtnis UND das Internet: rufe 'erinnerungen_suchen' auf, um relevante Erinnerungen zu finden; wenn das Gedaechtnis nichts hergibt, nutze 'web_search' und 'web_fetch', um die Antwort im Internet zu recherchieren. Verlangt die Anfrage NACH der Recherche zusaetzlich ein ERGEBNIS-WERKZEUG (z.B. 'schreib es in ein Dokument und schick es mir'), leite deine recherchierten Inhalte DIREKT an den passenden werkzeug_<alias>-Spezialisten weiter (z.B. 'werkzeug_dokument'), NICHT an 'kritiker' — der kann selbst keine Dokumente/Praesentationen erzeugen. Sonst rufe IMMER 'kritiker' auf, um deine fundierte Antwort weiterzugeben. Siehst du den Hinweis '[SYSTEM] Only N of M rounds remain' — leite JETZT SOFORT an 'kritiker' weiter (auch mit unvollstaendiger Recherche), NICHT an einen werkzeug_<alias>-Spezialisten oder zurueck an 'planer' — 'kritiker' erreicht 'registrator' in nur einem weiteren Schritt, jeder andere Umweg kostet Runden, die dann fehlen.", tools: ["erinnerungen_suchen", "web_search", "web_fetch"], handoff: faktenwaechter_handoff}
+    swarm_agent "faktenwaechter" {system: SELF_ID ++ tools_desc ++ HANDOFF_RULE ++ TOOL_DISCIPLINE_RULE ++ RESULT_HONESTY_RULE ++ MEMORY_HONESTY_RULE ++ SECURITY_HONESTY_RULE ++ "Du bist der Faktenwaechter im Gremium. Ist die Frage eine Meta-Frage ueber Muninn selbst ODER seine Werkzeuge/Faehigkeiten (z.B. 'kannst du mit deinen Werkzeugen X tun'), beantworte sie DIREKT aus dem Selbstwissen/der Werkzeugliste oben, OHNE 'web_search' aufzurufen — das Internet weiss nichts ueber DEINE Werkzeugverbindungen. Auch dann rufst du danach dein Handoff-Werkzeug 'kritiker' auf, du gibst NIE selbst die finale Antwort aus. Bei allen anderen Fragen stuetze jede Aussage auf Muninns Gedaechtnis UND das Internet: rufe 'erinnerungen_suchen' auf, um relevante Erinnerungen zu finden; wenn das Gedaechtnis nichts hergibt, nutze 'web_search' und 'web_fetch', um die Antwort im Internet zu recherchieren. Verlangt die Anfrage NACH der Recherche zusaetzlich ein ERGEBNIS-WERKZEUG (z.B. 'schreib es in ein Dokument und schick es mir'), leite deine recherchierten Inhalte DIREKT an den passenden werkzeug_<alias>-Spezialisten weiter (z.B. 'werkzeug_dokument'), NICHT an 'kritiker' — der kann selbst keine Dokumente/Praesentationen erzeugen. Sonst rufe IMMER 'kritiker' auf, um deine fundierte Antwort weiterzugeben. Siehst du den Hinweis '[SYSTEM] Only N of M rounds remain' — leite JETZT SOFORT an 'kritiker' weiter (auch mit unvollstaendiger Recherche), NICHT an einen werkzeug_<alias>-Spezialisten oder zurueck an 'planer' — 'kritiker' erreicht 'registrator' in nur einem weiteren Schritt, jeder andere Umweg kostet Runden, die dann fehlen.", tools: ["erinnerungen_suchen", "web_search", "web_fetch", "mcp_registry_suchen", "mcp_server_vorschlagen"], handoff: faktenwaechter_handoff}
 
     swarm_agent "kritiker" {system: HANDOFF_RULE ++ MEMORY_HONESTY_RULE ++ SECURITY_HONESTY_RULE ++ LINK_RELAY_RULE ++ "Du bist der Kritiker im Gremium. Pruefe die bisherige Antwort auf Luecken, Widersprueche und Unklarheiten und verbessere sie zu einer praezisen, ehrlichen Antwort. Wenn Fakten fehlen, leite an 'faktenwaechter' zurueck. Sonst rufe IMMER 'registrator' auf, um die verbesserte Antwort weiterzugeben — auch wenn die Antwort schon gut ist oder eine Aufgabe (Dokument/Praesentation/...) nur teilweise erledigt wurde: der Registrator schickt trotzdem das bisherige Ergebnis, ANSTATT dass du hier weiter zwischen Agenten hin- und herspringst. Siehst du den Hinweis '[SYSTEM] Only N of M rounds remain' — leite JETZT SOFORT an 'registrator' weiter, egal wie unvollstaendig die Faktenlage ist (der kann bei echtem Zeitdruck 'hintergrund_fortsetzen' aufrufen); leite in diesem Fall NIEMALS zurueck an 'faktenwaechter', das kostet nur weitere Runden, die dann fuer 'registrator' fehlen.", handoff: kritiker_handoff}
 
@@ -843,8 +1008,19 @@ export fn run_gremium dbh cid task
 --! stops the run immediately, res then has aborted=true/abort_reason set
 --! (see apply_registrator_backstop above). A non-empty "inject" steers the
 --! run with a fresh instruction without stopping it.
+--!
+--! mcp_activated: reset to [] here, then embedded on the returned map — see
+--! tool_werkzeug_aktivieren, which pushes onto it whenever it connects a
+--! server mid-run. A non-empty list on the result tells the caller
+--! (muninn.pipe's handle_message) that a specialist only became available
+--! AFTER this run's frozen agent snapshot was taken, so it never actually
+--! got used this round — the caller retries the same task once more so the
+--! newly active specialist gets a real chance.
 export fn run_gremium_stream dbh cid task on_update round_check
     set STATE "dbh" dbh
     set STATE "cid" cid
+    set STATE "mcp_activated" []
     res: ai_swarm_stream task "planer" 150 on_update round_check
-    apply_registrator_backstop res
+    res: apply_registrator_backstop res
+    set res "mcp_activated" (get STATE "mcp_activated")
+    res
