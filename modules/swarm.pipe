@@ -53,21 +53,32 @@ export fn set_google_email email
 --! Resolves a mostly RELATIVE path reported by a tool (e.g. a Playwright
 --! screenshot) into an absolute path. Muninn always runs from /root/muninn
 --! (see all start commands in muninn.pipe).
---! Resolves a tool-supplied path against the muninn directory, rejecting
---! anything that would escape it (an absolute path, or "../" traversal in
---! a relative one) — without this, tool_bild_senden/tool_datei_senden
---! would happily read+send ANY host file the process can access (e.g.
---! .env) if the AI is ever tricked into supplying such a path (a
---! prompt-injected web page, a compromised MCP tool response). Returns
---! nil on rejection — callers must check for that instead of trusting a
---! non-empty string is always safe to read.
+--! Trusted root directories a tool-supplied path is allowed to resolve
+--! into (see resolve_muninn_path). Besides Muninn's own tree, this
+--! includes slideshot-mcp's fixed, non-configurable output directory
+--! (confirmed via its own 'health_check' tool: "outDir":
+--! "/tmp/slideshot-output") — without it, tool_bild_senden/tool_datei_senden
+--! reject every slideshot render as "outside the allowed directory" (live
+--! observed: forces a clumsy background-task workaround instead of a
+--! plain send). Add further externally-trusted tool output directories
+--! here as they come up, one entry per line.
+TRUSTED_PATH_ROOTS: ["/root/muninn/", "/tmp/slideshot-output/"]
+
+--! Resolves a tool-supplied path against the trusted roots (TRUSTED_PATH_ROOTS
+--! above), rejecting anything that would escape ALL of them (an absolute
+--! path elsewhere, or "../" traversal out of one) — without this,
+--! tool_bild_senden/tool_datei_senden would happily read+send ANY host
+--! file the process can access (e.g. .env) if the AI is ever tricked into
+--! supplying such a path (a prompt-injected web page, a compromised MCP
+--! tool response). Returns nil on rejection — callers must check for that
+--! instead of trusting a non-empty string is always safe to read.
 fn resolve_muninn_path path
     if path == nil || path == ""
         return nil
-    base: "/root/muninn/"
+    default_root: at TRUSTED_PATH_ROOTS 0
     full: path
     if !((len path) > 0 && (substring path 0 1) == "/")
-        full: base ++ path
+        full: default_root ++ path
     --! Normalize ".."/"." segments (no path-normalization builtin in Pipe)
     --! before checking the prefix — a raw substring/prefix check on the
     --! unnormalized string would miss "/root/muninn/../../etc/passwd".
@@ -80,9 +91,10 @@ fn resolve_muninn_path path
         else if seg != "." && seg != ""
             push out seg
     normalized: "/" ++ (join out "/")
-    if (len normalized) < (len base) || (substring normalized 0 (len base)) != base
-        return nil
-    normalized
+    for root in TRUSTED_PATH_ROOTS
+        if (len normalized) >= (len root) && (substring normalized 0 (len root)) == root
+            return normalized
+    nil
 
 --! Tool: fetch relevant memories from the soul.
 fn tool_erinnerungen_suchen query
@@ -594,7 +606,7 @@ fn tool_bild_senden path caption
         return "Kein Telegram-Kontext verfuegbar, kann kein Bild senden."
     full_path: resolve_muninn_path path
     if full_path == nil
-        return "Ungueltiger Pfad (ausserhalb von /root/muninn/): " ++ (to_str path)
+        return "Ungueltiger Pfad (ausserhalb der erlaubten Verzeichnisse): " ++ (to_str path)
     if !(file_exists full_path)
         return "Datei nicht gefunden: " ++ full_path
     res: tel.tel_send_photo tok cid full_path caption
@@ -612,13 +624,41 @@ fn tool_datei_senden path caption
         return "Kein Telegram-Kontext verfuegbar, kann keine Datei senden."
     full_path: resolve_muninn_path path
     if full_path == nil
-        return "Ungueltiger Pfad (ausserhalb von /root/muninn/): " ++ (to_str path)
+        return "Ungueltiger Pfad (ausserhalb der erlaubten Verzeichnisse): " ++ (to_str path)
     if !(file_exists full_path)
         return "Datei nicht gefunden: " ++ full_path
     res: tel.tel_send_document tok cid full_path caption
     if (get res "ok") == false
         return "Senden fehlgeschlagen: " ++ (to_str (get res))
     "Datei gesendet: " ++ full_path
+
+--! Tool: reads a local image file and returns it as a ready-to-embed
+--! "data:image/<type>;base64,<...>" URI — for the slideshot specialist
+--! (see the "slideshot" extra_note below), which authors raw HTML itself
+--! and has no other way to get a real image (e.g. from icon_holen or
+--! bild_erstellen) INTO that HTML: slideshot-mcp's renderer only sees the
+--! HTML string it's given, not Muninn's filesystem, so a plain file path
+--! in <img src="..."> would not resolve. MIME type is guessed from the
+--! file extension (png/jpg/jpeg/webp/gif; unknown -> png, the common case
+--! for icon_holen/bild_erstellen output).
+fn tool_bild_als_base64 path
+    full_path: resolve_muninn_path path
+    if full_path == nil
+        return "Ungueltiger Pfad (ausserhalb der erlaubten Verzeichnisse): " ++ (to_str path)
+    if !(file_exists full_path)
+        return "Datei nicht gefunden: " ++ full_path
+    content: read_file full_path
+    if content == nil || content == ""
+        return "Datei ist leer oder nicht lesbar: " ++ full_path
+    ext: lower (at (split full_path ".") ((len (split full_path ".")) - 1))
+    mime: "image/png"
+    if ext == "jpg" || ext == "jpeg"
+        mime: "image/jpeg"
+    else if ext == "webp"
+        mime: "image/webp"
+    else if ext == "gif"
+        mime: "image/gif"
+    "data:" ++ mime ++ ";base64," ++ (base64_encode content)
 
 --! Maximum character count for a voice message — reading aloud is meant
 --! for short, casual replies, not long/content-heavy text (see the
@@ -875,6 +915,7 @@ export fn init_gremium _
     ai_tool "rezepte_suchen" "Fetch stored workflow recipes, to solve recurring tasks following a proven pattern." {query: "Keywords about the task"} tool_rezepte_suchen
     ai_tool "bericht_veroeffentlichen" "Publish a long text (research summary, report, article) as a Telegraph page instead of sending it as plain text (which gets cut off at Telegram's length limit) — Telegram shows Telegraph pages with its fast, native-feeling Instant View reader." {title: "Short, descriptive page title", text: "The full text, paragraphs separated by a blank line"} tool_bericht_veroeffentlichen
     ai_tool "icon_holen" "Find a free, open-source icon (200'000+ icons, no API key) matching a search term and save it as a ready-to-use PNG file — for embedding into a presentation/document (werkzeug_praesentation/werkzeug_dokument) or sending directly." {suchbegriff: "What the icon should show, in English (e.g. 'chart', 'warning', 'github', 'email')", farbe: "Optional hex color e.g. '#ff6600' — empty/omit for the icon's default color", groesse: "Optional pixel size, e.g. '128' — empty/omit for 128"} tool_icon_holen
+    ai_tool "bild_als_base64" "Read a local image file (e.g. from icon_holen or bild_erstellen) and return it as a ready-to-embed 'data:image/...;base64,...' URI — for werkzeug_slideshot, which authors raw HTML itself and has no other way to get a real image INTO that HTML (a plain file path in <img src=\"...\"> would not resolve inside the renderer)." {path: "Path to the image file (relative to /root/muninn or absolute)"} tool_bild_als_base64
     ai_tool "ziel_anlegen" "Create a long-term goal (a genuine ongoing objective the user wants to work towards over time — NOT a one-off task that's finished once this conversation ends). Shows up in /goals on Telegram and the web dashboard." {text: "Short, clear description of the goal"} tool_ziel_anlegen
     ai_tool "ziel_erledigt" "Mark a previously created goal as done, by its id." {id: "The goal's id"} tool_ziel_erledigt
     --! Lazy MCP loading (see the doc comment at tool_werkzeug_aktivieren):
@@ -965,6 +1006,21 @@ export fn init_gremium _
         if alias == "dokument"
             push gtools "icon_holen"
             extra_note: " Nutze 'word_create_document' EINMAL mit filename (IMMER unter '/root/muninn/mcp_data/<sprechender-name>.docx') — das legt die Datei direkt an, KEIN separater Speicher-Schritt noetig. Danach 'word_add_heading'/'word_add_paragraph' etc. mit demselben filename pro Abschnitt — jeder Aufruf schreibt sofort in die Datei. 'word_convert_to_pdf' NUR wenn der Nutzer ausdruecklich ein PDF wollte (nicht von dir aus versuchen — auf diesem Server ist dafuer kein LibreOffice/Word installiert, der Versuch schlaegt IMMER fehl und bringt nur eine unnoetige Fehlermeldung). Passt ein Icon thematisch zu einem Abschnitt, hole es VORHER mit 'icon_holen' (liefert einen lokalen PNG-Pfad) und fuege es per 'word_add_picture' ein — optional, nur wenn es das Dokument wirklich verbessert. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
+        if alias == "slideshot"
+            --! Live per direktem tool_call gegen den echten Server
+            --! (slideshot-mcp) verifiziertes Protokoll — ohne diese
+            --! Anleitung improvisiert die KI jedes Mal neu und produziert
+            --! inkonsistente Fehler (falsches Seitenverhaeltnis,
+            --! abgeschnittener Text, uebersprungene Zwischenschritte),
+            --! live beobachtet ueber mehrere unabhaengige Sessions. Der
+            --! Server ist fuer einen INTERAKTIVEN Client mit Rueckfrage-UI
+            --! gebaut (seine eigenen Tool-Antworten verlangen woertlich
+            --! "STOP. WAIT for the user..." vor jedem Schritt) — das gibt
+            --! es in Muninns autonomem Gremiums-Lauf nicht, deshalb muss
+            --! das hier explizit uebersteuert werden.
+            push gtools "icon_holen"
+            push gtools "bild_als_base64"
+            extra_note: " WICHTIGER HINWEIS: Die Tool-Antworten von slideshot_* verlangen an mehreren Stellen woertlich, auf eine Nutzer-Bestaetigung zu warten ('STOP. WAIT for the user...') — das ist fuer einen interaktiven Client gedacht, den es hier NICHT gibt. Arbeite STATTDESSEN alle Schritte OHNE echte Zwischen-Pause durch, die urspruengliche Anfrage IST bereits die Bestaetigung. Exakte Schrittfolge: (1) 'slideshot_discover_themes' aufrufen (liefert Themen/Formate). (2) 'slideshot_create_slides' mit NUR theme+mode:'default' aufrufen (noch OHNE html) — die Antwort enthaelt ein CSS-Template und ein 'dimensions'-Feld mit der exakten Ziel-Pixelgroesse. (3) Ein vollstaendiges HTML-Dokument selbst verfassen: pro Folie ein Element mit class='slide', GENAU in der von Schritt 2 gelieferten 'dimensions'-Groesse (niemals eine Groesse raten oder das 'portrait'-Preset annehmen), mit 'overflow:hidden' und ausreichend Innenabstand (gegen abgeschnittenen Text — Inhalt an der tatsaechlichen Textmenge ausrichten, nicht starr positionieren). Soll ein 9:16-Format geliefert werden (haeufigster Wunsch), gibt es dafuer KEIN eingebautes Preset ('portrait' ist 4:5, NICHT 9:16!) — in Schritt 2 explizit orientation:'custom' mit width:1080, height:1920 uebergeben. Fuer ein einzubettendes Bild (z.B. ein passendes Icon von 'icon_holen' oder ein KI-Bild von 'bild_erstellen') IMMER zuerst 'bild_als_base64' mit dem lokalen Dateipfad aufrufen und den zurueckgegebenen data:-URI direkt als <img src=\"...\"> ins HTML einsetzen — ein blosser Dateipfad funktioniert NICHT, der Renderer sieht nur den HTML-String. (4) 'slideshot_create_slides' ERNEUT aufrufen, diesmal MIT dem fertigen html-Parameter (plus denselben theme/mode/orientation-Werten) — das speichert die HTML-Datei. (5) SOFORT im selben Zug 'slideshot_render_slides' aufrufen (NICHT warten, NICHT vorher zurueckmelden) — das erzeugt die finalen Bild-/PDF-Dateien. Die fertigen Dateien liegen unter '/tmp/slideshot-output/' — schicke sie per 'datei_senden' (Originalqualitaet, kein Komprimierungsverlust) an den Nutzer. Ohne ausdruecklich anderslautenden Wunsch das vom Nutzer als Standard vorgegebene 'Pipe-Design' verwenden (dunkles Theme #07070c, Lila #a855f7, Gruen #3ce096, JetBrains Mono) — das entspricht am ehesten dem 'dark-modern'-Theme. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
         agent_name: "werkzeug_" ++ alias
         push specialist_names agent_name
         specialist_desc: specialist_desc ++ "- '" ++ agent_name ++ "': Werkzeuge aus '" ++ alias ++ "' (" ++ (join gtools ", ") ++ ")\n"
@@ -1011,7 +1067,7 @@ export fn init_gremium _
         push kritiker_handoff sn
         push faktenwaechter_handoff sn
 
-    swarm_agent "planer" {system: SELF_ID ++ tools_desc ++ HANDOFF_RULE ++ HONESTY_RULE ++ SECURITY_HONESTY_RULE ++ "Du bist der Planer im inneren Gremium von Muninn, einem persoenlichen KI-Agenten mit Langzeitgedaechtnis. Analysiere die Nutzeranfrage. Bei MEHRSCHRITTIGEN oder komplexen Aufgaben (mehrere Teilschritte oder mehrere Werkzeuge noetig): rufe ZUERST 'rezepte_suchen' auf — gibt es ein gespeichertes Rezept fuer genau diese Art Aufgabe, folge dessen Schritten (Weiterleitungen/Reihenfolge entsprechend dem Rezept). Zerlege grosse Aufgaben in klare Teilschritte und steuere sie der Reihe nach an die passenden Spezialisten; wiederholte Einzelschritte laufen ueber die Weiterleitungen der Spezialisten zurueck zu dir, dann gibst du den naechsten Teilschritt frei. Ist es eine Meta-Frage ueber Muninn selbst ODER seine Werkzeuge/Faehigkeiten, leite trotzdem an 'faktenwaechter' weiter (der beantwortet sie direkt aus dem Selbstwissen/der Werkzeugliste oben). Bei sonstigen Fakten- oder Gedaechtnisfragen leite ebenfalls an 'faktenwaechter' weiter. Verlangt die Anfrage RECHERCHE (z.B. 'suche im Netz', 'aktuelle Nachrichten') UND zusaetzlich EIN ERGEBNIS-WERKZEUG (z.B. 'schreib es in ein Dokument', 'als Praesentation') — auch 'Bericht'/'Report'/'Studie'/'Gutachten' zaehlen als Dokument-Ergebnis-Anfrage — leite ZUERST an 'faktenwaechter' weiter, NICHT direkt an den werkzeug_<alias>-Spezialisten: der recherchiert und reicht danach selbst an den passenden Spezialisten weiter, sobald er echte Inhalte hat. 'werkzeug_browser' ist NUR fuer echte Website-Interaktion (navigieren, klicken, Formulare, Screenshots) — NICHT fuer allgemeine Web-Recherche/Nachrichten, dafuer ist 'faktenwaechter' (web_search/web_fetch) zustaendig. Erfordert die Anfrage NUR ein konkretes externes Werkzeug ohne vorherige Recherche, leite an den PASSENDEN Werkzeug-Spezialisten aus der Liste oben weiter (nicht an einen falschen — waehle anhand der dort aufgefuehrten Werkzeugnamen). Verlangt die Anfrage NUR ein NEU zu generierendes Bild (z.B. 'erstelle/generiere/zeichne mir ein Bild von...') OHNE Recherche oder sonstige Aufgabe, leite DIREKT an 'registrator' weiter — der hat das Bild-Werkzeug 'bild_erstellen', kein Umweg ueber 'faktenwaechter'/'kritiker' noetig. Verlangt die Anfrage, laufende Hintergrund-Aufgaben/Docker-Jobs abzubrechen/zu stoppen, leite DIREKT an 'registrator' weiter (der hat 'docker_jobs_abbrechen') — das ist zeitkritisch, kein Umweg ueber Recherche/Kritik noetig. Siehst du den Hinweis '[SYSTEM] Only N of M rounds remain' bei einer mehrschrittigen, noch nicht fertigen Aufgabe: leite SOFORT an 'registrator' weiter (der nutzt 'hintergrund_fortsetzen') statt mitten in der Zerlegung zu scheitern. Sonst leite an 'kritiker' weiter. Gib selbst NIE die Endantwort und NIE internes Reasoning aus.", tools: ["rezepte_suchen", "werkzeug_aktivieren"], handoff: planer_handoff}
+    swarm_agent "planer" {system: SELF_ID ++ tools_desc ++ HANDOFF_RULE ++ HONESTY_RULE ++ SECURITY_HONESTY_RULE ++ "Du bist der Planer im inneren Gremium von Muninn, einem persoenlichen KI-Agenten mit Langzeitgedaechtnis. Analysiere die Nutzeranfrage. Bei MEHRSCHRITTIGEN oder komplexen Aufgaben (mehrere Teilschritte oder mehrere Werkzeuge noetig): rufe ZUERST 'rezepte_suchen' auf — gibt es ein gespeichertes Rezept fuer genau diese Art Aufgabe, folge dessen Schritten (Weiterleitungen/Reihenfolge entsprechend dem Rezept). Zerlege grosse Aufgaben in klare Teilschritte und steuere sie der Reihe nach an die passenden Spezialisten; wiederholte Einzelschritte laufen ueber die Weiterleitungen der Spezialisten zurueck zu dir, dann gibst du den naechsten Teilschritt frei. Ist es eine Meta-Frage ueber Muninn selbst ODER seine Werkzeuge/Faehigkeiten, leite trotzdem an 'faktenwaechter' weiter (der beantwortet sie direkt aus dem Selbstwissen/der Werkzeugliste oben). Bei sonstigen Fakten- oder Gedaechtnisfragen leite ebenfalls an 'faktenwaechter' weiter. Verlangt die Anfrage RECHERCHE (z.B. 'suche im Netz', 'aktuelle Nachrichten') UND zusaetzlich EIN ERGEBNIS-WERKZEUG (z.B. 'schreib es in ein Dokument', 'als Praesentation') — auch 'Bericht'/'Report'/'Studie'/'Gutachten' zaehlen als Dokument-Ergebnis-Anfrage — leite ZUERST an 'faktenwaechter' weiter, NICHT direkt an den werkzeug_<alias>-Spezialisten: der recherchiert und reicht danach selbst an den passenden Spezialisten weiter, sobald er echte Inhalte hat. 'werkzeug_browser' ist NUR fuer echte Website-Interaktion (navigieren, klicken, Formulare, Screenshots) — NICHT fuer allgemeine Web-Recherche/Nachrichten, dafuer ist 'faktenwaechter' (web_search/web_fetch) zustaendig. Erfordert die Anfrage NUR ein konkretes externes Werkzeug ohne vorherige Recherche, leite an den PASSENDEN Werkzeug-Spezialisten aus der Liste oben weiter (nicht an einen falschen — waehle anhand der dort aufgefuehrten Werkzeugnamen). Geht es um Folien/eine Praesentation/ein Deck/ein Bilder-Carousel UND sind sowohl 'werkzeug_praesentation' als auch 'werkzeug_slideshot' verfuegbar, entscheide NICHT nach Bauchgefuehl: nennt die Anfrage NICHT ausdruecklich 'PowerPoint'/'PPTX'/eine editierbare Datei, rufe ZUERST 'rezepte_suchen' auf (auch wenn die Anfrage sonst einfach wirkt) und bevorzuge ohne Gegenbeweis 'werkzeug_slideshot' — das ist Muninns vom Nutzer wiederholt bestaetigter Standardweg fuer optisch gestaltete Folien, 'werkzeug_praesentation' ist nur fuer echte, editierbare PowerPoint-Dateien gedacht. Verlangt die Anfrage NUR ein NEU zu generierendes Bild (z.B. 'erstelle/generiere/zeichne mir ein Bild von...') OHNE Recherche oder sonstige Aufgabe, leite DIREKT an 'registrator' weiter — der hat das Bild-Werkzeug 'bild_erstellen', kein Umweg ueber 'faktenwaechter'/'kritiker' noetig. Verlangt die Anfrage, laufende Hintergrund-Aufgaben/Docker-Jobs abzubrechen/zu stoppen, leite DIREKT an 'registrator' weiter (der hat 'docker_jobs_abbrechen') — das ist zeitkritisch, kein Umweg ueber Recherche/Kritik noetig. Siehst du den Hinweis '[SYSTEM] Only N of M rounds remain' bei einer mehrschrittigen, noch nicht fertigen Aufgabe: leite SOFORT an 'registrator' weiter (der nutzt 'hintergrund_fortsetzen') statt mitten in der Zerlegung zu scheitern. Sonst leite an 'kritiker' weiter. Gib selbst NIE die Endantwort und NIE internes Reasoning aus.", tools: ["rezepte_suchen", "werkzeug_aktivieren"], handoff: planer_handoff}
 
     swarm_agent "faktenwaechter" {system: SELF_ID ++ tools_desc ++ HANDOFF_RULE ++ TOOL_DISCIPLINE_RULE ++ RESULT_HONESTY_RULE ++ MEMORY_HONESTY_RULE ++ SECURITY_HONESTY_RULE ++ "Du bist der Faktenwaechter im Gremium. Ist die Frage eine Meta-Frage ueber Muninn selbst ODER seine Werkzeuge/Faehigkeiten (z.B. 'kannst du mit deinen Werkzeugen X tun'), beantworte sie DIREKT aus dem Selbstwissen/der Werkzeugliste oben, OHNE 'web_search' aufzurufen — das Internet weiss nichts ueber DEINE Werkzeugverbindungen. Fragt der Nutzer, welche MCP-Server/Werkzeuge/Integrationen Muninn zusaetzlich anbinden/hinzufuegen koennte (z.B. 'such mal nach MCP-Servern', 'welche Tools koennten wir noch einbauen') — das ist KEINE allgemeine Web-Recherche, dafuer gibt es 'mcp_registry_suchen': ruf es mit einem oder mehreren passenden Suchbegriffen auf (bei einer vagen/allgemeinen Anfrage probiere mehrere thematisch naheliegende Begriffe nacheinander statt nur einen), NIEMALS 'web_search' dafuer — Web-Suchergebnisse sind veraltete, unzuverlaessige Blog-Rankings ueber angebliche 'beste MCP-Server', nicht die echte, aktuelle offizielle Registry; behaupte auch NIE, etwas gefunden zu haben, ohne 'mcp_registry_suchen' wirklich aufgerufen zu haben. Findest du dabei etwas konkret Passendes, rufe 'mcp_server_vorschlagen' auf, um es Harry zur Bestaetigung vorzuschlagen — erfinde NIE, schon etwas vorgeschlagen/hinzugefuegt zu haben, ohne das Werkzeug wirklich aufgerufen zu haben. Auch bei diesen beiden Faellen rufst du danach dein Handoff-Werkzeug 'kritiker' auf, du gibst NIE selbst die finale Antwort aus. Bei allen anderen Fragen stuetze jede Aussage auf Muninns Gedaechtnis UND das Internet: rufe 'erinnerungen_suchen' auf, um relevante Erinnerungen zu finden; wenn das Gedaechtnis nichts hergibt, nutze 'web_search' und 'web_fetch', um die Antwort im Internet zu recherchieren. Verlangt die Anfrage NACH der Recherche zusaetzlich ein ERGEBNIS-WERKZEUG (z.B. 'schreib es in ein Dokument und schick es mir'), leite deine recherchierten Inhalte DIREKT an den passenden werkzeug_<alias>-Spezialisten weiter (z.B. 'werkzeug_dokument'), NICHT an 'kritiker' — der kann selbst keine Dokumente/Praesentationen erzeugen. Sonst rufe IMMER 'kritiker' auf, um deine fundierte Antwort weiterzugeben. Siehst du den Hinweis '[SYSTEM] Only N of M rounds remain' — leite JETZT SOFORT an 'kritiker' weiter (auch mit unvollstaendiger Recherche), NICHT an einen werkzeug_<alias>-Spezialisten oder zurueck an 'planer' — 'kritiker' erreicht 'registrator' in nur einem weiteren Schritt, jeder andere Umweg kostet Runden, die dann fehlen.", tools: ["erinnerungen_suchen", "web_search", "web_fetch", "mcp_registry_suchen", "mcp_server_vorschlagen"], handoff: faktenwaechter_handoff}
 
