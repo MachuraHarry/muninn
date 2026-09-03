@@ -185,7 +185,13 @@ export fn setting_cycle key cur
                         else
                             "locker"
                 else
-                    cur
+                    if key == "live_verlauf"
+                        if cur == "voll"
+                            "knapp"
+                        else
+                            "voll"
+                    else
+                        cur
 
 --! Display text for a setting value in the Telegram menu.
 export fn setting_label key value
@@ -219,7 +225,13 @@ export fn setting_label key value
                         else
                             "Normal"
                 else
-                    value
+                    if key == "live_verlauf"
+                        if value == "knapp"
+                            "Compact (one-liner)"
+                        else
+                            "Full (live tree)"
+                    else
+                        value
 
 --! Builds a "[SYSTEM]" note for style/language from the chat settings,
 --! prepended to the gremium task (see the run_gremium(_stream) call sites in

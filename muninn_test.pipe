@@ -98,6 +98,22 @@ test "setting_cycle rotiert durch alle Werte und kommt zurueck zum Start"
     expect_eq (mem.setting_cycle "gedaechtnis" "locker") "normal" "gedaechtnis locker -> normal"
     expect_eq (mem.setting_cycle "gedaechtnis" "normal") "streng" "gedaechtnis normal -> streng"
     expect_eq (mem.setting_cycle "gedaechtnis" "streng") "locker" "gedaechtnis streng -> locker"
+    expect_eq (mem.setting_cycle "live_verlauf" "voll") "knapp" "live_verlauf voll -> knapp"
+    expect_eq (mem.setting_cycle "live_verlauf" "knapp") "voll" "live_verlauf knapp -> voll"
+
+--! live_verlauf (/settings "Gremium live view", siehe make_swarm_updater
+--! in muninn.pipe): steuert ob der Live-Verlauf beim Gremiums-Lauf als
+--! voller Baum oder als kompakter Einzeiler angezeigt wird — Roundtrip
+--! ueber setting_get/setting_set wie jede andere Einstellung, plus
+--! menschenlesbare Labels fuer das /settings-Menue.
+test "live_verlauf Roundtrip + Labels"
+    h: mem.init_db ":memory:"
+    expect_eq (mem.setting_get h "1" "live_verlauf" "voll") "voll" "unbekannt -> default voll"
+    mem.setting_set h "1" "live_verlauf" "knapp"
+    expect_eq (mem.setting_get h "1" "live_verlauf" "voll") "knapp" "roundtrip"
+    expect_eq (mem.setting_label "live_verlauf" "voll") "Full (live tree)" "Label voll"
+    expect_eq (mem.setting_label "live_verlauf" "knapp") "Compact (one-liner)" "Label knapp"
+    mem.close h
 
 test "settings_prompt_prefix ist leer bei Standardeinstellungen, sonst mit Hinweis"
     h: mem.init_db ":memory:"

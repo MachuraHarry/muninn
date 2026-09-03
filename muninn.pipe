@@ -194,7 +194,7 @@ fn greeting_text _
 
 --! Help text.
 fn help_text _
-    "/start      — greeting\n/help       — this help\n/status     — Muninn's state\n/costs      — AI running-cost summary (sessions, tokens, $)\n/list       — your most important memories\n/search     — search the web (e.g. /search Huginn and Muninn)\n/learn      — learn a document (e.g. /learn https://... or send me a .txt/.md file)\n/graph      — query the knowledge graph (e.g. /graph Harry)\n/remind     — schedule a reminder (e.g. /remind in 10 minutes about the break)\n/reminders  — show open reminders/briefings\n/goals      — show open goals, tap to mark done\n/trace      — see which of the gremium's Norse-named members handled your last request\n/briefing   — activate the daily morning briefing (/briefing stop to cancel)\n/reset      — reset conversation history (fresh context for follow-up questions)\n/consolidate — dream: condense old conversations, let memories decay/be forgotten\n/settings   — configure response style, language, proactive messages, memory aggressiveness\n/stop       — IMMEDIATELY cancel a gremium run currently in progress, plus all running background Docker jobs and scheduled continuations"
+    "/start      — greeting\n/help       — this help\n/status     — Muninn's state\n/costs      — AI running-cost summary (sessions, tokens, $)\n/list       — your most important memories\n/search     — search the web (e.g. /search Huginn and Muninn)\n/learn      — learn a document (e.g. /learn https://... or send me a .txt/.md file)\n/graph      — query the knowledge graph (e.g. /graph Harry)\n/remind     — schedule a reminder (e.g. /remind in 10 minutes about the break)\n/reminders  — show open reminders/briefings\n/goals      — show open goals, tap to mark done\n/trace      — see which of the gremium's Norse-named members handled your last request\n/briefing   — activate the daily morning briefing (/briefing stop to cancel)\n/reset      — reset conversation history (fresh context for follow-up questions)\n/consolidate — dream: condense old conversations, let memories decay/be forgotten\n/settings   — configure response style, language, proactive messages, memory aggressiveness, gremium live view\n/stop       — IMMEDIATELY cancel a gremium run currently in progress, plus all running background Docker jobs and scheduled continuations"
 
 --! Status text (statistics from the soul).
 fn status_text dbh
@@ -1161,7 +1161,16 @@ fn render_groups groups
 --! the edit — reverted: live feedback was that it made the message
 --! visibly jump around in the chat instead of updating calmly in place.)
 fn make_swarm_updater token cid message_id dbh
-    stream_state: {groups: [], last_text: "", last_ms: 0, last_typing_ms: 0}
+    --! /settings "Gremium live view" (live_verlauf): "voll" (default) edits
+    --! the full growing tree in place; "knapp" edits just a compact
+    --! one-liner (icon+bold-name+phrase, plus the latest step) — read ONCE
+    --! here rather than per event, since it can't change mid-run anyway.
+    --! Only affects what gets EDITED into the live message; the full tree
+    --! is always built and persisted either way (see "final" below), so
+    --! the "📜 Verlauf" button always shows the complete run regardless of
+    --! this setting.
+    verlauf_mode: mem.setting_get dbh (to_str cid) "live_verlauf" "voll"
+    stream_state: {groups: [], current: "", last_text: "", last_ms: 0, last_typing_ms: 0}
     fn on_update agent event detail args_json
         ms: time_ms
         if (ms - (get stream_state "last_typing_ms")) >= 4000
@@ -1192,15 +1201,23 @@ fn make_swarm_updater token cid message_id dbh
                 last_group: at groups ((len groups) - 1)
             if last_group == nil || (get last_group "agent") != agent
                 push groups {agent: agent, lines: []}
+                set stream_state "current" ""
         if event == "tool" || event == "reasoning" || event == "inject"
             bare: swarm_transcript_line event detail args_json
             if bare != ""
                 if (len groups) == 0
                     push groups {agent: agent, lines: []}
                 push (get (at groups ((len groups) - 1)) "lines") {text: bare, handoff: false}
+                set stream_state "current" bare
         if (len groups) == 0
             return nil
-        text: render_groups groups
+        text: ""
+        if verlauf_mode == "knapp"
+            text: (agent_icon_name agent) ++ " " ++ (agent_verb_phrase agent)
+            if (get stream_state "current") != ""
+                text: text ++ "\n" ++ (get stream_state "current")
+        else
+            text: render_groups groups
         if text == (get stream_state "last_text")
             return nil
         if (ms - (get stream_state "last_ms")) < 1000
@@ -1506,13 +1523,15 @@ fn settings_menu_text dbh cid
     sprache: mem.setting_get dbh (to_str cid) "sprache" "de"
     proaktiv: mem.setting_get dbh (to_str cid) "proaktiv" "on"
     gedaechtnis: mem.setting_get dbh (to_str cid) "gedaechtnis" "normal"
-    "⚙️ Settings\n\nStyle: " ++ (mem.setting_label "style" style) ++ "\nLanguage: " ++ (mem.setting_label "sprache" sprache) ++ "\nProactive messages: " ++ (mem.setting_label "proaktiv" proaktiv) ++ "\nMemory: " ++ (mem.setting_label "gedaechtnis" gedaechtnis) ++ "\n\nTap a value to change it."
+    live_verlauf: mem.setting_get dbh (to_str cid) "live_verlauf" "voll"
+    "⚙️ Settings\n\nStyle: " ++ (mem.setting_label "style" style) ++ "\nLanguage: " ++ (mem.setting_label "sprache" sprache) ++ "\nProactive messages: " ++ (mem.setting_label "proaktiv" proaktiv) ++ "\nMemory: " ++ (mem.setting_label "gedaechtnis" gedaechtnis) ++ "\nGremium live view: " ++ (mem.setting_label "live_verlauf" live_verlauf) ++ "\n\nTap a value to change it."
 
 fn settings_kb dbh cid
     style: mem.setting_get dbh (to_str cid) "style" "normal"
     sprache: mem.setting_get dbh (to_str cid) "sprache" "de"
     proaktiv: mem.setting_get dbh (to_str cid) "proaktiv" "on"
     gedaechtnis: mem.setting_get dbh (to_str cid) "gedaechtnis" "normal"
+    live_verlauf: mem.setting_get dbh (to_str cid) "live_verlauf" "voll"
     kb: []
     r1: []
     push r1 (tel.tel_button ("Style: " ++ (mem.setting_label "style" style)) "settings_style")
@@ -1527,8 +1546,11 @@ fn settings_kb dbh cid
     push r4 (tel.tel_button ("Memory: " ++ (mem.setting_label "gedaechtnis" gedaechtnis)) "settings_gedaechtnis")
     push kb r4
     r5: []
-    push r5 (tel.tel_button "Done" "settings_done")
+    push r5 (tel.tel_button ("Gremium live view: " ++ (mem.setting_label "live_verlauf" live_verlauf)) "settings_live_verlauf")
     push kb r5
+    r6: []
+    push r6 (tel.tel_button "Done" "settings_done")
+    push kb r6
     kb
 
 --! Processes an inline button press (callback_query).
@@ -1632,7 +1654,7 @@ fn handle_callback token dbh cbq allowed uid
     --! memory.pipe) and rebuilds the menu directly in the same message
     --! (editMessageText instead of a new message) — feels like a real toggle,
     --! no growing message history per click.
-    if data == "settings_style" || data == "settings_sprache" || data == "settings_proaktiv" || data == "settings_gedaechtnis"
+    if data == "settings_style" || data == "settings_sprache" || data == "settings_proaktiv" || data == "settings_gedaechtnis" || data == "settings_live_verlauf"
         key: substring data 9 (len data)
         cid_str: to_str cid
         deflt: "normal"
@@ -1641,6 +1663,9 @@ fn handle_callback token dbh cbq allowed uid
         else
             if key == "proaktiv"
                 deflt: "on"
+            else
+                if key == "live_verlauf"
+                    deflt: "voll"
         cur: mem.setting_get dbh cid_str key deflt
         nxt: mem.setting_cycle key cur
         mem.setting_set dbh cid_str key nxt
