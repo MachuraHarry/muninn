@@ -116,6 +116,13 @@ fn setup_sandbox servers
     --! server for this, fixed command template (only the already locally
     --! saved SVG/PNG paths are inserted, see shell_quote there).
     push wl "rsvg-convert"
+    --! "openssl" added to the whitelist: modules/vault.pipe (the password
+    --! manager) calls it directly via exec() for AES-256-CBC encrypt/
+    --! decrypt (Pipe has no native crypto beyond sha256) — no MCP server
+    --! for this, fixed command template, value AND master key each passed
+    --! as ONE single-quoted shell argument (see sh_single_quote there),
+    --! never AI-controllable flags.
+    push wl "openssl"
     allow_exec: (len wl) > 0
     set SANDBOX_STATE "gen" ((get SANDBOX_STATE "gen") + 1)
     name: "muninn-" ++ (to_str (get SANDBOX_STATE "gen"))

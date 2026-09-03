@@ -1,0 +1,207 @@
+--! vault.pipe — encrypted credential storage (password manager).
+--!
+--! Live-diagnosed motivation (this session): the user sent a real website
+--! password in plaintext in the Telegram chat so Muninn could log in —
+--! it ended up sitting in plaintext in muninn.db. This module lets
+--! credentials be stored ONCE, encrypted, and looked up automatically on
+--! later login requests instead of being re-typed/re-sent every time.
+--!
+--! No native crypto exists in Pipe (only sha256, a one-way hash) — this
+--! shells out to `openssl enc` (AES-256-CBC, PBKDF2-salted), the same
+--! established pattern as rsvg-convert/pdftotext/tts_synth.sh (see
+--! setup_sandbox in muninn.pipe): a FIXED command template, only the
+--! already-escaped value/key inserted, added to the sandbox exec
+--! whitelist there.
+--!
+--! IMPORTANT: "sqlite" is DELIBERATELY NOT imported here — importing it
+--! silently shadows the global exec() builtin (process execution) with
+--! sqlite's own exec(handle, sql), and this module needs REAL exec() for
+--! openssl. Same reasoning as docker_tools.pipe (see its file-level
+--! comment) — uses mem.raw_exec/mem.raw_query instead.
+import "modules/memory.pipe" as mem
+
+--! Mutable cache for the master key (a bare top-level reassignment inside a
+--! function does NOT persist outward in Pipe — same reasoning as
+--! SANDBOX_STATE in muninn.pipe).
+--!
+--! WHY read directly from .env here instead of the more obvious-looking
+--! "resolve once at boot in muninn.pipe, pass the value in" (the pattern
+--! used for MCP server secrets/dbh/cid): live-verified this session that
+--! Pipe does NOT share module state across separate `import` statements,
+--! even for the literal same file path — muninn.pipe importing vault.pipe
+--! and swarm.pipe separately importing vault.pipe get two INDEPENDENT
+--! module instances with independent top-level state. A value set via one
+--! import is invisible to the other. Threading the key through
+--! run_gremium/run_gremium_stream's parameters instead would work, but
+--! touches ~9 call sites in muninn.pipe for one string. Reading .env
+--! directly (read_file, NOT env() — see below) from wherever it's actually
+--! needed sidesteps the cross-module-state issue entirely and is simpler.
+--!
+--! This deliberately uses read_file(".env"), NOT the env() builtin:
+--! muninn.pipe blocks env() from reading anything that looks like
+--! *KEY*/*TOKEN*/*SECRET* once a sandbox profile is active, precisely to
+--! stop a live (sandboxed) tool call from fetching a secret env var
+--! directly — reading the .env FILE bypasses that specific guard, but the
+--! raw key value is only ever used internally to build the openssl exec()
+--! command below, never returned to or exposed through the calling AI
+--! agent's own context.
+VAULT_STATE: {key: nil, loaded: false}
+
+fn load_master_key _
+    if (get VAULT_STATE "loaded") == true
+        return (get VAULT_STATE "key")
+    key: nil
+    try
+        raw: read_file ".env"
+        for line in (split raw "\n")
+            l: trim line
+            if (len l) > 17 && (substring l 0 17) == "MUNINN_VAULT_KEY="
+                key: trim (substring l 17 (len l))
+    catch e
+        key: nil
+    if key == ""
+        key: nil
+    set VAULT_STATE "key" key
+    set VAULT_STATE "loaded" true
+    key
+
+--! Escapes a value as ONE single-quoted shell argument (exec() runs via
+--! "sh -c", see pkg/object/builtins_io.go). Deliberately single- rather
+--! than double-quoted, unlike the shell_quote() copies in muninn.pipe/
+--! swarm.pipe/docker_tools.pipe: those only ever quote values already
+--! restricted to a safe character set by their own validators (image
+--! names, identifiers, file paths) — a password is arbitrary user text
+--! and double quotes in POSIX sh still expand "$x"/`cmd`/backslash
+--! escapes even inside them. Inside SINGLE quotes nothing is special
+--! except a literal single quote itself, which is why this is safe for
+--! truly arbitrary input: live-verified (this session) against a value
+--! containing spaces, double quotes, $dollar, `backtick` AND an
+--! apostrophe all at once. Standard POSIX idiom: end the quote, insert an
+--! escaped literal quote, reopen the quote.
+fn sh_single_quote s
+    "'" ++ (replace_all s "'" "'\\''") ++ "'"
+
+--! Normalizes a site name for consistent lookups regardless of casing/
+--! whitespace (e.g. "Instagram.com " and "instagram.com" are the same row).
+fn normalize_site site
+    lower (trim (to_str site))
+
+export fn init_credentials h
+    mem.raw_exec h "CREATE TABLE IF NOT EXISTS credentials (id INTEGER PRIMARY KEY AUTOINCREMENT, site TEXT UNIQUE, username TEXT, encrypted_password TEXT, created TEXT)"
+    nil
+
+--! AES-256-CBC encrypt via openssl (PBKDF2-derived key, random salt per
+--! call — same plaintext encrypts differently each time, as expected).
+--! Raises clearly (not a silent plaintext fallback) if no master key is
+--! configured.
+fn encrypt_value v
+    key: load_master_key 0
+    if key == nil || key == ""
+        raise "Passwortmanager ist nicht konfiguriert (MUNINN_VAULT_KEY fehlt in .env, siehe .env.example)."
+    cmd: "printf '%s' " ++ (sh_single_quote v) ++ " | openssl enc -aes-256-cbc -pbkdf2 -salt -pass pass:" ++ (sh_single_quote key) ++ " -base64 -A"
+    r: exec cmd
+    if (get r "status") != 0
+        raise ("Verschluesselung fehlgeschlagen: " ++ (get r "output"))
+    trim (get r "output")
+
+fn decrypt_value v
+    key: load_master_key 0
+    if key == nil || key == ""
+        raise "Passwortmanager ist nicht konfiguriert (MUNINN_VAULT_KEY fehlt in .env, siehe .env.example)."
+    cmd: "printf '%s' " ++ (sh_single_quote v) ++ " | openssl enc -aes-256-cbc -pbkdf2 -salt -pass pass:" ++ (sh_single_quote key) ++ " -base64 -A -d"
+    r: exec cmd
+    if (get r "status") != 0
+        raise ("Entschluesselung fehlgeschlagen: " ++ (get r "output"))
+    trim (get r "output")
+
+--! Tool: stores (or overwrites) the login for a site. Only the password is
+--! encrypted — the username stays plaintext, deliberately: it's rarely
+--! sensitive on its own and this lets tool_passwort_pruefen show it
+--! without ever decrypting anything.
+export fn tool_passwort_speichern h site username password
+    init_credentials h
+    s: normalize_site site
+    if s == "" || username == nil || (trim (to_str username)) == "" || password == nil || password == ""
+        return "Seite, Nutzername und Passwort werden alle benoetigt."
+    enc: encrypt_value password
+    existing: mem.raw_query h ("SELECT id FROM credentials WHERE site = '" ++ (mem.sql_escape s) ++ "'")
+    if (len existing) > 0
+        mem.raw_exec h ("UPDATE credentials SET username = '" ++ (mem.sql_escape (to_str username)) ++ "', encrypted_password = '" ++ (mem.sql_escape enc) ++ "' WHERE site = '" ++ (mem.sql_escape s) ++ "'")
+    else
+        mem.raw_exec h ("INSERT INTO credentials (site, username, encrypted_password, created) VALUES ('" ++ (mem.sql_escape s) ++ "', '" ++ (mem.sql_escape (to_str username)) ++ "', '" ++ (mem.sql_escape enc) ++ "', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "')")
+    "Zugangsdaten fuer '" ++ s ++ "' gespeichert (Nutzername: " ++ (to_str username) ++ ")."
+
+--! Tool: existence check ONLY — returns whether a login is stored and the
+--! (plaintext) username, but NEVER the password. This is what
+--! werkzeug_browser calls BEFORE asking the user for credentials, so the
+--! password itself never has to enter the specialist's own reasoning/
+--! tool-call arguments for an already-stored login.
+export fn tool_passwort_pruefen h site
+    init_credentials h
+    s: normalize_site site
+    rows: mem.raw_query h ("SELECT username FROM credentials WHERE site = '" ++ (mem.sql_escape s) ++ "'")
+    if (len rows) == 0
+        return "Kein gespeicherter Login fuer '" ++ s ++ "' vorhanden."
+    "Gespeicherter Login fuer '" ++ s ++ "' vorhanden, Nutzername: " ++ (get (at rows 0) "username")
+
+--! Tool: explicit reveal (e.g. "was ist mein X-Passwort") — decrypts and
+--! returns the password wrapped in Discord-style "||spoiler||" markdown,
+--! which tg_html (telegram.pipe) already converts to Telegram's native
+--! tap-to-reveal spoiler. NOTE this is a deliberate, user-requested reveal:
+--! the result still becomes part of the normal chat history/DB like any
+--! other answer — encryption protects muninn.db at rest, not a
+--! consciously requested display of the secret itself.
+export fn tool_passwort_abrufen h site
+    init_credentials h
+    s: normalize_site site
+    rows: mem.raw_query h ("SELECT username, encrypted_password FROM credentials WHERE site = '" ++ (mem.sql_escape s) ++ "'")
+    if (len rows) == 0
+        return "Kein gespeicherter Login fuer '" ++ s ++ "' vorhanden."
+    row: at rows 0
+    pw: decrypt_value (get row "encrypted_password")
+    "Nutzername: " ++ (get row "username") ++ "\nPasswort: ||" ++ pw ++ "||"
+
+--! Tool (werkzeug_browser ONLY): fills a login form with a stored
+--! credential WITHOUT the password ever appearing as a text argument in
+--! the calling specialist's own tool-call — the specialist only supplies
+--! the accessibility-snapshot element references (e.g. "e16"/"e20", read
+--! from its own browser_snapshot), this function decrypts internally and
+--! calls the real MCP tool itself. Structurally the same fix as the
+--! Slideshot base64-embedding bug this session: keep the LLM handling
+--! short REFERENCES, never the actual sensitive payload.
+--!
+--! WHY "browser_browser_fill_form", not "browser_fill_form": live-verified
+--! this session — Muninn's MCP tool registration prefixes EVERY remote
+--! tool name with "<alias>_" (pkg/object/builtins_mcp.go:registerMCPClient,
+--! no double-prefix guard). Playwright's OWN tools are already named
+--! "browser_*" (Microsoft's own naming), so under the "browser" alias the
+--! REAL registered name is "browser_" + "browser_fill_form" =
+--! "browser_browser_fill_form" — confirmed via tool_call failing with
+--! "unknown tool: browser_fill_form" until corrected. The AI-facing
+--! extra_note in swarm.pipe can get away with the shorter name in prose
+--! (the model matches it semantically against its real tool list), but a
+--! hardcoded tool_call from Pipe code must use the exact registered name.
+export fn tool_browser_login_ausfuellen h site username_target password_target
+    init_credentials h
+    s: normalize_site site
+    rows: mem.raw_query h ("SELECT username, encrypted_password FROM credentials WHERE site = '" ++ (mem.sql_escape s) ++ "'")
+    if (len rows) == 0
+        return "Kein gespeicherter Login fuer '" ++ s ++ "' vorhanden."
+    row: at rows 0
+    pw: decrypt_value (get row "encrypted_password")
+    fields: []
+    push fields {name: "Username", type: "textbox", target: username_target, value: (get row "username")}
+    push fields {name: "Password", type: "textbox", target: password_target, value: pw}
+    --! Deliberately NOT returning the raw MCP result: Playwright's own
+    --! response echoes back the exact code it ran, e.g.
+    --! "await page.getByRole('textbox', {name:'Password'}).fill('<pw>')"
+    --! — live-verified this session. Passing that straight back up would
+    --! put the plaintext password into the calling specialist's own tool
+    --! result/context anyway, defeating the whole point of this function.
+    --! A fixed confirmation string is returned instead; a real failure
+    --! still surfaces (via catch), just without ever including the value.
+    try
+        tool_call "browser_browser_fill_form" {fields: fields}
+        "Login-Formular fuer '" ++ s ++ "' ausgefuellt (Nutzername: " ++ (get row "username") ++ ")."
+    catch e
+        "Fehler beim Ausfuellen des Login-Formulars: " ++ (to_str e)

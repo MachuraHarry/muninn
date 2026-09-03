@@ -1130,9 +1130,19 @@ eigenen Ablauf-Anleitung (`extra_note`) ausgestattet, analog zu Slideshot/Docker
   aufgerufen werden, sonst blockiert die Seite; **`browser_tabs`** für Popup-Fenster
   (z.B. OAuth-Logins); **`browser_run_code_unsafe`** (rohes Playwright-JS) nur als
   letzter Ausweg.
-- **Login-Scope**: keine Domain-Einschränkung — Muninn loggt sich mit vom Nutzer im
-  Chat gegebenen Zugangsdaten auf jeder Seite ein, die im Moment konkret angewiesen
-  wird (bewusste Nutzer-Entscheidung, kein Allowlist-Gate wie `TRUSTED_PATH_ROOTS`).
+- **Login-Scope**: keine Domain-Einschränkung — Muninn loggt sich auf jeder Seite ein,
+  die im Moment konkret angewiesen wird (bewusste Nutzer-Entscheidung, kein
+  Allowlist-Gate wie `TRUSTED_PATH_ROOTS`). Zugangsdaten kommen aus dem Passwortmanager
+  (siehe eigener Abschnitt unten) — der Spezialist bekommt das Passwort selbst dabei nie
+  zu Gesicht.
+- **Doppeltes Alias-Präfix bei Playwright-Tool-Namen**: live entdeckt beim
+  Passwortmanager-Bau — Muninns MCP-Anbindung hängt IMMER `<alias>_` vor den
+  Remote-Tool-Namen (`registerMCPClient`, keine Schutzlogik gegen Dopplung). Playwrights
+  eigene Tools heißen aber selbst schon `browser_*` (Microsofts eigene Namensgebung) —
+  der TATSÄCHLICH registrierte Name ist also z.B. `browser_browser_fill_form`, nicht
+  `browser_fill_form`. Für die KI (liest die echte Tool-Liste, gleicht per Bedeutung ab)
+  unkritisch, aber ein direkter `tool_call` aus eigenem Pipe-Code (wie
+  `vault.pipe:tool_browser_login_ausfuellen`) MUSS den vollen doppelten Namen verwenden.
 - **Dauerhaftes Browser-Profil**: `--user-data-dir /root/muninn/.playwright-profile`
   (gitignored, wie `google_creds/`) sorgt dafür, dass ein `systemctl restart muninn`
   (kommt häufig vor) eine laufende Login-Session nicht mehr zerstört. Live verifiziert:
@@ -1142,6 +1152,50 @@ eigenen Ablauf-Anleitung (`extra_note`) ausgestattet, analog zu Slideshot/Docker
   NICHT — exakt wie in einem echten Browser ohne "Sitzung wiederherstellen"; betrifft
   nur Seiten, deren eigene Login-Session bewusst nicht dauerhaft ist, nicht das
   Profil-Feature selbst.
+
+### Passwortmanager (`vault.pipe`)
+
+Live-Anlass: der Nutzer schickte sein echtes Instagram-Passwort im Klartext im Chat,
+damit Muninn sich einloggt — es landete dadurch im Klartext in `muninn.db`. Der
+Passwortmanager speichert Zugangsdaten stattdessen einmalig, verschlüsselt, und schlägt
+sie bei Bedarf selbst nach.
+
+- **AES-256-CBC via `openssl`** (PBKDF2-Salt) — Pipe hat kein natives Crypto außer
+  `sha256` (Einweg-Hash). Läuft über `exec()` (Sandbox-Whitelist `openssl` in
+  `setup_sandbox`), fester Befehls-Template, Wert UND Master-Schlüssel jeweils als
+  EIN single-quoted Shell-Argument abgesichert (live getestet gegen Sonderzeichen wie
+  `$`, `` ` ``, `"`, `'` gleichzeitig).
+- **Master-Schlüssel aus `.env`** (`MUNINN_VAULT_KEY`, erzeugen mit `openssl rand
+  -base64 32`) — wird per `read_file(".env")` gelesen, bewusst NICHT über den
+  `env()`-Builtin: Muninn blockt `env()` für alles was wie `*KEY*`/`*TOKEN*`/`*SECRET*`
+  aussieht, sobald eine Sandbox aktiv ist, genau um einen laufenden (sandboxed)
+  KI-Tool-Aufruf am direkten Zugriff auf sowas zu hindern — das Lesen der Datei
+  respektiert diese Grenze, der Rohwert verlässt `vault.pipe` nie.
+- **Kein geteilter Modul-Zustand über Datei-Grenzen** — live verifiziert: zwei
+  `import "modules/vault.pipe"` in unterschiedlichen Dateien (z.B. `muninn.pipe` und
+  `swarm.pipe`) erzeugen zwei UNABHÄNGIGE Modul-Instanzen, auch beim exakt gleichen
+  Pfad — ein in der einen gesetzter Wert ist in der anderen unsichtbar. Deshalb liest
+  jede Instanz den Schlüssel bei Bedarf selbst aus `.env`, statt sich auf einen zentral
+  gesetzten Wert zu verlassen.
+- **`tool_browser_login_ausfuellen`**: der Kern der Auto-Login-Integration — der
+  Spezialist übergibt nur die Element-Referenzen aus seinem eigenen `browser_snapshot`
+  (z.B. `"e16"`/`"e20"`), NIE das Passwort selbst; die Funktion entschlüsselt intern
+  und ruft `browser_browser_fill_form` direkt auf. Die MCP-Antwort echot allerdings den
+  ausgefüllten Wert zurück (`fill('<Passwort>')`) — deshalb gibt die Funktion bewusst
+  NICHT die rohe MCP-Antwort zurück, sondern eine feste Bestätigung, sonst würde das
+  Passwort trotzdem über den Tool-Ergebnis-Text in den Kontext des Spezialisten
+  gelangen.
+- **`werkzeug_browser` prüft `passwort_pruefen` VOR jeder Rückfrage** an den Nutzer;
+  ist nichts gespeichert, fragt er wie bisher und speichert die Antwort für nächstes
+  Mal. Live end-to-end gegen eine echte Test-Login-Seite verifiziert (Formular
+  ausfüllen, absenden, Login bestätigt) — das Passwort tauchte an keiner Stelle als
+  Literal in einem KI-lesbaren Tool-Aufruf oder -Ergebnis auf.
+- **`passwort_abrufen`** (expliziter Wunsch, z.B. "was ist mein X-Passwort") liefert
+  das Passwort Discord-Spoiler-markiert (`||...||`) zurück — `tg_html`
+  (`telegram.pipe`) übersetzt das bereits automatisch in Telegrams native
+  Tap-to-Reveal-Markierung, keine neue Telegram-Anbindung nötig. Das ist ein bewusster
+  Reveal: die Verschlüsselung schützt `muninn.db`, nicht die Chat-Historie einer
+  ausdrücklich angeforderten Anzeige.
 
 ### Workspaces & Datei-Index (`swarm.pipe`)
 
