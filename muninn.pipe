@@ -178,6 +178,57 @@ fn connected_mcp_tool_names _
         nil
     out
 
+--! Resolves the single pending MCP server proposal (mem meta key
+--! "pending_mcp_add", see tool_mcp_server_vorschlagen in swarm.pipe) —
+--! approving it (persists + connects immediately) or rejecting it
+--! (discards). Shared by handle_callback's "mcp_add_yes"/"mcp_add_no"
+--! button taps AND handle_message's deterministic pending-proposal gate
+--! (see the doc comment there) — both must behave IDENTICALLY regardless
+--! of whether the user tapped the button or just typed "ja"/"nein".
+fn resolve_mcp_proposal token dbh cid approved
+    raw: mem.meta_get dbh "pending_mcp_add"
+    if raw == nil || raw == ""
+        tel.tel_send_message token cid "Dieser Vorschlag ist nicht mehr gueltig."
+        return nil
+    mem.meta_set dbh "pending_mcp_add" ""
+    if !approved
+        tel.tel_send_message token cid "Verstanden, nicht hinzugefuegt."
+        return nil
+    prop: nil
+    try
+        prop: parse_json raw
+    catch
+        prop: nil
+    alias: nil
+    if prop != nil
+        alias: get prop "alias"
+    already_configured: false
+    for s in all_mcp_servers
+        if (get s "alias") == alias
+            already_configured: true
+    if alias == nil || (mcp.is_connected alias) || already_configured
+        tel.tel_send_message token cid "Alias ist inzwischen bereits vergeben oder ungueltig — nicht hinzugefuegt."
+        return nil
+    server: {alias: alias, type: "stdio", command: "npx", args: ["-y", (get prop "npm_paket")], keywords: [alias, (get prop "name")]}
+    push all_mcp_servers server
+    existing_raw: mem.meta_get dbh "custom_mcp_servers"
+    existing: []
+    if existing_raw != nil && existing_raw != ""
+        try
+            existing: parse_json existing_raw
+        catch
+            existing: []
+    push existing server
+    mem.meta_set dbh "custom_mcp_servers" (to_json existing)
+    connect_results: mcp.connect_servers [server]
+    r: at connect_results 0
+    if (get r "ok") == true
+        grm.init_gremium 0
+        tel.tel_send_message token cid ("✅ '" ++ alias ++ "' hinzugefuegt und verbunden.")
+    else
+        tel.tel_send_message token cid ("❌ Hinzugefuegt, aber Verbindung fehlgeschlagen: " ++ (get r "error"))
+    nil
+
 --! Checks whether a chat ID is allowed to be served (empty whitelist = allow all).
 fn is_allowed cid allowed
     if allowed == nil || allowed == ""
@@ -679,6 +730,32 @@ fn handle_message token cid text dbh allowed uid
         return nil
     if contains low "was kannst du"
         tel.tel_send_message token cid (capability_text 0)
+        return nil
+    --! Deterministic pending-MCP-proposal gate (see
+    --! tool_mcp_server_vorschlagen/resolve_mcp_proposal): while a proposal
+    --! is awaiting Ja/Nein, EVERY message is intercepted HERE, before it
+    --! can ever reach the gremium — never left to an agent's own
+    --! judgment. Live-observed why this had to be deterministic: told
+    --! "installier's und teste es" right after a proposal went out (before
+    --! any decision), the gremium took it at face value and burned a real
+    --! Docker container trying to install/test the server itself —
+    --! completely redundant with (and unrelated to) the real connection
+    --! this approval flow sets up on actual approval. Plain "ja"/"nein"
+    --! (not just the button) resolves it, so the user isn't forced to tap.
+    pending_mcp: mem.meta_get dbh "pending_mcp_add"
+    if pending_mcp != nil && pending_mcp != ""
+        if low == "ja" || low == "yes" || low == "y" || low == "✅"
+            resolve_mcp_proposal token dbh cid true
+            return nil
+        if low == "nein" || low == "no" || low == "n" || low == "❌"
+            resolve_mcp_proposal token dbh cid false
+            return nil
+        prop_name: "?"
+        try
+            prop_name: to_str (get (parse_json pending_mcp) "name")
+        catch
+            prop_name: "?"
+        tel.tel_send_message token cid ("Du hast noch einen offenen MCP-Server-Vorschlag zur Bestaetigung ('" ++ prop_name ++ "') — antworte erst mit Ja/Nein oder tippe den Button an, dann kuemmere ich mich um deine naechste Anfrage.")
         return nil
     if is_mcp_server_question low
         names: list_configured_mcp_aliases 0
@@ -1713,54 +1790,15 @@ fn handle_callback token dbh cbq allowed uid
             tel.tel_edit_message_text_kb token cid message_id "Open goals — tap one to mark it done:" new_kb
         return nil
     --! MCP registry proposal (see tool_mcp_server_vorschlagen in
-    --! swarm.pipe): the ONLY code path anywhere that actually persists/
-    --! connects a discovered server — deliberately gated behind a real
-    --! Telegram button tap, never automatic.
-    if (len data) > 12 && (substring data 0 12) == "mcp_add_yes:"
-        id: substring data 12 (len data)
-        raw: mem.meta_get dbh ("pending_mcp_add:" ++ id)
-        if raw == nil || raw == ""
-            tel.tel_send_message token cid "Dieser Vorschlag ist nicht mehr gueltig."
-        else
-            prop: nil
-            try
-                prop: parse_json raw
-            catch
-                prop: nil
-            alias: nil
-            if prop != nil
-                alias: get prop "alias"
-            already_configured: false
-            for s in all_mcp_servers
-                if (get s "alias") == alias
-                    already_configured: true
-            if alias == nil || (mcp.is_connected alias) || already_configured
-                tel.tel_send_message token cid ("Alias ist inzwischen bereits vergeben oder ungueltig — nicht hinzugefuegt.")
-            else
-                server: {alias: alias, type: "stdio", command: "npx", args: ["-y", (get prop "npm_paket")], keywords: [alias, (get prop "name")]}
-                push all_mcp_servers server
-                existing_raw: mem.meta_get dbh "custom_mcp_servers"
-                existing: []
-                if existing_raw != nil && existing_raw != ""
-                    try
-                        existing: parse_json existing_raw
-                    catch
-                        existing: []
-                push existing server
-                mem.meta_set dbh "custom_mcp_servers" (to_json existing)
-                connect_results: mcp.connect_servers [server]
-                r: at connect_results 0
-                if (get r "ok") == true
-                    grm.init_gremium 0
-                    tel.tel_send_message token cid ("✅ '" ++ alias ++ "' hinzugefuegt und verbunden.")
-                else
-                    tel.tel_send_message token cid ("❌ Hinzugefuegt, aber Verbindung fehlgeschlagen: " ++ (get r "error"))
-            mem.meta_set dbh ("pending_mcp_add:" ++ id) ""
+    --! swarm.pipe): the ONLY code paths that actually persist/connect a
+    --! discovered server are this button tap and handle_message's
+    --! deterministic "ja"/"nein" gate (resolve_mcp_proposal, both call the
+    --! same shared function) — never the gremium/an agent's own judgment.
+    if data == "mcp_add_yes"
+        resolve_mcp_proposal token dbh cid true
         return nil
-    if (len data) > 11 && (substring data 0 11) == "mcp_add_no:"
-        id: substring data 11 (len data)
-        mem.meta_set dbh ("pending_mcp_add:" ++ id) ""
-        tel.tel_send_message token cid "Verstanden, nicht hinzugefuegt."
+    if data == "mcp_add_no"
+        resolve_mcp_proposal token dbh cid false
         return nil
     --! /settings menu (see settings_menu_text/settings_kb above): each
     --! button rotates its OWN setting to the next value (setting_cycle in
@@ -2315,7 +2353,7 @@ for configured_server in mcp_servers
 for auto_server in mcp_auto_servers
     push all_mcp_servers auto_server
 --! Previously user-approved MCP servers (see handle_callback's
---! "mcp_add_yes:" branch/tool_mcp_server_vorschlagen) — a durable,
+--! "mcp_add_yes" branch/tool_mcp_server_vorschlagen/resolve_mcp_proposal) — a durable,
 --! process-wide meta key, so an approved server survives a restart and
 --! flows through the exact same lazy-connect path as a .env-configured
 --! one (ensure_mcp_for_task/werkzeug_aktivieren), no special-casing.

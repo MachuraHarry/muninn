@@ -203,8 +203,21 @@ fn tool_mcp_registry_suchen query
 
 --! Tool: proposes adding a new MCP server discovered via
 --! mcp_registry_suchen — sends Harry a Yes/No button, NEVER installs
---! anything itself. See handle_callback's "mcp_add_yes:"/"mcp_add_no:"
+--! anything itself. See handle_callback's "mcp_add_yes"/"mcp_add_no"
 --! branches in muninn.pipe for what actually happens on tap.
+--! Only ONE proposal can be pending at a time (single-user bot — a fixed
+--! meta key, no per-proposal id needed) — see muninn.pipe's
+--! resolve_mcp_proposal and the deterministic "pending_mcp_add" gate in
+--! handle_message: while this is set, EVERY incoming message is
+--! intercepted BEFORE it ever reaches the gremium (Ja/Nein resolves it,
+--! anything else just re-reminds the user) — never left to an agent's own
+--! judgment. Live-observed why this had to be deterministic: after
+--! proposing, the user replied "installier's und teste es" instead of
+--! tapping the button — the gremium (not yet aware ANY decision existed)
+--! took that at face value and burned a real Docker container trying to
+--! "install and test" the server itself, completely redundant with (and
+--! unrelated to) the real npm/stdio connection this approval flow sets up
+--! on actual approval.
 fn tool_mcp_server_vorschlagen alias name beschreibung npm_paket
     if alias == nil || alias == ""
         return "Kein Alias angegeben."
@@ -220,18 +233,20 @@ fn tool_mcp_server_vorschlagen alias name beschreibung npm_paket
     cid: get STATE "cid"
     if tok == nil || cid == nil
         return "Kein Telegram-Kontext verfuegbar, kann keinen Vorschlag senden."
-    id: (to_str now) ++ "_" ++ (to_str (random_range 100000 999999))
-    mem.meta_set h ("pending_mcp_add:" ++ id) (to_json {alias: alias, name: name, beschreibung: beschreibung, npm_paket: npm_paket})
+    existing_pending: mem.meta_get h "pending_mcp_add"
+    if existing_pending != nil && existing_pending != ""
+        return "Es gibt bereits einen offenen Vorschlag, der auf eine Ja/Nein-Antwort wartet — erst DIESEN entscheiden lassen, bevor ein neuer vorgeschlagen wird."
+    mem.meta_set h "pending_mcp_add" (to_json {alias: alias, name: name, beschreibung: beschreibung, npm_paket: npm_paket})
     kb: []
     row: []
-    push row (tel.tel_button "✅ Ja, hinzufuegen" ("mcp_add_yes:" ++ id))
-    push row (tel.tel_button "❌ Nein" ("mcp_add_no:" ++ id))
+    push row (tel.tel_button "✅ Ja, hinzufuegen" "mcp_add_yes")
+    push row (tel.tel_button "❌ Nein" "mcp_add_no")
     push kb row
-    text: "🔌 Neuer MCP-Server gefunden:\n\n**" ++ name ++ "** (`" ++ alias ++ "`)\n" ++ beschreibung ++ "\nnpm: " ++ npm_paket ++ "\n\nLaeuft bei Zustimmung als uneingeschraenkter lokaler Prozess (`npx -y " ++ npm_paket ++ "`) — bitte nur bestaetigen, wenn du der Quelle vertraust."
+    text: "🔌 Neuer MCP-Server gefunden:\n\n**" ++ name ++ "** (`" ++ alias ++ "`)\n" ++ beschreibung ++ "\nnpm: " ++ npm_paket ++ "\n\nLaeuft bei Zustimmung als uneingeschraenkter lokaler Prozess (`npx -y " ++ npm_paket ++ "`) — bitte nur bestaetigen, wenn du der Quelle vertraust. Antworte mit Ja/Nein oder tippe den Button — bis dahin passiert NICHTS."
     sendres: tel.tel_send_message_kb tok cid text kb
     if (get sendres "ok") == false
         return "Senden des Vorschlags fehlgeschlagen: " ++ (to_str (get sendres))
-    "Vorschlag an Harry gesendet, wartet auf Bestaetigung."
+    "Vorschlag an Harry gesendet, wartet auf Bestaetigung. WICHTIG: bis er antwortet, ist NICHTS installiert. Schreibt er DANACH etwas anderes (z.B. 'installier's', 'teste es') — das System faengt jede Nachricht waehrend eine Bestaetigung aussteht deterministisch VOR dir ab, du bekommst so eine Nachricht erst gar nicht zu sehen. Versuch also NIEMALS selbst, den vorgeschlagenen Server anderweitig (z.B. per Docker) zu installieren oder zu testen — das ist nie noetig."
 
 --! Tool: permanently remember a piece of information.
 fn tool_merken content kind
