@@ -8,8 +8,13 @@
 --! volume mounts in a container are effectively root access to the host.
 --! This module covers the concrete need (spin up a web server container)
 --! WITHOUT that capability:
---!   - NO volume mounts possible (no parameter for it at all, not even
---!     optional) — a container can therefore never reach the host filesystem.
+--!   - Volume mounts are possible ONLY for one, explicitly named
+--!     mcp_data/ workspace at a time (see volume_flag below) — a
+--!     container can NEVER reach any other host path (system files,
+--!     .env, other workspaces). Added later, on the user's own request,
+--!     specifically so a Docker job can work with real project files
+--!     instead of running fully blind — still nowhere near an arbitrary
+--!     host mount.
 --!   - NO --privileged, NO --network=host, NO freely choosable extra Docker
 --!     flags — the command is built from a FIXED template, only validated
 --!     values get substituted in.
@@ -280,13 +285,34 @@ export fn tool_docker_pull_image image
         return "Rejected: '" ++ image ++ "' is not a valid image name."
     docker_exec ("docker pull " ++ image)
 
+--! Builds a " -v /root/muninn/mcp_data/<workspace>:/workspace" flag for a
+--! docker run command, or "" if no workspace was given. The container-side
+--! path is ALWAYS the fixed "/workspace" (never AI-controllable) — keeps
+--! setup_command scripts predictable ("cd /workspace && ..."). Reuses
+--! valid_identifier — the SAME check swarm.pipe's tool_workspace_erstellen
+--! already applies, so this can only ever resolve inside mcp_data/, never
+--! an arbitrary host path. Auto-creates the workspace directory if it
+--! doesn't exist yet (mirrors tool_workspace_erstellen's own make_dir) —
+--! no separate "must already exist" round-trip needed. Returns nil (a
+--! rejection signal, distinct from the "" no-mount case) for an invalid
+--! name — the caller must check for nil and reject the whole call.
+fn volume_flag workspace
+    if workspace == nil || (trim workspace) == ""
+        return ""
+    if !(valid_identifier workspace)
+        return nil
+    make_dir ("/root/muninn/mcp_data/" ++ workspace)
+    " -v /root/muninn/mcp_data/" ++ workspace ++ ":/workspace"
+
 --! Tool: starts a new, running container from a (possibly previously
---! pulled) image. NO volume mounts, NO --privileged, NO --network=host —
---! see the file comment above. host_port/container_port are REQUIRED (no
+--! pulled) image. NO --privileged, NO --network=host, and the only
+--! possible volume mount is the single named mcp_data/ workspace via
+--! 'workspace' (see volume_flag above; "" for no mount at all) — see the
+--! file comment above. host_port/container_port are REQUIRED (no
 --! container without an explicit, deliberate port mapping). public: "true"
 --! binds to all interfaces, otherwise (default, and for any other value)
 --! 127.0.0.1 only.
-export fn tool_docker_create_container image name host_port container_port public
+export fn tool_docker_create_container image name host_port container_port public workspace
     if !(valid_image_name image)
         return "Rejected: '" ++ image ++ "' is not a valid image name."
     if !(valid_identifier name)
@@ -295,14 +321,19 @@ export fn tool_docker_create_container image name host_port container_port publi
         return "Rejected: '" ++ host_port ++ "' is not a valid host port (1-65535)."
     if !(valid_port container_port)
         return "Rejected: '" ++ container_port ++ "' is not a valid container port (1-65535)."
+    vol: volume_flag workspace
+    if vol == nil
+        return "Rejected: '" ++ (to_str workspace) ++ "' is not a valid workspace name."
     bind: "127.0.0.1:"
     if public == "true"
         bind: ""
-    cmd: "docker run -d --name " ++ name ++ " -p " ++ bind ++ host_port ++ ":" ++ container_port ++ " " ++ image
+    cmd: "docker run -d --name " ++ name ++ vol ++ " -p " ++ bind ++ host_port ++ ":" ++ container_port ++ " " ++ image
     res: docker_exec cmd
     hint: " (only reachable on localhost — 127.0.0.1:" ++ host_port ++ ")"
     if public == "true"
         hint: " (publicly reachable on port " ++ host_port ++ " — deliberately chosen!)"
+    if vol != ""
+        hint: hint ++ " (workspace '" ++ workspace ++ "' mounted at /workspace)"
     res ++ hint
 
 --! Safely escapes free text as ONE single argv token for 'sh -c "<...>"'.
@@ -330,9 +361,9 @@ fn shell_quote s
 --! free text (install commands need && / ; — that's intentional, but it
 --! runs ISOLATED INSIDE THE CONTAINER, not on the host) — shell_quote only
 --! prevents it from breaking out of its ONE host-side argv token. Same
---! limits as tool_docker_create_container: NO volume mounts, NO
---! --privileged, NO --network=host, everything via a fixed command
---! template. The requested name ALWAYS automatically gets a timestamp
+--! limits as tool_docker_create_container: NO --privileged, NO
+--! --network=host, everything via a fixed command template except the one
+--! optional named-workspace mount (see volume_flag). The requested name ALWAYS automatically gets a timestamp
 --! suffix appended — observed live: on a name collision (retry after a
 --! failure), the AI kept inventing new names itself ("v3", "v4",
 --! "pipe-test-new", "v5", ...), sometimes even running two jobs in parallel
@@ -341,18 +372,21 @@ fn shell_quote s
 --! message} instead of just a string — the caller (swarm.pipe
 --! tool_docker_hintergrund_setup) needs the REAL (suffixed) name for job
 --! tracking, not the originally requested one.
-export fn tool_docker_setup_starten image name setup_command
+export fn tool_docker_setup_starten image name setup_command workspace
     if !(valid_image_name image)
         return {ok: false, name: nil, message: "Rejected: '" ++ image ++ "' is not a valid image name."}
     if !(valid_identifier name)
         return {ok: false, name: nil, message: "Rejected: '" ++ name ++ "' is not a valid container name."}
     if setup_command == nil || (trim setup_command) == ""
         return {ok: false, name: nil, message: "Rejected: no setup_command given."}
+    vol: volume_flag workspace
+    if vol == nil
+        return {ok: false, name: nil, message: "Rejected: '" ++ (to_str workspace) ++ "' is not a valid workspace name."}
     base: name
     if (len base) > 50
         base: substring base 0 50
     final_name: base ++ "-" ++ (to_str now)
-    cmd: "docker run -d --name " ++ final_name ++ " " ++ image ++ " sh -c \"" ++ (shell_quote setup_command) ++ "\""
+    cmd: "docker run -d --name " ++ final_name ++ vol ++ " " ++ image ++ " sh -c \"" ++ (shell_quote setup_command) ++ "\""
     res: docker_exec cmd
     if contains res "Error"
         return {ok: false, name: final_name, message: res}

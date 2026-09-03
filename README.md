@@ -798,10 +798,17 @@ Container-Erstellung existieren, kommen aber mit expliziter Warnung ihrer Autore
 Root-Zugriff auf den Host. `docker_tools.pipe` deckt den konkreten Bedarf
 („Webserver-Container aufsetzen") ab, ohne diese Fähigkeit:
 
-- **Kein Parameter für Volume-Mounts im Tool-Schema überhaupt** — strukturell
-  nicht anfragbar, nicht nur unerwünscht per Prompt-Bitte.
+- **Volume-Mount nur für GENAU einen benannten `mcp_data/`-Workspace** (Parameter
+  `workspace`, optional) — read-write unter `/workspace` im Container, NIE ein
+  beliebiger Host-Pfad. Auf Nutzerwunsch ergänzt, damit ein Docker-Job mit echten
+  Projektdateien arbeiten kann (z.B. Tests gegen einen bestehenden Workspace
+  laufen lassen, Build-Ausgabe soll auf dem Host landen) — bleibt trotzdem streng
+  auf `mcp_data/` begrenzt, derselbe validierte Name wie bei
+  `workspace_erstellen`. Ohne `workspace` (Standardfall, z.B. beim Testen eines
+  fremden GitHub-Repos) bleibt der Container komplett isoliert wie bisher.
 - Fester Kommando-Template ohne `--privileged`/`--network=host`, keine frei
-  wählbaren zusätzlichen Docker-Flags.
+  wählbaren zusätzlichen Docker-Flags (der Mount ist die einzige Ausnahme, siehe
+  oben).
 - Port-Bindung standardmäßig nur auf `127.0.0.1`, öffentlich nur mit explizitem
   `public='true'`.
 - Image-/Container-Name und Ports werden gegen strikt verankerte Regex (`^...$`)
