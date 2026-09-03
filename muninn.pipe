@@ -1349,18 +1349,14 @@ fn make_swarm_updater token cid message_id dbh
                     text: text ++ ": *" ++ reason ++ "*"
                 push (get (at groups ((len groups) - 1)) "lines") {text: text, handoff: true}
         if event == "start"
-            --! ai.ChatSwarm rereads the active model fresh at the start of
-            --! every round (right after this "start" event fires, before
-            --! that round's own API call) — see grm.model_for_agent's doc
-            --! comment. Switching per-agent here means a handoff to/from
-            --! faktenwaechter/werkzeug_slideshot uses the stronger model
-            --! for exactly their own turns, without touching run_gremium's
-            --! (non-streaming, background/proactive) callers. Same for the
-            --! timeout — see grm.timeout_for_agent's doc comment (a
-            --! werkzeug_slideshot turn authoring a full multi-slide HTML
-            --! document hit the old fixed 120s limit mid-run, live).
-            ai_model (grm.model_for_agent agent)
-            ai_timeout (grm.timeout_for_agent agent)
+            --! Per-agent model/timeout routing (deepseek-v4-pro for
+            --! faktenwaechter/werkzeug_slideshot) was tried and reverted —
+            --! the pro model's latency, combined with round_check only
+            --! ever being able to react BETWEEN rounds, made individual
+            --! turns take long enough that the bot looked unresponsive for
+            --! minutes at a time. Back to a single fixed model/timeout for
+            --! every agent (set once at boot in setup_ai), no per-turn
+            --! switching.
             last_group: nil
             if (len groups) > 0
                 last_group: at groups ((len groups) - 1)
@@ -2106,7 +2102,7 @@ fn email_notify_new token dbh cid email
 --! in the bot loop after every poll, single-threaded (no goroutine/DB
 --! conflict, see Plan.md). Briefings are only assembled from the soul at
 --! fire time (always current, never a stale snapshot).
-fn sched_tick token
+fn sched_tick token allowed
     hl: mem.open_locked nil
     dbh: get hl "h"
     now_sec: now
@@ -2185,9 +2181,25 @@ fn sched_tick token
             --! — next poll cycle, dashboard — would then block for good).
             --! The item's due_ts is left untouched on failure, so it's
             --! naturally retried on the next tick instead of being lost.
+            --!
+            --! run_gremium_stream + round_check/on_update instead of the
+            --! plain run_gremium: without this, a slow continuation (e.g.
+            --! research/Slideshot on the pro model) blocked the ENTIRE bot
+            --! — poll_once can't run again until sched_tick returns, and
+            --! plain run_gremium has no round_check at all, so not even
+            --! /stop could reach it. Live-reproduced: the whole bot looked
+            --! dead for minutes. round_check gives /stop real teeth here
+            --! for the first time; on_update (message_id nil — no visible
+            --! message to edit) keeps the typing indicator alive so the
+            --! chat doesn't look frozen while it works.
             try
-                res: grm.run_gremium dbh (to_num cid) continuation
-                tel.tel_send_rich_message token (to_num cid) (get res "content") nil
+                on_update_bg: make_swarm_updater token cid nil dbh
+                round_check_bg: make_round_check token cid allowed dbh nil
+                res: grm.run_gremium_stream dbh cid continuation on_update_bg round_check_bg
+                if (get res "aborted") == true
+                    tel.tel_send_message token (to_num cid) ("🛑 " ++ (get res "abort_reason"))
+                else
+                    tel.tel_send_rich_message token (to_num cid) (get res "content") nil
                 sched.cancel dbh (get item "id")
             catch e13
                 print ("job_check failed: " ++ (to_str e13))
@@ -2212,9 +2224,19 @@ fn sched_tick token
             --! (an uncaught exception here would leak sched_tick's DB lock
             --! forever). Left un-cancelled on failure, so it's retried next
             --! tick using the same saved progress instead of being lost.
+            --! run_gremium_stream + round_check/on_update — see the
+            --! identical comment in job_check above; this is the branch
+            --! that actually handles 'hintergrund_fortsetzen' continuations,
+            --! i.e. the exact case the user reported the whole bot
+            --! freezing on.
             try
-                res2: grm.run_gremium dbh (to_num cid) continuation2
-                tel.tel_send_rich_message token (to_num cid) (get res2 "content") nil
+                on_update_bg2: make_swarm_updater token cid nil dbh
+                round_check_bg2: make_round_check token cid allowed dbh nil
+                res2: grm.run_gremium_stream dbh cid continuation2 on_update_bg2 round_check_bg2
+                if (get res2 "aborted") == true
+                    tel.tel_send_message token (to_num cid) ("🛑 " ++ (get res2 "abort_reason"))
+                else
+                    tel.tel_send_rich_message token (to_num cid) (get res2 "content") nil
                 sched.cancel dbh (get item "id")
             catch e14
                 print ("task_check failed: " ++ (to_str e14))
@@ -2235,8 +2257,15 @@ fn sched_tick token
                 --! MUST be caught — see the identical comment in job_check
                 --! above. Without this, a failure here would skip the
                 --! mark_fired/continue below and leak sched_tick's DB lock.
+                --! run_gremium_stream + round_check/on_update — see the
+                --! identical comment in job_check above. An /stop-aborted
+                --! run naturally falls through to "nothing to send" below
+                --! (content stays nil/empty), consistent with this branch's
+                --! existing "silence is a valid outcome" design.
                 try
-                    res_proaktiv: grm.run_gremium dbh (to_num cid) prompt_proaktiv
+                    on_update_bg3: make_swarm_updater token cid nil dbh
+                    round_check_bg3: make_round_check token cid allowed dbh nil
+                    res_proaktiv: grm.run_gremium_stream dbh cid prompt_proaktiv on_update_bg3 round_check_bg3
                     content_proaktiv: get res_proaktiv "content"
                     if content_proaktiv != nil && (lower (trim content_proaktiv)) != "nothing" && (trim content_proaktiv) != ""
                         tel.tel_send_rich_message token (to_num cid) (shorten (trim content_proaktiv)) nil
@@ -2671,7 +2700,7 @@ else
                             if timeout < 1
                                 timeout: 1
                         off: poll_once tok off allowed timeout
-                        sched_tick tok
+                        sched_tick tok allowed
                         maybe_log_cost 0
                     catch e
                         print ("Cycle error — retrying: " ++ (to_str e))

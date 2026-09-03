@@ -17,48 +17,13 @@ import "modules/telegram.pipe" as tel
 --! is reset per run by run_gremium_stream (see tool_werkzeug_aktivieren).
 STATE: {dbh: nil, cid: nil, tz_offset: 0, token: nil, google_email: nil, available_servers: [], mcp_activated: []}
 
---! Agents whose LLM calls use the stronger (and ~3x pricier per DeepSeek's
---! own published rates) "pro" model instead of the default "deepseek-chat"
---! — research (faktenwaechter) and Slideshot's own HTML-authoring
---! (werkzeug_slideshot) benefit the most from the extra reasoning quality;
---! routing/formatting-heavy agents (planer/kritiker/registrator, every
---! other specialist) stay on the cheaper default, per Harry's explicit
---! request. See model_for_agent below, hooked in from muninn.pipe's
---! make_swarm_updater on every agent-turn-start (ai.ChatSwarm reads the
---! active model fresh on every round, so switching it mid-run — before
---! that agent's OWN next API call — works, it does not need to be fixed
---! for the whole run upfront).
-PRO_MODEL_AGENTS: ["faktenwaechter", "werkzeug_slideshot"]
-DEFAULT_MODEL: "deepseek-chat"
-PRO_MODEL: "deepseek-v4-pro"
-
---! Which model the NEXT LLM call for this agent should use — called on
---! every swarm "start" event, so a handoff to/from a listed agent
---! switches the model for exactly its own turns, nothing else.
-export fn model_for_agent agent
-    if contains PRO_MODEL_AGENTS agent
-        PRO_MODEL
-    else
-        DEFAULT_MODEL
-
---! DEFAULT_TIMEOUT matches the boot-time `ai_timeout 120` in muninn.pipe's
---! setup_ai. PRO_TIMEOUT is longer — live-observed: a werkzeug_slideshot
---! turn authoring a full multi-slide HTML document on PRO_MODEL hit
---! "context deadline exceeded" at the 120s mark (round 6, mid-run MCP-
---! reactivation retry) — the heavier model plus a large single-shot HTML
---! response needs materially more headroom than routing/formatting calls
---! ever did. Same per-agent-turn switching mechanism as model_for_agent
---! (ai.ChatSwarm/httpPostJSON both read ActiveConfig fresh every round).
-DEFAULT_TIMEOUT: 120
-PRO_TIMEOUT: 300
-
---! Which ai_timeout (seconds) the NEXT LLM call for this agent should
---! use — called alongside model_for_agent on every swarm "start" event.
-export fn timeout_for_agent agent
-    if contains PRO_MODEL_AGENTS agent
-        PRO_TIMEOUT
-    else
-        DEFAULT_TIMEOUT
+--! Per-agent model/timeout routing (deepseek-v4-pro for research/Slideshot)
+--! was tried and reverted — the pro model's latency, combined with
+--! round_check only ever being able to react BETWEEN gremium rounds (never
+--! mid-flight during a single still-running HTTP call) in Muninn's
+--! single-threaded main loop, made individual turns take long enough that
+--! the whole bot looked unresponsive for minutes at a time. Every agent
+--! uses the single model/timeout set once at boot (setup_ai, muninn.pipe).
 
 fn cur_dbh _
     get STATE "dbh"
@@ -1354,15 +1319,6 @@ export fn run_gremium_stream dbh cid task on_update round_check
     --! non-first call argument, not just set().
     set STATE "mcp_activated" ([])
     res: ai_swarm_stream task "planer" 150 on_update round_check
-    --! Reset regardless of which agent's turn ended the run (see
-    --! model_for_agent/timeout_for_agent) — otherwise a run that happened
-    --! to END on faktenwaechter/werkzeug_slideshot would leave the pro
-    --! model/longer timeout active for whatever unrelated ai_chat/
-    --! ai_vision call happens next (e.g. do_search's summarizer, the
-    --! proactive email-importance judge), silently paying the higher rate
-    --! (and waiting far longer on a hang) for work that was never meant to.
-    ai_model DEFAULT_MODEL
-    ai_timeout DEFAULT_TIMEOUT
     res: apply_registrator_backstop res
     set res "mcp_activated" (get STATE "mcp_activated")
     res
