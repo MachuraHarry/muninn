@@ -1162,9 +1162,17 @@ sie bei Bedarf selbst nach.
 
 - **AES-256-CBC via `openssl`** (PBKDF2-Salt) — Pipe hat kein natives Crypto außer
   `sha256` (Einweg-Hash). Läuft über `exec()` (Sandbox-Whitelist `openssl` in
-  `setup_sandbox`), fester Befehls-Template, Wert UND Master-Schlüssel jeweils als
-  EIN single-quoted Shell-Argument abgesichert (live getestet gegen Sonderzeichen wie
-  `$`, `` ` ``, `"`, `'` gleichzeitig).
+  `setup_sandbox`), fester Befehls-Template, Master-Schlüssel als EIN single-quoted
+  Argument abgesichert. **Datei-basiert (`-in`/`-out`), NICHT über eine Shell-Pipe** —
+  live entdeckt: sobald ein Sandbox-Profil aktiv ist (also bei JEDEM echten Aufruf),
+  läuft `exec()` NICHT über eine Shell, sondern tokenisiert den Befehls-String und
+  führt das erste Token DIREKT aus — `|` ist dann kein Pipe-Operator mehr, nur ein
+  gewöhnliches Argument-Zeichen. Ein früherer `printf '%s' '<wert>' | openssl enc ...`
+  wurde dadurch komplett zu `printf`s eigenem argv, dessen `%s`-Format sich pro
+  restlichem Token wiederholt (POSIX-Verhalten) — Ergebnis: ein verstümmeltes
+  Passwort aus Fragmenten des openssl-Befehls selbst. Jetzt schreibt/liest die
+  Funktion den Wert über eine kurzlebige Datei unter `.vault_tmp/` (sofort nach jedem
+  Aufruf gelöscht), sodass `openssl` das einzige tatsächlich ausgeführte Programm ist.
 - **Master-Schlüssel aus `.env`** (`MUNINN_VAULT_KEY`, erzeugen mit `openssl rand
   -base64 32`) — wird per `read_file(".env")` gelesen, bewusst NICHT über den
   `env()`-Builtin: Muninn blockt `env()` für alles was wie `*KEY*`/`*TOKEN*`/`*SECRET*`

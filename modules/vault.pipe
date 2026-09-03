@@ -65,9 +65,14 @@ fn load_master_key _
     set VAULT_STATE "loaded" true
     key
 
---! Escapes a value as ONE single-quoted shell argument (exec() runs via
---! "sh -c", see pkg/object/builtins_io.go). Deliberately single- rather
---! than double-quoted, unlike the shell_quote() copies in muninn.pipe/
+--! Escapes a value as ONE single-quoted argument token. Needed both when
+--! exec() runs unsandboxed via "sh -c" (pkg/object/builtins_io.go) AND
+--! when a sandbox profile is active, where the command string is instead
+--! tokenized directly via splitShellWords (pkg/object/sandbox.go) — that
+--! tokenizer still understands single/double-quoted spans as one token,
+--! it just doesn't interpret other shell metacharacters (pipes,
+--! redirects, $expansion). Deliberately single- rather than
+--! double-quoted, unlike the shell_quote() copies in muninn.pipe/
 --! swarm.pipe/docker_tools.pipe: those only ever quote values already
 --! restricted to a safe character set by their own validators (image
 --! names, identifiers, file paths) — a password is arbitrary user text
@@ -90,29 +95,77 @@ export fn init_credentials h
     mem.raw_exec h "CREATE TABLE IF NOT EXISTS credentials (id INTEGER PRIMARY KEY AUTOINCREMENT, site TEXT UNIQUE, username TEXT, encrypted_password TEXT, created TEXT)"
     nil
 
+--! Temp dir for the file-based openssl round-trip below (see encrypt_value
+--! for why files, not a shell pipe). Gitignored like tts_tmp/.
+VAULT_TMP_DIR: "/root/muninn/.vault_tmp"
+
+--! A fresh, unique temp file path under VAULT_TMP_DIR for one encrypt/
+--! decrypt call.
+fn vault_tmp_path _
+    make_dir VAULT_TMP_DIR
+    VAULT_TMP_DIR ++ "/v" ++ (to_str (random_range 1 999999999))
+
+--! Deletes a temp file if it exists; swallows any error (best-effort
+--! cleanup, must never itself crash the surrounding encrypt/decrypt call).
+fn vault_tmp_cleanup path
+    try
+        if file_exists path
+            file_delete path
+    catch e
+        nil
+
 --! AES-256-CBC encrypt via openssl (PBKDF2-derived key, random salt per
 --! call — same plaintext encrypts differently each time, as expected).
 --! Raises clearly (not a silent plaintext fallback) if no master key is
 --! configured.
+--!
+--! WHY files instead of a shell pipe ("printf ... | openssl ..."), which
+--! is what an earlier version of this function used: live-diagnosed this
+--! session — Muninn's sandboxed exec() does NOT run through a shell once
+--! a sandbox profile is active (confirmed against
+--! pkg/object/sandbox.go/builtins_sandbox.go: the command string is
+--! tokenized via splitShellWords and the FIRST token is exec'd DIRECTLY,
+--! with every remaining token passed as its literal argv — "|" is not a
+--! pipe there, just an ordinary argument character). Real production
+--! symptom: the whole command string became printf's OWN argv, and
+--! printf's "%s" format re-applies itself once per remaining argument
+--! (POSIX behavior) — producing a garbled concatenation of the intended
+--! plaintext with fragments of the openssl command itself. Two
+--! -in/-out file arguments avoid needing a shell entirely: openssl is
+--! the one and only program actually invoked.
 fn encrypt_value v
     key: load_master_key 0
     if key == nil || key == ""
         raise "Passwortmanager ist nicht konfiguriert (MUNINN_VAULT_KEY fehlt in .env, siehe .env.example)."
-    cmd: "printf '%s' " ++ (sh_single_quote v) ++ " | openssl enc -aes-256-cbc -pbkdf2 -salt -pass pass:" ++ (sh_single_quote key) ++ " -base64 -A"
+    in_path: vault_tmp_path 0
+    out_path: in_path ++ ".out"
+    write_file in_path v
+    cmd: "openssl enc -aes-256-cbc -pbkdf2 -salt -pass pass:" ++ (sh_single_quote key) ++ " -base64 -A -in " ++ (sh_single_quote in_path) ++ " -out " ++ (sh_single_quote out_path)
     r: exec cmd
+    vault_tmp_cleanup in_path
     if (get r "status") != 0
+        vault_tmp_cleanup out_path
         raise ("Verschluesselung fehlgeschlagen: " ++ (get r "output"))
-    trim (get r "output")
+    result: read_file out_path
+    vault_tmp_cleanup out_path
+    trim result
 
 fn decrypt_value v
     key: load_master_key 0
     if key == nil || key == ""
         raise "Passwortmanager ist nicht konfiguriert (MUNINN_VAULT_KEY fehlt in .env, siehe .env.example)."
-    cmd: "printf '%s' " ++ (sh_single_quote v) ++ " | openssl enc -aes-256-cbc -pbkdf2 -salt -pass pass:" ++ (sh_single_quote key) ++ " -base64 -A -d"
+    in_path: vault_tmp_path 0
+    out_path: in_path ++ ".out"
+    write_file in_path v
+    cmd: "openssl enc -aes-256-cbc -pbkdf2 -salt -pass pass:" ++ (sh_single_quote key) ++ " -base64 -A -d -in " ++ (sh_single_quote in_path) ++ " -out " ++ (sh_single_quote out_path)
     r: exec cmd
+    vault_tmp_cleanup in_path
     if (get r "status") != 0
+        vault_tmp_cleanup out_path
         raise ("Entschluesselung fehlgeschlagen: " ++ (get r "output"))
-    trim (get r "output")
+    result: read_file out_path
+    vault_tmp_cleanup out_path
+    trim result
 
 --! Tool: stores (or overwrites) the login for a site. Only the password is
 --! encrypted — the username stays plaintext, deliberately: it's rarely

@@ -25,6 +25,10 @@ google_creds/
 # TTS-Zwischendateien (Sprachnachrichten-Synthese, siehe tts_synth.sh)
 tts_tmp/
 
+# Vault-Zwischendateien (openssl-Ver-/Entschluesselung, siehe vault.pipe) -
+# Klartext liegt hier nur Sekundenbruchteile, wird nach jedem Aufruf geloescht
+.vault_tmp/
+
 # Pipe-Caches / Bytecode
 ~/.pipe
 *.pipec
