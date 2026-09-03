@@ -41,6 +41,25 @@ export fn model_for_agent agent
     else
         DEFAULT_MODEL
 
+--! DEFAULT_TIMEOUT matches the boot-time `ai_timeout 120` in muninn.pipe's
+--! setup_ai. PRO_TIMEOUT is longer — live-observed: a werkzeug_slideshot
+--! turn authoring a full multi-slide HTML document on PRO_MODEL hit
+--! "context deadline exceeded" at the 120s mark (round 6, mid-run MCP-
+--! reactivation retry) — the heavier model plus a large single-shot HTML
+--! response needs materially more headroom than routing/formatting calls
+--! ever did. Same per-agent-turn switching mechanism as model_for_agent
+--! (ai.ChatSwarm/httpPostJSON both read ActiveConfig fresh every round).
+DEFAULT_TIMEOUT: 120
+PRO_TIMEOUT: 300
+
+--! Which ai_timeout (seconds) the NEXT LLM call for this agent should
+--! use — called alongside model_for_agent on every swarm "start" event.
+export fn timeout_for_agent agent
+    if contains PRO_MODEL_AGENTS agent
+        PRO_TIMEOUT
+    else
+        DEFAULT_TIMEOUT
+
 fn cur_dbh _
     get STATE "dbh"
 
@@ -1336,12 +1355,14 @@ export fn run_gremium_stream dbh cid task on_update round_check
     set STATE "mcp_activated" ([])
     res: ai_swarm_stream task "planer" 150 on_update round_check
     --! Reset regardless of which agent's turn ended the run (see
-    --! model_for_agent) — otherwise a run that happened to END on
-    --! faktenwaechter/werkzeug_slideshot would leave the pro model active
-    --! for whatever unrelated ai_chat/ai_vision call happens next (e.g.
-    --! do_search's summarizer, the proactive email-importance judge),
-    --! silently paying the higher rate for work that was never meant to.
+    --! model_for_agent/timeout_for_agent) — otherwise a run that happened
+    --! to END on faktenwaechter/werkzeug_slideshot would leave the pro
+    --! model/longer timeout active for whatever unrelated ai_chat/
+    --! ai_vision call happens next (e.g. do_search's summarizer, the
+    --! proactive email-importance judge), silently paying the higher rate
+    --! (and waiting far longer on a hang) for work that was never meant to.
     ai_model DEFAULT_MODEL
+    ai_timeout DEFAULT_TIMEOUT
     res: apply_registrator_backstop res
     set res "mcp_activated" (get STATE "mcp_activated")
     res

@@ -890,8 +890,21 @@ fn handle_message token cid text dbh allowed uid
                     answer: get res3 "content"
                     save_trace dbh cid res3
             catch e3
-                print ("reactivation retry failed, keeping first answer: " ++ (to_str e3))
+                --! MUST overwrite `answer`, not just log — live-observed:
+                --! attempt 1 (before the specialist was even connected)
+                --! produced a plausible-sounding "handoff done, working on
+                --! it, PNGs coming shortly" placeholder, and this retry is
+                --! where the REAL work (e.g. werkzeug_slideshot authoring a
+                --! full multi-slide HTML doc) actually happens. Silently
+                --! keeping that stale placeholder on failure (the old
+                --! behavior) told the user work was progressing when
+                --! nothing further would ever happen — no error, no
+                --! completion, just silence forever. Say so honestly
+                --! instead, so the user knows to just ask again rather than
+                --! waiting on a task that already died.
+                print ("reactivation retry failed: " ++ (to_str e3))
                 mem.log_error dbh "run_gremium_stream_reactivation_retry" (to_str e3)
+                answer: "⚠️ Die eigentliche Arbeit mit dem gerade aktivierten Werkzeug ('" ++ (join activated ", ") ++ "') ist an einem technischen Problem gescheitert (z.B. eine Zeitüberschreitung) — die vorherige Zwischenmeldung war noch nicht die fertige Antwort, es kommt nichts mehr nach. Bitte stell deine Anfrage einfach nochmal, das Werkzeug ist jetzt direkt verfügbar."
             if aborted
                 tel_finalize token cid message_id ("🛑 " ++ abort_reason) nil
                 return nil
@@ -1342,8 +1355,12 @@ fn make_swarm_updater token cid message_id dbh
             --! comment. Switching per-agent here means a handoff to/from
             --! faktenwaechter/werkzeug_slideshot uses the stronger model
             --! for exactly their own turns, without touching run_gremium's
-            --! (non-streaming, background/proactive) callers.
+            --! (non-streaming, background/proactive) callers. Same for the
+            --! timeout — see grm.timeout_for_agent's doc comment (a
+            --! werkzeug_slideshot turn authoring a full multi-slide HTML
+            --! document hit the old fixed 120s limit mid-run, live).
             ai_model (grm.model_for_agent agent)
+            ai_timeout (grm.timeout_for_agent agent)
             last_group: nil
             if (len groups) > 0
                 last_group: at groups ((len groups) - 1)
