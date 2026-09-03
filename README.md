@@ -1204,6 +1204,9 @@ sie bei Bedarf selbst nach.
   Tap-to-Reveal-Markierung, keine neue Telegram-Anbindung nötig. Das ist ein bewusster
   Reveal: die Verschlüsselung schützt `muninn.db`, nicht die Chat-Historie einer
   ausdrücklich angeforderten Anzeige.
+- **`passwort_loeschen`/`passwort_liste`**: Verwaltung der gespeicherten Logins —
+  Löschen bestätigt nur Seite+Nutzername (nie das Passwort), die Übersicht zeigt
+  Seite+Nutzername für alle Einträge, ebenfalls ohne je zu entschlüsseln.
 
 ### Workspaces & Datei-Index (`swarm.pipe`)
 

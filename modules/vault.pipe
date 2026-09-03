@@ -197,6 +197,32 @@ export fn tool_passwort_pruefen h site
         return "Kein gespeicherter Login fuer '" ++ s ++ "' vorhanden."
     "Gespeicherter Login fuer '" ++ s ++ "' vorhanden, Nutzername: " ++ (get (at rows 0) "username")
 
+--! Tool: deletes a stored login. Confirms the username that was removed,
+--! never the password (matches tool_passwort_speichern's own confirmation
+--! style, and there's nothing more to know once a row is deleted anyway).
+export fn tool_passwort_loeschen h site
+    init_credentials h
+    s: normalize_site site
+    rows: mem.raw_query h ("SELECT username FROM credentials WHERE site = '" ++ (mem.sql_escape s) ++ "'")
+    if (len rows) == 0
+        return "Kein gespeicherter Login fuer '" ++ s ++ "' vorhanden, nichts zu loeschen."
+    username: get (at rows 0) "username"
+    mem.raw_exec h ("DELETE FROM credentials WHERE site = '" ++ (mem.sql_escape s) ++ "'")
+    "Login fuer '" ++ s ++ "' (Nutzername: " ++ username ++ ") geloescht."
+
+--! Tool: overview of all stored logins — site + username only, NEVER
+--! passwords. Lets the user (or werkzeug_browser) see what's actually
+--! stored without decrypting anything.
+export fn tool_passwort_liste h
+    init_credentials h
+    rows: mem.raw_query h "SELECT site, username FROM credentials ORDER BY site ASC"
+    if (len rows) == 0
+        return "Keine gespeicherten Logins vorhanden."
+    out: "Gespeicherte Logins:\n"
+    for r in rows
+        out: out ++ "- " ++ (get r "site") ++ " (Nutzername: " ++ (get r "username") ++ ")\n"
+    trim out
+
 --! Tool: explicit reveal (e.g. "was ist mein X-Passwort") — decrypts and
 --! returns the password wrapped in Discord-style "||spoiler||" markdown,
 --! which tg_html (telegram.pipe) already converts to Telegram's native
