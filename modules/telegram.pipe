@@ -115,14 +115,6 @@ export fn tg_html text
     --! (harmless, Telegram just renders a plain block) when no language tag
     --! was given.
     t: regex_replace "```([a-zA-Z0-9_+-]*)\\n?([\\s\\S]*?)```" "<pre><code class=\"language-$1\">$2</code></pre>" t
-    --! %%EXPAND%%...%%EXPAND%% -> Telegram's native "tap to expand"
-    --! blockquote. Deliberately NOT a natural-looking markdown convention
-    --! (unlike everything else below) — this is authored exclusively by
-    --! muninn.pipe's own code (see render_groups/make_swarm_updater for
-    --! the gremium live transcript), never by an LLM's free-form answer
-    --! text, which also flows through this same function; a weird,
-    --! effectively-impossible-to-collide marker keeps it that way.
-    t: regex_replace "%%EXPAND%%\\n?([\\s\\S]*?)%%EXPAND%%" "<blockquote expandable>$1</blockquote>" t
     t: regex_replace "\\*\\*(.+?)\\*\\*" "<b>$1</b>" t
     t: regex_replace "__(.+?)__" "<b>$1</b>" t
     t: regex_replace "\\*(.+?)\\*" "<i>$1</i>" t
