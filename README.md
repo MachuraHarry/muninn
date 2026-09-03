@@ -1067,11 +1067,15 @@ PowerPoint-Vorlagen) und rendert sie per Headless-Chrome zu PNG/PDF/WebP/PPTX.
   erneute Angabe kam im Test ein falscher Dateityp zurück (PDF statt der angeforderten
   PNGs).
 - **Bild-Einbettung**: der Renderer sieht nur den übergebenen HTML-String, kein
-  Dateisystem — ein Dateipfad in `<img src="...">` funktioniert nicht. Das eigene
-  Werkzeug `bild_als_base64` liest eine lokale Bilddatei (z.B. von `icon_holen`) und
-  liefert einen fertigen `data:image/...;base64,...`-URI zum Einbetten; ein
-  Fehlerergebnis wird NIE als `src` eingesetzt (ergäbe ein sichtbar kaputtes
-  Bild-Symbol im fertigen Slide) — dann bleibt das Bild einfach weg.
+  Dateisystem — ein Dateipfad in `<img src="...">` funktioniert nicht, und ein
+  Sprachmodell kann einen echten, zehntausende Zeichen langen Base64-String auch
+  nicht zuverlässig selbst in sein eigenes HTML kopieren (live diagnostiziert: es
+  erfindet stattdessen einen winzigen, aber syntaktisch validen Platzhalter, der als
+  kaputtes Bild-Symbol rendert). Deshalb schreibt der Spezialist nur einen kurzen
+  `LOCAL:<pfad>`-Marker in `<img src="...">` (Pfad von `icon_holen`/`bild_suchen`) und
+  ruft danach einmal, für das komplette HTML, das eigene Werkzeug
+  `bild_pfade_einbetten` auf — das ersetzt jeden Marker rein deterministisch (kein
+  KI-Call) durch die echten `data:image/...;base64,...`-Daten der Datei.
 - **Output liegt fest unter `/tmp/slideshot-output/`**, außerhalb von `mcp_data/` — als
   zweite vertrauenswürdige Wurzel in `resolve_muninn_path`s `TRUSTED_PATH_ROOTS`
   hinterlegt, sonst lehnen `bild_senden`/`datei_senden` den Versand als „außerhalb der

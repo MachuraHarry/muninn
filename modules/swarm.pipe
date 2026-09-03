@@ -422,9 +422,9 @@ fn tool_icon_holen suchbegriff farbe groesse
 --! through Openverse's own thumbnail proxy — see web_image_search/
 --! web_image_download's doc comments (web.pipe) for why the original
 --! provider URL isn't used directly (unreliable hotlinking, live-
---! verified). For embedding into HTML (e.g. werkzeug_slideshot), feed
---! the returned path through 'bild_als_base64' exactly like an
---! icon_holen result.
+--! verified). For embedding into HTML (e.g. werkzeug_slideshot), use the
+--! returned path as a 'LOCAL:<path>' marker in <img src="..."> exactly
+--! like an icon_holen result — see tool_bild_pfade_einbetten.
 fn tool_bild_suchen suchbegriff
     if suchbegriff == nil || (trim suchbegriff) == ""
         return "Suchbegriff fehlt."
@@ -848,33 +848,58 @@ fn tool_datei_senden path caption
     record_sent_file full_path caption
     "Datei gesendet: " ++ full_path
 
---! Tool: reads a local image file and returns it as a ready-to-embed
---! "data:image/<type>;base64,<...>" URI — for the slideshot specialist
---! (see the "slideshot" extra_note below), which authors raw HTML itself
---! and has no other way to get a real image (e.g. from icon_holen or
---! bild_erstellen) INTO that HTML: slideshot-mcp's renderer only sees the
---! HTML string it's given, not Muninn's filesystem, so a plain file path
---! in <img src="..."> would not resolve. MIME type is guessed from the
---! file extension (png/jpg/jpeg/webp/gif; unknown -> png, the common case
---! for icon_holen/bild_erstellen output).
-fn tool_bild_als_base64 path
-    full_path: resolve_muninn_path path
-    if full_path == nil
-        return "Ungueltiger Pfad (ausserhalb der erlaubten Verzeichnisse): " ++ (to_str path)
-    if !(file_exists full_path)
-        return "Datei nicht gefunden: " ++ full_path
-    content: read_file full_path
-    if content == nil || content == ""
-        return "Datei ist leer oder nicht lesbar: " ++ full_path
-    ext: lower (at (split full_path ".") ((len (split full_path ".")) - 1))
-    mime: "image/png"
-    if ext == "jpg" || ext == "jpeg"
-        mime: "image/jpeg"
-    else if ext == "webp"
-        mime: "image/webp"
-    else if ext == "gif"
-        mime: "image/gif"
-    "data:" ++ mime ++ ";base64," ++ (base64_encode content)
+--! Tool: takes a FULL HTML document authored by the slideshot specialist
+--! and deterministically replaces every `<img src="LOCAL:<path>">` marker
+--! with the real `data:image/<type>;base64,<...>` URI of that local file.
+--!
+--! WHY this exists instead of a per-image "give me the base64 string"
+--! tool (the old `tool_bild_als_base64`, since removed): live-diagnosed
+--! this session — when the specialist had to copy a real (tens of
+--! thousands of characters long) base64 string, as returned by a text
+--! tool result, into its OWN next tool-call's `html` argument, it did NOT
+--! faithfully reproduce it. It fabricated a short, syntactically-valid
+--! but content-free JPEG (571 bytes, correct magic+EOI markers) instead
+--! of copying the real ~30-70 KB file — an LLM cannot reliably
+--! verbatim-reproduce large opaque binary-as-text payloads through its
+--! own generation. The fix: never ask the model to touch base64 at all.
+--! It only ever needs to write a short local file path (already handed
+--! to it verbatim by icon_holen/bild_suchen) as a `LOCAL:`-prefixed
+--! marker; substitution into real image bytes happens here, in plain
+--! deterministic code, once per full HTML document.
+--!
+--! Uses the same path security boundary (resolve_muninn_path) and the
+--! same extension-based MIME guessing (png/jpg/jpeg/webp/gif; unknown ->
+--! png) as the old tool_bild_als_base64.
+fn tool_bild_pfade_einbetten html
+    marker: "LOCAL:"
+    out: ""
+    remaining: html
+    idx: index_of remaining marker
+    while idx >= 0
+        out: out ++ (substring remaining 0 idx)
+        after: substring remaining (idx + (len marker)) (len remaining)
+        end_quote: index_of after "\""
+        if end_quote < 0
+            out: out ++ marker ++ after
+            remaining: ""
+        else
+            path: substring after 0 end_quote
+            rest: substring after end_quote (len after)
+            full_path: resolve_muninn_path path
+            if full_path != nil && (file_exists full_path)
+                content: read_file full_path
+                ext: lower (at (split full_path ".") ((len (split full_path ".")) - 1))
+                mime: "image/png"
+                if ext == "jpg" || ext == "jpeg"
+                    mime: "image/jpeg"
+                else if ext == "webp"
+                    mime: "image/webp"
+                else if ext == "gif"
+                    mime: "image/gif"
+                out: out ++ "data:" ++ mime ++ ";base64," ++ (base64_encode content)
+            remaining: rest
+        idx: index_of remaining marker
+    out ++ remaining
 
 --! Maximum character count for a voice message — reading aloud is meant
 --! for short, casual replies, not long/content-heavy text (see the
@@ -1138,8 +1163,8 @@ export fn init_gremium _
     ai_tool "rezepte_suchen" "Fetch stored workflow recipes, to solve recurring tasks following a proven pattern." {query: "Keywords about the task"} tool_rezepte_suchen
     ai_tool "bericht_veroeffentlichen" "Publish a long text (research summary, report, article) as a Telegraph page instead of sending it as plain text (which gets cut off at Telegram's length limit) — Telegram shows Telegraph pages with its fast, native-feeling Instant View reader." {title: "Short, descriptive page title", text: "The full text, paragraphs separated by a blank line"} tool_bericht_veroeffentlichen
     ai_tool "icon_holen" "Find a free, open-source icon (200'000+ icons, no API key) matching a search term and save it as a ready-to-use PNG file — for embedding into a presentation/document (werkzeug_praesentation/werkzeug_dokument) or sending directly." {suchbegriff: "What the icon should show, in English (e.g. 'chart', 'warning', 'github', 'email')", farbe: "Optional hex color e.g. '#ff6600' — empty/omit for the icon's default color", groesse: "Optional pixel size, e.g. '128' — empty/omit for 128"} tool_icon_holen
-    ai_tool "bild_als_base64" "Read a local image file (e.g. from icon_holen or bild_erstellen) and return it as a ready-to-embed 'data:image/...;base64,...' URI — for werkzeug_slideshot, which authors raw HTML itself and has no other way to get a real image INTO that HTML (a plain file path in <img src=\"...\"> would not resolve inside the renderer)." {path: "Path to the image file (relative to /root/muninn or absolute)"} tool_bild_als_base64
-    ai_tool "bild_suchen" "Search for a REAL photo on the internet (not a simple line icon — use icon_holen for those, or bild_erstellen for a fully AI-generated image) and download it as a local file, ready to embed (e.g. via bild_als_base64 into a Slideshot slide). Free, no API key, license-filtered to reuse-friendly images." {suchbegriff: "What the photo should show, in English (e.g. 'mountain landscape', 'office team meeting', 'coffee cup')"} tool_bild_suchen
+    ai_tool "bild_pfade_einbetten" "For werkzeug_slideshot ONLY. Call this ONCE, after authoring the FULL HTML document, with the complete html as-is (containing one or more <img src=\"LOCAL:<path>\"> markers using paths from icon_holen/bild_suchen). Returns the same HTML with every LOCAL: marker deterministically replaced by the real embedded image data — use the RETURNED html (not your original) as the html argument for slideshot_create_slides. NEVER try to write or copy base64/data:image data yourself — that reliably fails; always go through this tool instead." {html: "The full HTML document, containing LOCAL:<path> markers in <img src=\"...\">"} tool_bild_pfade_einbetten
+    ai_tool "bild_suchen" "Search for a REAL photo on the internet (not a simple line icon — use icon_holen for those, or bild_erstellen for a fully AI-generated image) and download it as a local file, ready to embed (e.g. as a LOCAL: marker via bild_pfade_einbetten into a Slideshot slide). Free, no API key, license-filtered to reuse-friendly images." {suchbegriff: "What the photo should show, in English (e.g. 'mountain landscape', 'office team meeting', 'coffee cup')"} tool_bild_suchen
     ai_tool "workspace_erstellen" "Create a new, reusable workspace subfolder under mcp_data — a named place to keep everything about one ongoing topic/project together, instead of every file landing loose in mcp_data's root. Only for a genuinely ongoing/multi-file topic, not a one-off single file." {name: "Short, lowercase workspace name (letters/digits/_/-/. only, becomes the actual folder name)", zweck: "What this workspace is for"} tool_workspace_erstellen
     ai_tool "workspaces_auflisten" "List active workspaces (name + purpose) — check this FIRST before creating a new file for a request about an existing topic/project, so related work lands together instead of scattered across mcp_data." {} tool_workspaces_auflisten
     ai_tool "ziel_anlegen" "Create a long-term goal (a genuine ongoing objective the user wants to work towards over time — NOT a one-off task that's finished once this conversation ends). Shows up in /goals on Telegram and the web dashboard." {text: "Short, clear description of the goal"} tool_ziel_anlegen
@@ -1249,9 +1274,9 @@ export fn init_gremium _
             --! es in Muninns autonomem Gremiums-Lauf nicht, deshalb muss
             --! das hier explizit uebersteuert werden.
             push gtools "icon_holen"
-            push gtools "bild_als_base64"
+            push gtools "bild_pfade_einbetten"
             push gtools "bild_suchen"
-            extra_note: " WICHTIGER HINWEIS: Die Tool-Antworten von slideshot_* verlangen an mehreren Stellen woertlich, auf eine Nutzer-Bestaetigung zu warten ('STOP. WAIT for the user...') — das ist fuer einen interaktiven Client gedacht, den es hier NICHT gibt. Arbeite STATTDESSEN alle Schritte OHNE echte Zwischen-Pause durch, die urspruengliche Anfrage IST bereits die Bestaetigung. Exakte Schrittfolge: (1) 'slideshot_discover_themes' aufrufen (liefert Themen/Formate). (2) 'slideshot_create_slides' mit NUR theme+mode:'default' aufrufen (noch OHNE html) — die Antwort enthaelt ein CSS-Template und ein 'dimensions'-Feld mit der exakten Ziel-Pixelgroesse. (3) Ein vollstaendiges HTML-Dokument selbst verfassen: pro Folie ein Element mit class='slide', GENAU in der von Schritt 2 gelieferten 'dimensions'-Groesse (niemals eine Groesse raten oder das 'portrait'-Preset annehmen), mit 'overflow:hidden' und ausreichend Innenabstand (gegen abgeschnittenen Text — Inhalt an der tatsaechlichen Textmenge ausrichten, nicht starr positionieren) UND genug freiem Platz/Abstand um jedes eingebettete Bild (ein Icon darf NIE Ueberschrift/Text ueberlappen — reserviere sichtbaren Rand um jedes <img>, z.B. per margin/eigenem Container statt reiner position:absolute-Ueberlagerung). Soll ein 9:16-Format geliefert werden (haeufigster Wunsch), gibt es dafuer KEIN eingebautes Preset ('portrait' ist 4:5, NICHT 9:16!) — in Schritt 2 explizit orientation:'custom' mit width:1080, height:1920 uebergeben. Fuer ein einzubettendes Bild IMMER zuerst die Datei besorgen (ein passendes Icon von 'icon_holen', oder ein ECHTES Foto aus dem Internet von 'bild_suchen' — z.B. wenn der Nutzer ein echtes Foto statt nur eines Icons will) und DANACH 'bild_als_base64' mit dem lokalen Dateipfad aufrufen — NUR wenn das Ergebnis wirklich mit 'data:image' beginnt, als <img src=\"...\"> ins HTML einsetzen; beginnt es NICHT damit (Fehlertext wie 'Ungueltiger Pfad'/'Datei nicht gefunden'), NIEMALS diesen Fehlertext als src einsetzen (ergibt ein sichtbar kaputtes Bild-Symbol im fertigen Slide) — das Bild in diesem Fall einfach weglassen, ein Slide ohne Bild ist besser als ein kaputtes. Ein blosser Dateipfad als src funktioniert NIE, der Renderer sieht nur den HTML-String. (4) 'slideshot_create_slides' ERNEUT aufrufen, diesmal MIT dem fertigen html-Parameter (plus denselben theme/mode/orientation-Werten). (5) SOFORT im selben Zug 'slideshot_render_slides' aufrufen (NICHT warten, NICHT vorher zurueckmelden) — WICHTIG: 'render_slides' uebernimmt formats NICHT automatisch von 'create_slides', IMMER explizit denselben formats-Wert (Standard: nur 'png', ausser der Nutzer wollte erkennbar PDF) erneut mitgeben, sonst kann ein falscher/anderer Dateityp oder ein veralteter Cache-Stand zurueckkommen. Die fertigen Dateien liegen unter '/tmp/slideshot-output/' — schicke sie per 'datei_senden' (Originalqualitaet, kein Komprimierungsverlust) an den Nutzer. Ohne ausdruecklich anderslautenden Wunsch das vom Nutzer als Standard vorgegebene 'Pipe-Design' verwenden (dunkles Theme #07070c, Lila #a855f7, Gruen #3ce096, JetBrains Mono) — das entspricht am ehesten dem 'dark-modern'-Theme. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
+            extra_note: " WICHTIGER HINWEIS: Die Tool-Antworten von slideshot_* verlangen an mehreren Stellen woertlich, auf eine Nutzer-Bestaetigung zu warten ('STOP. WAIT for the user...') — das ist fuer einen interaktiven Client gedacht, den es hier NICHT gibt. Arbeite STATTDESSEN alle Schritte OHNE echte Zwischen-Pause durch, die urspruengliche Anfrage IST bereits die Bestaetigung. Exakte Schrittfolge: (1) 'slideshot_discover_themes' aufrufen (liefert Themen/Formate). (2) 'slideshot_create_slides' mit NUR theme+mode:'default' aufrufen (noch OHNE html) — die Antwort enthaelt ein CSS-Template und ein 'dimensions'-Feld mit der exakten Ziel-Pixelgroesse. (3) Ein vollstaendiges HTML-Dokument selbst verfassen: pro Folie ein Element mit class='slide', GENAU in der von Schritt 2 gelieferten 'dimensions'-Groesse (niemals eine Groesse raten oder das 'portrait'-Preset annehmen), mit 'overflow:hidden' und ausreichend Innenabstand (gegen abgeschnittenen Text — Inhalt an der tatsaechlichen Textmenge ausrichten, nicht starr positionieren) UND genug freiem Platz/Abstand um jedes eingebettete Bild (ein Icon darf NIE Ueberschrift/Text ueberlappen — reserviere sichtbaren Rand um jedes <img>, z.B. per margin/eigenem Container statt reiner position:absolute-Ueberlagerung). Soll ein 9:16-Format geliefert werden (haeufigster Wunsch), gibt es dafuer KEIN eingebautes Preset ('portrait' ist 4:5, NICHT 9:16!) — in Schritt 2 explizit orientation:'custom' mit width:1080, height:1920 uebergeben. Fuer ein einzubettendes Bild IMMER zuerst die Datei besorgen (ein passendes Icon von 'icon_holen', oder ein ECHTES Foto aus dem Internet von 'bild_suchen' — z.B. wenn der Nutzer ein echtes Foto statt nur eines Icons will) und den zurueckgegebenen lokalen Pfad als 'LOCAL:<pfad>' in <img src=\"...\"> ins HTML einsetzen, z.B. <img src=\"LOCAL:/root/muninn/mcp_data/images/foo.jpg\">. Versuche NIEMALS, selbst eine 'data:image'-URI oder Base64-Zeichen zu schreiben oder aus einem Tool-Ergebnis abzutippen/zu kopieren — das schlaegt strukturell zuverlaessig fehl (ein Sprachmodell kann so einen langen Zeichenblock nicht fehlerfrei reproduzieren) und ergibt ein kaputtes Bild-Symbol im fertigen Slide; der 'LOCAL:'-Marker mit dem KURZEN Dateipfad ist der einzig richtige Weg. (4) Ist das komplette HTML fertig verfasst, EINMAL 'bild_pfade_einbetten' mit dem GESAMTEN html-String aufrufen (nicht pro Bild einzeln) — er ersetzt automatisch jeden 'LOCAL:'-Marker durch die echten Bilddaten. Verwende ab hier NUR NOCH den von 'bild_pfade_einbetten' ZURUECKGEGEBENEN html-String, NICHT dein Original. (5) 'slideshot_create_slides' ERNEUT aufrufen, diesmal MIT diesem fertigen (von 'bild_pfade_einbetten' zurueckgegebenen) html-Parameter (plus denselben theme/mode/orientation-Werten). (6) SOFORT im selben Zug 'slideshot_render_slides' aufrufen (NICHT warten, NICHT vorher zurueckmelden) — WICHTIG: 'render_slides' uebernimmt formats NICHT automatisch von 'create_slides', IMMER explizit denselben formats-Wert (Standard: nur 'png', ausser der Nutzer wollte erkennbar PDF) erneut mitgeben, sonst kann ein falscher/anderer Dateityp oder ein veralteter Cache-Stand zurueckkommen. Die fertigen Dateien liegen unter '/tmp/slideshot-output/' — schicke sie per 'datei_senden' (Originalqualitaet, kein Komprimierungsverlust) an den Nutzer. Ohne ausdruecklich anderslautenden Wunsch das vom Nutzer als Standard vorgegebene 'Pipe-Design' verwenden (dunkles Theme #07070c, Lila #a855f7, Gruen #3ce096, JetBrains Mono) — das entspricht am ehesten dem 'dark-modern'-Theme. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
         agent_name: "werkzeug_" ++ alias
         push specialist_names agent_name
         specialist_desc: specialist_desc ++ "- '" ++ agent_name ++ "': Werkzeuge aus '" ++ alias ++ "' (" ++ (join gtools ", ") ++ ")\n"
