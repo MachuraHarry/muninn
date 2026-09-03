@@ -848,9 +848,10 @@ fn tool_datei_senden path caption
     record_sent_file full_path caption
     "Datei gesendet: " ++ full_path
 
---! Tool: takes a FULL HTML document authored by the slideshot specialist
---! and deterministically replaces every `<img src="LOCAL:<path>">` marker
---! with the real `data:image/<type>;base64,<...>` URI of that local file.
+--! Internal helper (NOT an ai_tool — see tool_slideshot_folien_erstellen
+--! below for why): takes a FULL HTML document and deterministically
+--! replaces every `<img src="LOCAL:<path>">` marker with the real
+--! `data:image/<type>;base64,<...>` URI of that local file.
 --!
 --! WHY this exists instead of a per-image "give me the base64 string"
 --! tool (the old `tool_bild_als_base64`, since removed): live-diagnosed
@@ -861,16 +862,28 @@ fn tool_datei_senden path caption
 --! but content-free JPEG (571 bytes, correct magic+EOI markers) instead
 --! of copying the real ~30-70 KB file — an LLM cannot reliably
 --! verbatim-reproduce large opaque binary-as-text payloads through its
---! own generation. The fix: never ask the model to touch base64 at all.
---! It only ever needs to write a short local file path (already handed
---! to it verbatim by icon_holen/bild_suchen) as a `LOCAL:`-prefixed
---! marker; substitution into real image bytes happens here, in plain
---! deterministic code, once per full HTML document.
+--! own generation.
+--!
+--! An EARLIER version of this fix exposed this substitution as its own
+--! ai_tool ('bild_pfade_einbetten'), requiring the specialist to (a) call
+--! it once with the full html and (b) use its RETURNED html (not its own
+--! original) for the next slideshot_create_slides call. Live-diagnosed
+--! AGAIN right after shipping that: the rendered slide still showed a
+--! broken-image icon, and the actual /tmp/slideshot-output/slides.html
+--! still contained literal unresolved "LOCAL:" marker text — the
+--! specialist either skipped the substitution call or ignored its return
+--! value and reused its own original html anyway. A two-step
+--! call-then-correctly-chain-the-result choreography is exactly the kind
+--! of thing this codebase has repeatedly found LLMs unreliable at (see
+--! the Docker duplicate-job bug, the same base64-copying bug itself).
+--! Fix: collapse image substitution AND the create+render MCP calls into
+--! ONE deterministic tool call (tool_slideshot_folien_erstellen) so
+--! there is no intermediate result for the model to mishandle.
 --!
 --! Uses the same path security boundary (resolve_muninn_path) and the
 --! same extension-based MIME guessing (png/jpg/jpeg/webp/gif; unknown ->
 --! png) as the old tool_bild_als_base64.
-fn tool_bild_pfade_einbetten html
+fn substitute_local_image_markers html
     marker: "LOCAL:"
     out: ""
     remaining: html
@@ -900,6 +913,72 @@ fn tool_bild_pfade_einbetten html
             remaining: rest
         idx: index_of remaining marker
     out ++ remaining
+
+--! Coerces a numeric-ish value to a Pipe Float, specifically for values
+--! that will be forwarded into a SECOND tool_call from within a local
+--! ai_tool (like width/height below into slideshot_create_slides).
+--! WHY: live-diagnosed a real interpreter bug this session — when an
+--! Integer value round-trips through such a nested tool_call, the
+--! interpreter's Go-side interfaceToObject() (pkg/object/builtins_mcp.go)
+--! has a case for float64 but NOT int64, so the value silently degrades
+--! to a fmt.Sprintf("%v", ...) STRING by the time it reaches the actual
+--! MCP call, which then rejects it ("Expected number, received string").
+--! Confirmed live: passing width/height as-is (via to_num) failed this
+--! way; adding "+ 0.0" to force a genuine Float (which interfaceToObject
+--! DOES handle) fixed it. A plain Float never enters the buggy Integer
+--! path, so this is a safe workaround without touching the interpreter.
+fn mcp_safe_num v
+    (to_num v) + 0.0
+
+--! Tool: the ONLY way werkzeug_slideshot commits its authored HTML and
+--! gets rendered files — replaces the previous 2-step
+--! "slideshot_create_slides(html) THEN slideshot_render_slides(formats)"
+--! sequence the specialist had to perform itself (see
+--! substitute_local_image_markers above for why that was unreliable).
+--! This single call: (1) substitutes every LOCAL: marker in `html` with
+--! real embedded image data, (2) calls the real MCP tool
+--! 'slideshot_create_slides' with the substituted html, (3) IMMEDIATELY
+--! calls 'slideshot_render_slides' with `formats` (defaulting to ["png"]
+--! if omitted) — guaranteeing formats is always (re-)supplied, since
+--! render_slides does NOT inherit it from create_slides (a previously
+--! live-diagnosed bug). Returns both MCP results as one JSON object.
+fn tool_slideshot_folien_erstellen theme mode html orientation width height format
+    sub_html: substitute_local_image_markers html
+    create_args: {theme: theme, mode: mode, html: sub_html}
+    if orientation != nil && orientation != ""
+        set create_args "orientation" orientation
+    if width != nil && width != ""
+        set create_args "width" (mcp_safe_num width)
+    if height != nil && height != ""
+        set create_args "height" (mcp_safe_num height)
+    fmt: format
+    if fmt == nil || fmt == ""
+        fmt: "png"
+    try
+        create_res: tool_call "slideshot_create_slides" create_args
+        render_res: tool_call "slideshot_render_slides" {formats: [fmt]}
+        to_json {create: create_res, render: render_res}
+    catch e
+        "Fehler bei slideshot_folien_erstellen: " ++ (to_str e)
+
+--! Tool: the sizing-probe step (slideshot_discover_themes -> THIS ->
+--! author html -> slideshot_folien_erstellen). A thin passthrough to the
+--! real MCP 'slideshot_create_slides' WITHOUT html, just to learn the
+--! exact 'dimensions' for the chosen theme/mode/orientation before
+--! writing HTML. Exists as its own wrapper (instead of exposing the raw
+--! MCP tool directly) so that werkzeug_slideshot's gtools can omit
+--! 'slideshot_create_slides'/'slideshot_render_slides' entirely — the
+--! specialist then has NO way to bypass tool_slideshot_folien_erstellen's
+--! mandatory LOCAL: substitution by calling the raw MCP tools itself.
+fn tool_slideshot_groesse_ermitteln theme mode orientation width height
+    args: {theme: theme, mode: mode}
+    if orientation != nil && orientation != ""
+        set args "orientation" orientation
+    if width != nil && width != ""
+        set args "width" (mcp_safe_num width)
+    if height != nil && height != ""
+        set args "height" (mcp_safe_num height)
+    tool_call "slideshot_create_slides" args
 
 --! Maximum character count for a voice message — reading aloud is meant
 --! for short, casual replies, not long/content-heavy text (see the
@@ -1163,7 +1242,8 @@ export fn init_gremium _
     ai_tool "rezepte_suchen" "Fetch stored workflow recipes, to solve recurring tasks following a proven pattern." {query: "Keywords about the task"} tool_rezepte_suchen
     ai_tool "bericht_veroeffentlichen" "Publish a long text (research summary, report, article) as a Telegraph page instead of sending it as plain text (which gets cut off at Telegram's length limit) — Telegram shows Telegraph pages with its fast, native-feeling Instant View reader." {title: "Short, descriptive page title", text: "The full text, paragraphs separated by a blank line"} tool_bericht_veroeffentlichen
     ai_tool "icon_holen" "Find a free, open-source icon (200'000+ icons, no API key) matching a search term and save it as a ready-to-use PNG file — for embedding into a presentation/document (werkzeug_praesentation/werkzeug_dokument) or sending directly." {suchbegriff: "What the icon should show, in English (e.g. 'chart', 'warning', 'github', 'email')", farbe: "Optional hex color e.g. '#ff6600' — empty/omit for the icon's default color", groesse: "Optional pixel size, e.g. '128' — empty/omit for 128"} tool_icon_holen
-    ai_tool "bild_pfade_einbetten" "For werkzeug_slideshot ONLY. Call this ONCE, after authoring the FULL HTML document, with the complete html as-is (containing one or more <img src=\"LOCAL:<path>\"> markers using paths from icon_holen/bild_suchen). Returns the same HTML with every LOCAL: marker deterministically replaced by the real embedded image data — use the RETURNED html (not your original) as the html argument for slideshot_create_slides. NEVER try to write or copy base64/data:image data yourself — that reliably fails; always go through this tool instead." {html: "The full HTML document, containing LOCAL:<path> markers in <img src=\"...\">"} tool_bild_pfade_einbetten
+    ai_tool "slideshot_groesse_ermitteln" "For werkzeug_slideshot ONLY — call this SECOND, right after slideshot_discover_themes, BEFORE writing any HTML. Probes the real 'dimensions' for a theme/mode/orientation combination (pass orientation/width/height only for a custom size like 9:16, else omit) — use the returned 'dimensions' as the exact pixel size for your <div class='slide'> elements, never guess." {theme: "Theme name from slideshot_discover_themes", mode: "Mode, usually 'default'", orientation: "Optional: 'custom' for a non-preset size like 9:16, else empty string", width: {type: "number", description: "Optional: pixel width, only with orientation:'custom', else omit"}, height: {type: "number", description: "Optional: pixel height, only with orientation:'custom', else omit"}} tool_slideshot_groesse_ermitteln
+    ai_tool "slideshot_folien_erstellen" "For werkzeug_slideshot ONLY — the ONE call that finalizes and renders your slides, replacing slideshot_create_slides(html)+slideshot_render_slides as two separate calls. Call this ONCE after authoring the full HTML: pass theme/mode exactly as used in your earlier probing slideshot_create_slides call, plus orientation/width/height if you used a custom size (e.g. 9:16), and format if not just PNG. Any <img src=\"LOCAL:<path>\"> marker in your html (paths from icon_holen/bild_suchen) is automatically replaced with the real embedded image — NEVER try to write or copy base64/data:image data yourself, that reliably fails. This call ALSO renders the files (to /tmp/slideshot-output/) — do not call slideshot_render_slides yourself afterward." {theme: "Theme name from slideshot_discover_themes", mode: "Mode, usually 'default'", html: "Full HTML document, with LOCAL:<path> markers in <img src=\"...\">", orientation: "Optional: 'custom' for a non-preset size like 9:16, else empty string", width: {type: "number", description: "Optional: pixel width, only with orientation:'custom', else omit"}, height: {type: "number", description: "Optional: pixel height, only with orientation:'custom', else omit"}, format: "Optional: output format, e.g. 'png' (default) or 'pdf'"} tool_slideshot_folien_erstellen
     ai_tool "bild_suchen" "Search for a REAL photo on the internet (not a simple line icon — use icon_holen for those, or bild_erstellen for a fully AI-generated image) and download it as a local file, ready to embed (e.g. as a LOCAL: marker via bild_pfade_einbetten into a Slideshot slide). Free, no API key, license-filtered to reuse-friendly images." {suchbegriff: "What the photo should show, in English (e.g. 'mountain landscape', 'office team meeting', 'coffee cup')"} tool_bild_suchen
     ai_tool "workspace_erstellen" "Create a new, reusable workspace subfolder under mcp_data — a named place to keep everything about one ongoing topic/project together, instead of every file landing loose in mcp_data's root. Only for a genuinely ongoing/multi-file topic, not a one-off single file." {name: "Short, lowercase workspace name (letters/digits/_/-/. only, becomes the actual folder name)", zweck: "What this workspace is for"} tool_workspace_erstellen
     ai_tool "workspaces_auflisten" "List active workspaces (name + purpose) — check this FIRST before creating a new file for a request about an existing topic/project, so related work lands together instead of scattered across mcp_data." {} tool_workspaces_auflisten
@@ -1273,10 +1353,24 @@ export fn init_gremium _
             --! "STOP. WAIT for the user..." vor jedem Schritt) — das gibt
             --! es in Muninns autonomem Gremiums-Lauf nicht, deshalb muss
             --! das hier explizit uebersteuert werden.
+            --! slideshot_create_slides/slideshot_render_slides are
+            --! deliberately EXCLUDED from gtools (not just discouraged in
+            --! the extra_note) — the specialist could otherwise bypass the
+            --! wrapper tools below and call them raw with a finished html,
+            --! skipping the mandatory LOCAL: marker substitution again
+            --! (live-diagnosed: the extra_note ALONE already failed to
+            --! prevent this once for the old 2-step 'bild_pfade_einbetten'
+            --! design). The two wrapper tools cover every legitimate use.
+            filtered_gtools: []
+            for tn in gtools
+                if tn != "slideshot_create_slides" && tn != "slideshot_render_slides"
+                    push filtered_gtools tn
+            gtools: filtered_gtools
             push gtools "icon_holen"
-            push gtools "bild_pfade_einbetten"
+            push gtools "slideshot_groesse_ermitteln"
+            push gtools "slideshot_folien_erstellen"
             push gtools "bild_suchen"
-            extra_note: " WICHTIGER HINWEIS: Die Tool-Antworten von slideshot_* verlangen an mehreren Stellen woertlich, auf eine Nutzer-Bestaetigung zu warten ('STOP. WAIT for the user...') — das ist fuer einen interaktiven Client gedacht, den es hier NICHT gibt. Arbeite STATTDESSEN alle Schritte OHNE echte Zwischen-Pause durch, die urspruengliche Anfrage IST bereits die Bestaetigung. Exakte Schrittfolge: (1) 'slideshot_discover_themes' aufrufen (liefert Themen/Formate). (2) 'slideshot_create_slides' mit NUR theme+mode:'default' aufrufen (noch OHNE html) — die Antwort enthaelt ein CSS-Template und ein 'dimensions'-Feld mit der exakten Ziel-Pixelgroesse. (3) Ein vollstaendiges HTML-Dokument selbst verfassen: pro Folie ein Element mit class='slide', GENAU in der von Schritt 2 gelieferten 'dimensions'-Groesse (niemals eine Groesse raten oder das 'portrait'-Preset annehmen), mit 'overflow:hidden' und ausreichend Innenabstand (gegen abgeschnittenen Text — Inhalt an der tatsaechlichen Textmenge ausrichten, nicht starr positionieren) UND genug freiem Platz/Abstand um jedes eingebettete Bild (ein Icon darf NIE Ueberschrift/Text ueberlappen — reserviere sichtbaren Rand um jedes <img>, z.B. per margin/eigenem Container statt reiner position:absolute-Ueberlagerung). Soll ein 9:16-Format geliefert werden (haeufigster Wunsch), gibt es dafuer KEIN eingebautes Preset ('portrait' ist 4:5, NICHT 9:16!) — in Schritt 2 explizit orientation:'custom' mit width:1080, height:1920 uebergeben. Fuer ein einzubettendes Bild IMMER zuerst die Datei besorgen (ein passendes Icon von 'icon_holen', oder ein ECHTES Foto aus dem Internet von 'bild_suchen' — z.B. wenn der Nutzer ein echtes Foto statt nur eines Icons will) und den zurueckgegebenen lokalen Pfad als 'LOCAL:<pfad>' in <img src=\"...\"> ins HTML einsetzen, z.B. <img src=\"LOCAL:/root/muninn/mcp_data/images/foo.jpg\">. Versuche NIEMALS, selbst eine 'data:image'-URI oder Base64-Zeichen zu schreiben oder aus einem Tool-Ergebnis abzutippen/zu kopieren — das schlaegt strukturell zuverlaessig fehl (ein Sprachmodell kann so einen langen Zeichenblock nicht fehlerfrei reproduzieren) und ergibt ein kaputtes Bild-Symbol im fertigen Slide; der 'LOCAL:'-Marker mit dem KURZEN Dateipfad ist der einzig richtige Weg. (4) Ist das komplette HTML fertig verfasst, EINMAL 'bild_pfade_einbetten' mit dem GESAMTEN html-String aufrufen (nicht pro Bild einzeln) — er ersetzt automatisch jeden 'LOCAL:'-Marker durch die echten Bilddaten. Verwende ab hier NUR NOCH den von 'bild_pfade_einbetten' ZURUECKGEGEBENEN html-String, NICHT dein Original. (5) 'slideshot_create_slides' ERNEUT aufrufen, diesmal MIT diesem fertigen (von 'bild_pfade_einbetten' zurueckgegebenen) html-Parameter (plus denselben theme/mode/orientation-Werten). (6) SOFORT im selben Zug 'slideshot_render_slides' aufrufen (NICHT warten, NICHT vorher zurueckmelden) — WICHTIG: 'render_slides' uebernimmt formats NICHT automatisch von 'create_slides', IMMER explizit denselben formats-Wert (Standard: nur 'png', ausser der Nutzer wollte erkennbar PDF) erneut mitgeben, sonst kann ein falscher/anderer Dateityp oder ein veralteter Cache-Stand zurueckkommen. Die fertigen Dateien liegen unter '/tmp/slideshot-output/' — schicke sie per 'datei_senden' (Originalqualitaet, kein Komprimierungsverlust) an den Nutzer. Ohne ausdruecklich anderslautenden Wunsch das vom Nutzer als Standard vorgegebene 'Pipe-Design' verwenden (dunkles Theme #07070c, Lila #a855f7, Gruen #3ce096, JetBrains Mono) — das entspricht am ehesten dem 'dark-modern'-Theme. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
+            extra_note: " WICHTIGER HINWEIS: Die Tool-Antworten von slideshot_* verlangen an mehreren Stellen woertlich, auf eine Nutzer-Bestaetigung zu warten ('STOP. WAIT for the user...') — das ist fuer einen interaktiven Client gedacht, den es hier NICHT gibt. Arbeite STATTDESSEN alle Schritte OHNE echte Zwischen-Pause durch, die urspruengliche Anfrage IST bereits die Bestaetigung. Exakte Schrittfolge: (1) 'slideshot_discover_themes' aufrufen (liefert Themen/Formate). (2) 'slideshot_groesse_ermitteln' mit theme+mode:'default' aufrufen (noch OHNE html — dieses Werkzeug erledigt den 'slideshot_create_slides'-Sondierungsaufruf fuer dich) — die Antwort enthaelt ein CSS-Template und ein 'dimensions'-Feld mit der exakten Ziel-Pixelgroesse. (3) Ein vollstaendiges HTML-Dokument selbst verfassen: pro Folie ein Element mit class='slide', GENAU in der von Schritt 2 gelieferten 'dimensions'-Groesse (niemals eine Groesse raten oder das 'portrait'-Preset annehmen), mit 'overflow:hidden' und ausreichend Innenabstand (gegen abgeschnittenen Text — Inhalt an der tatsaechlichen Textmenge ausrichten, nicht starr positionieren) UND genug freiem Platz/Abstand um jedes eingebettete Bild (ein Icon darf NIE Ueberschrift/Text ueberlappen — reserviere sichtbaren Rand um jedes <img>, z.B. per margin/eigenem Container statt reiner position:absolute-Ueberlagerung). Soll ein 9:16-Format geliefert werden (haeufigster Wunsch), gibt es dafuer KEIN eingebautes Preset ('portrait' ist 4:5, NICHT 9:16!) — dafuer orientation:'custom' mit width:1080, height:1920 angeben, und zwar bei BEIDEN Aufrufen (Schritt 2 UND Schritt 4) mit denselben Werten, sonst passt die in Schritt 3 verwendete Groesse nicht zur tatsaechlich gerenderten. Fuer ein einzubettendes Bild IMMER zuerst die Datei besorgen (ein passendes Icon von 'icon_holen', oder ein ECHTES Foto aus dem Internet von 'bild_suchen' — z.B. wenn der Nutzer ein echtes Foto statt nur eines Icons will) und den zurueckgegebenen lokalen Pfad als 'LOCAL:<pfad>' in <img src=\"...\"> ins HTML einsetzen, z.B. <img src=\"LOCAL:/root/muninn/mcp_data/images/foo.jpg\">. Versuche NIEMALS, selbst eine 'data:image'-URI oder Base64-Zeichen zu schreiben oder aus einem Tool-Ergebnis abzutippen/zu kopieren — das schlaegt strukturell zuverlaessig fehl (ein Sprachmodell kann so einen langen Zeichenblock nicht fehlerfrei reproduzieren) und ergibt ein kaputtes Bild-Symbol im fertigen Slide; der 'LOCAL:'-Marker mit dem KURZEN Dateipfad ist der einzig richtige Weg. (4) Ist das komplette HTML fertig verfasst, EINMAL 'slideshot_folien_erstellen' aufrufen (NICHT 'slideshot_create_slides' oder 'slideshot_render_slides' direkt — diese beiden ruft 'slideshot_folien_erstellen' intern selbst korrekt nacheinander auf) mit theme/mode/html (plus orientation/width/height bei einer custom-Groesse) — dieser EINE Aufruf ersetzt automatisch jeden 'LOCAL:'-Marker im html durch die echten Bilddaten UND rendert direkt im selben Zug die fertigen Dateien. Rufe NIEMALS 'slideshot_create_slides' mit fertigem html selbst auf und NIEMALS 'slideshot_render_slides' selbst — nur 'slideshot_folien_erstellen', sonst werden die 'LOCAL:'-Marker nicht ersetzt und das Bild bleibt kaputt. Die fertigen Dateien liegen unter '/tmp/slideshot-output/' — schicke sie per 'datei_senden' (Originalqualitaet, kein Komprimierungsverlust) an den Nutzer. Ohne ausdruecklich anderslautenden Wunsch das vom Nutzer als Standard vorgegebene 'Pipe-Design' verwenden (dunkles Theme #07070c, Lila #a855f7, Gruen #3ce096, JetBrains Mono) — das entspricht am ehesten dem 'dark-modern'-Theme. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
         agent_name: "werkzeug_" ++ alias
         push specialist_names agent_name
         specialist_desc: specialist_desc ++ "- '" ++ agent_name ++ "': Werkzeuge aus '" ++ alias ++ "' (" ++ (join gtools ", ") ++ ")\n"

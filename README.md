@@ -1056,26 +1056,44 @@ PowerPoint-Vorlagen) und rendert sie per Headless-Chrome zu PNG/PDF/WebP/PPTX.
   verlangen an mehreren Stellen wörtlich, auf eine Nutzer-Bestätigung zu warten
   ("STOP. WAIT for the user..."), etwas, das es in Muninns autonomem Gremiums-Lauf
   nicht gibt. Der `werkzeug_slideshot`-Spezialist bekommt daher eine explizite
-  Übersteuerung samt der live verifizierten, festen Schrittfolge:
-  `discover_themes` → `create_slides` (nur Theme+Modus, liefert CSS-Vorlage + exakte
-  Zielgröße) → HTML selbst verfassen → `create_slides` erneut MIT dem fertigen HTML →
-  sofort `render_slides` (kein Zurückmelden dazwischen).
+  Übersteuerung samt fester Schrittfolge: `discover_themes` → `groesse_ermitteln`
+  (Theme+Modus, liefert CSS-Vorlage + exakte Zielgröße) → HTML selbst verfassen →
+  `slideshot_folien_erstellen` (siehe Bild-Einbettung unten).
+- **`slideshot_create_slides`/`slideshot_render_slides` sind für diesen Spezialisten
+  bewusst NICHT direkt aufrufbar** — nur die zwei eigenen Werkzeuge
+  `slideshot_groesse_ermitteln` (reiner Sondierungsaufruf ohne HTML) und
+  `slideshot_folien_erstellen` (siehe unten) stehen zur Verfügung. Grund: eine erste
+  Version verließ sich darauf, dass die KI nach einem separaten
+  Bild-Einbettungs-Schritt zuverlässig dessen Rückgabewert weiterverwendet statt ihr
+  eigenes Original — live-diagnostiziert, dass genau das fehlschlug (die KI ignorierte
+  das Ergebnis und rief die echten MCP-Werkzeuge trotzdem mit dem unveränderten HTML
+  auf). Ohne Zugriff auf die rohen Werkzeuge ist dieser Umweg gar nicht mehr möglich.
 - **Kein eingebautes 9:16-Format** — nur `portrait` (4:5), `landscape` (16:9),
   `instagram` (1:1) sind vordefiniert; für 9:16 (häufigster Wunsch) explizit
-  `orientation:'custom'` mit `width:1080, height:1920`.
-- **`render_slides` übernimmt `formats` NICHT automatisch** von `create_slides` — ohne
-  erneute Angabe kam im Test ein falscher Dateityp zurück (PDF statt der angeforderten
-  PNGs).
+  `orientation:'custom'` mit `width:1080, height:1920`, bei BEIDEN Aufrufen (Sondierung
+  und Erstellung) mit denselben Werten.
 - **Bild-Einbettung**: der Renderer sieht nur den übergebenen HTML-String, kein
   Dateisystem — ein Dateipfad in `<img src="...">` funktioniert nicht, und ein
   Sprachmodell kann einen echten, zehntausende Zeichen langen Base64-String auch
   nicht zuverlässig selbst in sein eigenes HTML kopieren (live diagnostiziert: es
   erfindet stattdessen einen winzigen, aber syntaktisch validen Platzhalter, der als
   kaputtes Bild-Symbol rendert). Deshalb schreibt der Spezialist nur einen kurzen
-  `LOCAL:<pfad>`-Marker in `<img src="...">` (Pfad von `icon_holen`/`bild_suchen`) und
-  ruft danach einmal, für das komplette HTML, das eigene Werkzeug
-  `bild_pfade_einbetten` auf — das ersetzt jeden Marker rein deterministisch (kein
-  KI-Call) durch die echten `data:image/...;base64,...`-Daten der Datei.
+  `LOCAL:<pfad>`-Marker in `<img src="...">` (Pfad von `icon_holen`/`bild_suchen`).
+  Das eigene Werkzeug `slideshot_folien_erstellen` bündelt den kompletten letzten
+  Schritt in EINEM deterministischen Aufruf: Marker-Ersetzung durch die echten
+  `data:image/...;base64,...`-Daten (kein KI-Call), dann `create_slides` mit dem
+  fertigen HTML, dann sofort `render_slides` — das schließt sowohl das
+  Base64-Kopierproblem als auch die separat live-diagnostizierte
+  "`render_slides` übernimmt `formats` nicht automatisch von `create_slides`"-Falle
+  aus, da beide Aufrufe intern immer korrekt zusammen passieren.
+- **Interpreter-Falle bei verschachtelten `tool_call`s**: eine Ganzzahl (z.B.
+  `width:1080`), die durch einen zweiten `tool_call` aus einem eigenen `ai_tool`
+  heraus weitergereicht wird, degradiert im Pipe-Interpreter auf dem Rückweg
+  (`interfaceToObject` in `pkg/object/builtins_mcp.go` kennt nur `float64`, nicht
+  `int64`) stillschweigend zu einem String — die MCP-Gegenstelle lehnt das dann mit
+  "Expected number, received string" ab. Workaround in `swarm.pipe`
+  (`mcp_safe_num`): `+ 0.0` erzwingt echtes Float, das den Interpreter-Pfad korrekt
+  übersteht.
 - **Output liegt fest unter `/tmp/slideshot-output/`**, außerhalb von `mcp_data/` — als
   zweite vertrauenswürdige Wurzel in `resolve_muninn_path`s `TRUSTED_PATH_ROOTS`
   hinterlegt, sonst lehnen `bild_senden`/`datei_senden` den Versand als „außerhalb der
