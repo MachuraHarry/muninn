@@ -1111,7 +1111,7 @@ fn agent_display_name agent
     {icon: "🧠", name: agent}
 
 --! Bare verb phrase for an agent's role, no icon/name (e.g. "is checking
---! facts and memory...") — composed into render_group_rows below.
+--! facts and memory...") — composed into agent_group_header below.
 fn agent_verb_phrase agent
     if agent == "planer"
         return "is planning the answer..."
@@ -1126,11 +1126,17 @@ fn agent_verb_phrase agent
     "is thinking..."
 
 --! Icon + bold name for an agent, e.g. "🔍 **Mimir**" — the shared
---! identity fragment for a table row's Agent cell and a handoff line's
+--! identity fragment for the tree's group header and a handoff line's
 --! target reference.
 fn agent_icon_name agent
     d: agent_display_name agent
     (get d "icon") ++ " **" ++ (get d "name") ++ "**"
+
+--! Full-log group header: icon + bold name + em-dash + verb phrase (e.g.
+--! "🔍 **Mimir** — is checking facts and memory...") — the dash reads
+--! better as a standalone tree-branch header than run into the phrase.
+fn agent_group_header agent
+    (agent_icon_name agent) ++ " — " ++ (agent_verb_phrase agent)
 
 --! Icon for a tool call, by tool name — keeps the tree scannable at a
 --! glance instead of uniform text for everything. Falls back to a
@@ -1218,39 +1224,46 @@ fn handoff_reason args_json
         return ""
     truncate_status (to_str r) 80
 
---! Renders one agent group as Rich-Message-Markdown table rows: a leading
---! "Agent | verb phrase" row, then one "Agent | entry text" row per
---! collected entry (see make_swarm_updater) — Markdown tables can't merge
---! a cell across rows (only the fuller `blocks` JSON API could, out of
---! scope here), so the Agent cell is simply repeated. Every cell runs
---! through tel.tel_escape_table_cell first (a literal "|" or newline in
---! model-written text would otherwise corrupt the table structure).
-fn render_group_rows g
-    agent: get g "agent"
-    cell_agent: tel.tel_escape_table_cell (agent_icon_name agent)
-    rows: []
-    push rows ("| " ++ cell_agent ++ " | " ++ (tel.tel_escape_table_cell (agent_verb_phrase agent)) ++ " |")
+--! Renders one agent group as a tree branch: its header
+--! (agent_group_header) plus its collected entries, each a map
+--! {text, handoff} (see make_swarm_updater) — "├─ " for every entry but
+--! the last, "└─▶ " for a trailing handoff (points at the target it's
+--! handing off to), plain "└─ " for any other trailing entry.
+fn render_group g
+    header: agent_group_header (get g "agent")
     lines: get g "lines"
-    for entry in lines
-        push rows ("| " ++ cell_agent ++ " | " ++ (tel.tel_escape_table_cell (get entry "text")) ++ " |")
-    rows
+    n: len lines
+    if n == 0
+        return header
+    rendered: []
+    i: 0
+    while i < n
+        entry: at lines i
+        connector: "├─ "
+        if i == (n - 1)
+            if (get entry "handoff") == true
+                connector: "└─▶ "
+            else
+                connector: "└─ "
+        push rendered (connector ++ (get entry "text"))
+        i: i + 1
+    header ++ "\n" ++ (join rendered "\n")
 
---! Joins accumulated agent groups (see make_swarm_updater) into one Rich
---! Message Markdown table ("| Agent | Step |" header, one row per
---! render_group_rows entry) — used both for the LIVE edited message while
---! the gremium is working, and again afterward for the standalone "📜
---! Verlauf" button message. Kept under a safe character budget (well
---! below Rich Messages' 32768-char limit), dropping the OLDEST groups
---! first with a leading marker when over it.
+--! Joins accumulated agent groups (see make_swarm_updater) into the full
+--! run tree — used both for the LIVE edited message while the gremium is
+--! working, and again afterward for the standalone "📜 Verlauf" button
+--! message. Kept under a safe character budget (a bit below shorten's
+--! 4000, since many separate bold/icon runs each carry their own HTML-tag
+--! overhead once tg_html converts the markdown here), dropping the OLDEST
+--! groups first with a leading marker when over it.
 fn render_groups groups
-    budget: 20000
+    budget: 3800
     kept: groups
     fn render_all gs
-        rows: ["| Agent | Step |", "|:---|:---|"]
+        rendered: []
         for g in gs
-            for r in (render_group_rows g)
-                push rows r
-        join rows "\n"
+            push rendered (render_group g)
+        join rendered "\n\n"
     text: render_all kept
     while (len text) > budget && (len kept) > 1
         kept: slice kept 1 (len kept)
@@ -1260,10 +1273,10 @@ fn render_groups groups
     text
 
 --! Builds the on_update closure for run_gremium_stream: renders the REAL,
---! growing table live (render_groups — see it for the exact format), edited
+--! growing tree live (render_groups — see it for the exact format), edited
 --! in place into the same placeholder message as it grows, instead of a
 --! compact teaser — the point is to actually watch the gremium work.
---! Groups every step by agent (render_group_rows/render_groups) — a handoff is
+--! Groups every step by agent (render_group/render_groups) — a handoff is
 --! recorded as the CLOSING branch of the group it happened in (agent = the
 --! one handing off, per Go's onProgress; the target's own "start" opens
 --! ITS OWN group next), carrying the optional "reason" note
@@ -1352,10 +1365,7 @@ fn make_swarm_updater token cid message_id dbh
         set stream_state "last_text" text
         set stream_state "last_ms" ms
         if message_id != nil
-            if verlauf_mode == "knapp"
-                tel.tel_edit_message_text token cid message_id text
-            else
-                tel.tel_edit_rich_message token cid message_id text
+            tel.tel_edit_message_text token cid message_id text
     on_update
 
 --! Builds the round_check closure for run_gremium_stream (see its doc
@@ -1713,7 +1723,7 @@ fn handle_callback token dbh cbq allowed uid
         if groups == nil || (len groups) == 0
             tel.tel_send_message token cid "No detailed log available for the last run."
         else
-            tel.tel_send_rich_message token cid ("📜 **Full run log:**\n\n" ++ (render_groups groups)) nil
+            tel.tel_send_message token cid ("📜 **Full run log:**\n\n" ++ (render_groups groups))
         return nil
     if data == "more"
         if txt != nil
