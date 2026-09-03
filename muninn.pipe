@@ -250,9 +250,22 @@ fn help_text _
 --! Status text (statistics from the soul).
 fn status_text dbh
     n: mem.memory_count dbh
-    tool_n: len (mcp_tools)
+    --! mcp_tools throws (not just returns []) when zero MCP tools are
+    --! currently discovered — the normal state right after boot or
+    --! whenever no message has keyword-matched an MCP server yet, now
+    --! that servers connect lazily on demand instead of all at boot (see
+    --! mcp.pipe's discovered_tool_names, which guards the exact same
+    --! call for the exact same reason). Without this try/catch, /status
+    --! crashed with no reply at all whenever nothing was connected yet
+    --! — confirmed live: "handle_update failed: mcp_tools: no tools
+    --! available" with the user seeing no response whatsoever.
+    tool_n: 0
+    try
+        tool_n: len (mcp_tools)
+    catch
+        tool_n: 0
     gc: mem.graph_counts dbh
-    "Muninn status:\n• Memories: " ++ (to_str n) ++ "\n• Knowledge graph: " ++ (to_str (get gc "entities")) ++ " entities, " ++ (to_str (get gc "relations")) ++ " relations\n• Provider: DeepSeek\n• Gremium: 4-5 agents (with web research + MCP tools)\n• Total tools (local + MCP): " ++ (to_str tool_n) ++ "\n• Executor: active\n• Web: DDG + Wikipedia"
+    "Muninn status:\n• Memories: " ++ (to_str n) ++ "\n• Knowledge graph: " ++ (to_str (get gc "entities")) ++ " entities, " ++ (to_str (get gc "relations")) ++ " relations\n• Provider: DeepSeek\n• Gremium: 4-5 agents (with web research + MCP tools)\n• Connected MCP tools: " ++ (to_str tool_n) ++ " (only servers actually connected right now — MCP connects lazily on demand)\n• Executor: active\n• Web: DDG + Wikipedia"
 
 --! /costs: AI-generated cost summary. The numbers themselves are computed
 --! DETERMINISTICALLY from cost_log (mem.cost_summary) — the AI is only
@@ -642,6 +655,12 @@ fn handle_message token cid text dbh allowed uid
         first_due: sched.next_hhmm (get bt "hh") (get bt "mm") nsec tz_offset
         sched.schedule dbh "briefing" (to_str cid) "Daily briefing" first_due "daily"
         tel.tel_send_message token cid ("Daily briefing active — I'll check in next at " ++ (format_time (first_due + tz_offset) "15:04") ++ " (and daily after that).")
+        return nil
+    if low == "/remind"
+        --! Unlike /search, /graph, /learn below, this was missing entirely
+        --! — a bare "/remind" with no argument fell all the way through to
+        --! the general gremium/AI path instead of a clean usage hint.
+        tel.tel_send_message token cid "Please provide a time and text: /remind <time> about <text> (e.g. /remind in 10 minutes about the break)"
         return nil
     rq: remind_query low tnorm
     if rq != ""
@@ -2674,6 +2693,8 @@ else
                 push cmds {command: "graph", description: "Query the knowledge graph"}
                 push cmds {command: "remind", description: "Schedule a reminder"}
                 push cmds {command: "reminders", description: "Open reminders/briefings"}
+                push cmds {command: "goals", description: "Open goals, tap to mark done"}
+                push cmds {command: "trace", description: "Which gremium member handled your last request"}
                 push cmds {command: "briefing", description: "Daily briefing on/off"}
                 push cmds {command: "reset", description: "Reset conversation history"}
                 push cmds {command: "consolidate", description: "Dream: condense memory"}
