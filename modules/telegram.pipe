@@ -142,6 +142,52 @@ fn tel_post_with_markdown token method m
         res: tel_post token method m
     res
 
+--! Escapes text for safe embedding in a single Rich-Message-Markdown table
+--! cell: a literal "|" would otherwise be misread as a new column
+--! boundary, a literal newline would break the row onto multiple lines.
+export fn tel_escape_table_cell text
+    t: replace_all text "|" "\\|"
+    replace_all t "\n" " "
+
+--! Sends a Rich Message (Bot API 10.1+,
+--! https://core.telegram.org/bots/api#rich-message-formatting-options) via
+--! the "markdown" mode — GitHub-Flavored-Markdown-compatible, including
+--! real pipe tables, unlike tg_html's much more limited bold/italic/code/
+--! spoiler subset. Falls back to the existing plain-text send on ANY
+--! failure (e.g. an incompatible client) — Rich Messages are brand new
+--! (~3 months old), a reply must never be silently lost over it. kb is an
+--! inline_keyboard list, or nil for none.
+export fn tel_send_rich_message token chat_id markdown_text kb
+    m: {}
+    set m "chat_id" chat_id
+    rm: {}
+    set rm "markdown" markdown_text
+    set m "rich_message" rm
+    if kb != nil
+        rmk: {}
+        set rmk "inline_keyboard" kb
+        set m "reply_markup" rmk
+    res: tel_post token "sendRichMessage" m
+    if (get res "ok") == false
+        if kb == nil
+            return (tel_send_message token chat_id markdown_text)
+        return (tel_send_message_kb token chat_id markdown_text kb)
+    res
+
+--! Like tel_edit_message_text, but with Rich Message markdown content (see
+--! tel_send_rich_message) — same fallback-on-failure behavior.
+export fn tel_edit_rich_message token chat_id message_id markdown_text
+    m: {}
+    set m "chat_id" chat_id
+    set m "message_id" message_id
+    rm: {}
+    set rm "markdown" markdown_text
+    set m "rich_message" rm
+    res: tel_post token "editMessageText" m
+    if (get res "ok") == false
+        return (tel_edit_message_text token chat_id message_id markdown_text)
+    res
+
 --! Send a text message to a chat.
 export fn tel_send_message token chat_id text
     m: {}
