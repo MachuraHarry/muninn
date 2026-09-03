@@ -267,6 +267,64 @@ export fn web_icon_svg icon_id color size
         return nil
     get r "body"
 
+--! Searches real photos (not simple line icons — see web_icon_search for
+--! those) via Openverse (openverse.org, WordPress/Creative Commons), a
+--! free multi-source image search with no API key/account needed — same
+--! pattern as this file's other lookups. license_type=commercial,modification
+--! restricts results to licenses that actually allow reuse/editing (no
+--! surprise no-derivatives/non-commercial images ending up embedded).
+--! Returns a list of {id, title, creator, license} (empty on error/no
+--! results) — deliberately NOT the raw provider image URL: live-verified
+--! that hotlinking it directly is unreliable (Flickr/Wikimedia CDNs
+--! blocked/rejected requests from this server even with a real
+--! User-Agent header) — web_image_download below uses Openverse's OWN
+--! thumbnail proxy instead, which does not have that problem.
+export fn web_image_search query limit
+    url: "https://api.openverse.org/v1/images/?q=" ++ (url_encode query) ++ "&page_size=" ++ (to_str limit) ++ "&license_type=commercial,modification"
+    hdrs: {}
+    set hdrs "User-Agent" "MuninnBot/1.0 (personal AI agent)"
+    r: nil
+    try
+        r: http_request "GET" url hdrs
+    catch
+        return []
+    if (get r "status") != 200
+        return []
+    j: nil
+    try
+        j: parse_json (get r "body")
+    catch
+        return []
+    if j == nil
+        return []
+    results: get j "results"
+    if results == nil
+        return []
+    out: []
+    for res in results
+        push out {id: (get res "id"), title: (get res "title"), creator: (get res "creator"), license: (get res "license")}
+    out
+
+--! Downloads one image found via web_image_search, by id, as raw bytes
+--! (or nil on error) — always through Openverse's own thumbnail proxy
+--! (see web_image_search's doc comment for why not the original
+--! provider URL). Resolution is modest (a few hundred px) but plenty for
+--! embedding into a slide, which gets scaled by CSS anyway.
+export fn web_image_download id
+    if id == nil || id == ""
+        return nil
+    url: "https://api.openverse.org/v1/images/" ++ id ++ "/thumb/"
+    hdrs: {}
+    set hdrs "User-Agent" "MuninnBot/1.0 (personal AI agent)"
+    r: nil
+    try
+        r: http_request "GET" url hdrs
+    catch
+        return nil
+    if (get r "status") != 200
+        return nil
+    get r "body"
+
 --! Creates a new Telegraph (telegra.ph) account and returns its
 --! access_token, or nil on any error. Call once and persist the token
 --! (see tool_bericht_veroeffentlichen in swarm.pipe) — every subsequent
