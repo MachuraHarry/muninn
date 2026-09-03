@@ -825,7 +825,7 @@ fn handle_message token cid text dbh allowed uid
         row3: []
         push row3 (tel.tel_button "📜 Verlauf" "gremium_log")
         push kb row3
-        tel_finalize token cid message_id (shorten answer) kb
+        tel_finalize_after_tree token cid message_id (shorten answer) kb
 
 --! Truncates a status snippet to n characters (for the live status line —
 --! unlike shorten (4000 characters, for Telegram messages) deliberately
@@ -971,8 +971,7 @@ fn agent_display_name agent
     {icon: "🧠", name: agent}
 
 --! Bare verb phrase for an agent's role, no icon/name (e.g. "is checking
---! facts and memory...") — composed into agent_status_line/
---! agent_group_header below.
+--! facts and memory...") — composed into agent_group_header below.
 fn agent_verb_phrase agent
     if agent == "planer"
         return "is planning the answer..."
@@ -987,16 +986,11 @@ fn agent_verb_phrase agent
     "is thinking..."
 
 --! Icon + bold name for an agent, e.g. "🔍 **Mimir**" — the shared
---! identity fragment for the live status, the full-log group header, and
---! a handoff line's target reference.
+--! identity fragment for the tree's group header and a handoff line's
+--! target reference.
 fn agent_icon_name agent
     d: agent_display_name agent
     (get d "icon") ++ " **" ++ (get d "name") ++ "**"
-
---! Live-status line 1: icon + bold name + verb phrase, no separator
---! (e.g. "🔍 **Mimir** is checking facts and memory...").
-fn agent_status_line agent
-    (agent_icon_name agent) ++ " " ++ (agent_verb_phrase agent)
 
 --! Full-log group header: icon + bold name + em-dash + verb phrase (e.g.
 --! "🔍 **Mimir** — is checking facts and memory...") — the dash reads
@@ -1096,11 +1090,12 @@ fn render_group g
     header ++ "\n" ++ (join rendered "\n")
 
 --! Joins accumulated agent groups (see make_swarm_updater) into the full
---! run log — sent as its own message on demand (the "📜 Verlauf" button).
---! Kept under a safe character budget (a bit below shorten's 4000, since
---! many separate bold/icon runs each carry their own HTML-tag overhead
---! once tg_html converts the markdown here), dropping the OLDEST groups
---! first with a leading marker when over it.
+--! run tree — used both for the LIVE edited message while the gremium is
+--! working, and again afterward for the standalone "📜 Verlauf" button
+--! message. Kept under a safe character budget (a bit below shorten's
+--! 4000, since many separate bold/icon runs each carry their own HTML-tag
+--! overhead once tg_html converts the markdown here), dropping the OLDEST
+--! groups first with a leading marker when over it.
 fn render_groups groups
     budget: 3800
     kept: groups
@@ -1117,28 +1112,27 @@ fn render_groups groups
         text: "… (earlier steps hidden)\n\n" ++ text
     text
 
---! Builds the on_update closure for run_gremium_stream. Two jobs:
+--! Builds the on_update closure for run_gremium_stream: renders the REAL,
+--! growing tree live (render_groups — see it for the exact format), edited
+--! in place into the same placeholder message as it grows, instead of a
+--! compact teaser — the point is to actually watch the gremium work.
+--! Groups every step by agent (render_group/render_groups) — a handoff is
+--! recorded as the CLOSING branch of the group it happened in (agent = the
+--! one handing off, per Go's onProgress; the target's own "start" opens
+--! ITS OWN group next), carrying the optional "reason" note
+--! (handoff_reason) so the tree shows not just THAT a handoff happened but
+--! what it actually asked for. Telegram's native "typing..." chat action
+--! is kept alive alongside it (re-sent every ~4s, independent of the text
+--! throttle below) as an additional liveness cue in the chat header.
 --!
---! 1. Keeps the live placeholder message down to exactly 2 lines, no
---!    code block — icon+bold-name+phrase (agent_status_line) plus the
---!    single most recent step (empty until the first one happens). A
---!    "start" event opens a new GROUP (see 2) only when the agent
---!    actually CHANGES, so several tool-call rounds in a row from the
---!    same agent (the common case) don't repeat anything here either.
---!    Telegram's native "typing..." chat action is kept alive alongside
---!    it (re-sent every ~4s, independent of the text throttle below) as
---!    a zero-footprint ambient liveness cue in the chat header.
---! 2. Groups every step by agent into a tree (render_group/render_groups)
---!    — a handoff is recorded as the CLOSING entry of the group it
---!    happened in (agent = the one handing off; the target's own "start"
---!    opens ITS OWN group next), carrying the optional "reason" note
---!    (handoff_reason) so the tree shows not just THAT a handoff
---!    happened but what it actually asked for. Persisted once on
---!    "final" to last_run_log:<cid> (mem meta, same pattern as
---!    save_trace/format_trace for /trace) so the "📜 Verlauf" button
---!    attached to the finished answer (handle_message/handle_callback's
---!    "gremium_log" branch) can show the whole tree afterward without
---!    ever cluttering the live status.
+--! Persists the full tree once on "final" to last_run_log:<cid> (mem meta,
+--! same pattern as save_trace/format_trace for /trace) — NOT for display
+--! here (the caller deletes this live message once the run finishes and
+--! sends the real answer instead, see tel_finalize_after_tree; Telegram's
+--! own message-removal animation reads like the tree getting shredded once
+--! the work is done), but so the "📜 Verlauf" button attached to that new
+--! answer message can show the whole tree again afterward, on demand
+--! (handle_message/handle_callback's "gremium_log" branch).
 --!
 --! Edit throttle (about once/second, skip if text unchanged) unchanged
 --! from before. message_id may be nil (placeholder send failed) — then
@@ -1147,7 +1141,7 @@ fn render_groups groups
 --! the edit — reverted: live feedback was that it made the message
 --! visibly jump around in the chat instead of updating calmly in place.)
 fn make_swarm_updater token cid message_id dbh
-    stream_state: {groups: [], current: "", last_text: "", last_ms: 0, last_typing_ms: 0}
+    stream_state: {groups: [], last_text: "", last_ms: 0, last_typing_ms: 0}
     fn on_update agent event detail args_json
         ms: time_ms
         if (ms - (get stream_state "last_typing_ms")) >= 4000
@@ -1167,26 +1161,21 @@ fn make_swarm_updater token cid message_id dbh
                 if reason != ""
                     text: text ++ ": \"" ++ reason ++ "\""
                 push (get (at groups ((len groups) - 1)) "lines") {text: text, handoff: true}
-            return nil
         if event == "start"
             last_group: nil
             if (len groups) > 0
                 last_group: at groups ((len groups) - 1)
             if last_group == nil || (get last_group "agent") != agent
                 push groups {agent: agent, lines: []}
-                set stream_state "current" ""
-        else
+        if event == "tool" || event == "reasoning" || event == "inject"
             bare: swarm_transcript_line event detail args_json
             if bare != ""
                 if (len groups) == 0
                     push groups {agent: agent, lines: []}
                 push (get (at groups ((len groups) - 1)) "lines") {text: bare, handoff: false}
-                set stream_state "current" bare
         if (len groups) == 0
             return nil
-        text: agent_status_line agent
-        if (get stream_state "current") != ""
-            text: text ++ "\n" ++ (get stream_state "current")
+        text: render_groups groups
         if text == (get stream_state "last_text")
             return nil
         if (ms - (get stream_state "last_ms")) < 1000
@@ -1302,6 +1291,24 @@ fn tel_finalize token cid message_id text kb
         else
             r: tel.tel_send_message_kb token cid text kb
     r
+
+--! Like tel_finalize, but for the specific case of a genuine gremium
+--! answer that followed a LIVE TREE (make_swarm_updater): instead of
+--! editing the tree message into the answer, it DELETES the tree message
+--! (Telegram's native message-removal animation reads like the tree
+--! getting shredded once the work is done) and sends the answer as a
+--! fresh message — the finished tree isn't meant to linger, its content
+--! stays available afterward via the "📜 Verlauf" button on the new
+--! answer message (last_run_log:<cid>, see the "gremium_log" callback
+--! branch). message_id may be nil (placeholder send failed, nothing to
+--! delete) — then this is just a plain send, same as tel_finalize.
+fn tel_finalize_after_tree token cid message_id text kb
+    if message_id != nil
+        tel.tel_delete_message token cid message_id
+    if kb == nil
+        tel.tel_send_message token cid text
+    else
+        tel.tel_send_message_kb token cid text kb
 
 --! Checks whether an AI answer represents an "I don't know" fallback that
 --! calls for a web research.
@@ -1547,16 +1554,16 @@ fn handle_callback token dbh cbq allowed uid
             else
                 a: get res "content"
                 save_trace dbh cid res
+                kb: []
+                row: []
+                push row (tel.tel_button "📜 Verlauf" "gremium_log")
+                push kb row
                 if a != nil && a != ""
                     tid: mem.active_thread dbh cid
                     mem.add_message dbh tid cid "assistant" a
-                    kb: []
-                    row: []
-                    push row (tel.tel_button "📜 Verlauf" "gremium_log")
-                    push kb row
-                    tel_finalize token cid message_id (shorten a) kb
+                    tel_finalize_after_tree token cid message_id (shorten a) kb
                 else
-                    tel_finalize token cid message_id "Unfortunately I couldn't dig up anything more." nil
+                    tel_finalize_after_tree token cid message_id "Unfortunately I couldn't dig up anything more." kb
         return nil
     if data == "up"
         if txt != nil
