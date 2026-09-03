@@ -78,7 +78,27 @@ export fn resolve_all_env servers
     servers
 
 --! Connects a stdio server. Pipe builtins are variadic without spread/apply,
---! hence the case split by argument count (up to 7 program arguments).
+--! hence the case split by argument count.
+--!
+--! BUG FOUND AND FIXED (live-diagnosed): this used to stop at n==6 and,
+--! for n>=7, silently passed only the FIRST 7 elements of cargs to
+--! mcp_use_stdio, dropping the rest with no error at all. That's not just
+--! "fewer args than intended" — it TRUNCATES MID-FLAG, e.g. an args list
+--! ending in ["--user-data-dir", "/some/path"] loses the path but KEEPS
+--! the flag, so the child process receives "--user-data-dir" as its very
+--! last argument with no value, which most CLI parsers treat as fatally
+--! malformed input. Observed live against @playwright/mcp: the process
+--! then exits before completing the MCP handshake, and the Go client
+--! (pkg/mcp/client.go readLoop) reports this as "parse response:
+--! unexpected end of JSON input" — a confusing, environment-sounding
+--! error that has NOTHING to do with environment/PATH/permissions, only
+--! with this silent truncation. No existing server config had ever
+--! crossed 6 args elements before, so this sat latent until the
+--! werkzeug_browser persistent-profile setup (--user-data-dir +
+--! --output-dir) pushed it to 10. Extended generously past any
+--! realistic real-world arg count; anything still beyond that now fails
+--! LOUDLY via mcp_use_stdio's own "at least 1 argument" arity check
+--! instead of silently mis-executing.
 fn connect_stdio cmd cargs cenv alias
     n: len cargs
     if n == 0
@@ -95,8 +115,26 @@ fn connect_stdio cmd cargs cenv alias
         mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) cenv alias
     else if n == 6
         mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) cenv alias
-    else
+    else if n == 7
         mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) cenv alias
+    else if n == 8
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) (at cargs 7) cenv alias
+    else if n == 9
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) (at cargs 7) (at cargs 8) cenv alias
+    else if n == 10
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) (at cargs 7) (at cargs 8) (at cargs 9) cenv alias
+    else if n == 11
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) (at cargs 7) (at cargs 8) (at cargs 9) (at cargs 10) cenv alias
+    else if n == 12
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) (at cargs 7) (at cargs 8) (at cargs 9) (at cargs 10) (at cargs 11) cenv alias
+    else if n == 13
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) (at cargs 7) (at cargs 8) (at cargs 9) (at cargs 10) (at cargs 11) (at cargs 12) cenv alias
+    else if n == 14
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) (at cargs 7) (at cargs 8) (at cargs 9) (at cargs 10) (at cargs 11) (at cargs 12) (at cargs 13) cenv alias
+    else if n == 15
+        mcp_use_stdio cmd (at cargs 0) (at cargs 1) (at cargs 2) (at cargs 3) (at cargs 4) (at cargs 5) (at cargs 6) (at cargs 7) (at cargs 8) (at cargs 9) (at cargs 10) (at cargs 11) (at cargs 12) (at cargs 13) (at cargs 14) cenv alias
+    else
+        raise ("connect_stdio: " ++ (to_str n) ++ " Programmargumente werden nicht unterstuetzt (Obergrenze 15) - modules/mcp.pipe:connect_stdio muss erweitert werden statt still abzuschneiden.")
 
 --! Connects a single configured server (stdio or sse). Returns {alias, ok, error?}.
 --! Marks CONNECTED[alias] on success — the ONLY place that does so (before,
