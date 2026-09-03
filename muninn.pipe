@@ -1336,6 +1336,14 @@ fn make_swarm_updater token cid message_id dbh
                     text: text ++ ": *" ++ reason ++ "*"
                 push (get (at groups ((len groups) - 1)) "lines") {text: text, handoff: true}
         if event == "start"
+            --! ai.ChatSwarm rereads the active model fresh at the start of
+            --! every round (right after this "start" event fires, before
+            --! that round's own API call) — see grm.model_for_agent's doc
+            --! comment. Switching per-agent here means a handoff to/from
+            --! faktenwaechter/werkzeug_slideshot uses the stronger model
+            --! for exactly their own turns, without touching run_gremium's
+            --! (non-streaming, background/proactive) callers.
+            ai_model (grm.model_for_agent agent)
             last_group: nil
             if (len groups) > 0
                 last_group: at groups ((len groups) - 1)
