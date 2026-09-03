@@ -640,7 +640,18 @@ fn handle_message token cid text dbh allowed uid
         tel.tel_send_message token cid "Please provide a search term: /search <term>"
         return nil
     sq: search_query low tnorm
-    if sq != ""
+    --! "suche .../recherchiere .../finde ..." is a deliberate shortcut
+    --! straight to a plain web search (do_search), skipping the full
+    --! gremium for speed — but that also means it skips
+    --! mcp_registry_suchen entirely, which lives ONLY in the gremium
+    --! (faktenwaechter). A query mentioning "mcp" is specifically about
+    --! Muninn's own tool ecosystem, not a general web search — let it
+    --! fall through to the normal gremium path instead. Live-observed:
+    --! "Suche mal nach paar MCP Server..." matched this shortcut and
+    --! answered from generic (outdated) web blog rankings instead of the
+    --! real registry, with no live status either (do_search doesn't use
+    --! the gremium's live transcript).
+    if sq != "" && !(contains (lower sq) "mcp")
         do_search token cid dbh sq
         return nil
     if low == "/learn"

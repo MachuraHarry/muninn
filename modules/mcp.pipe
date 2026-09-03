@@ -123,8 +123,23 @@ fn connect_one idx s
         set r "ok" true
         set CONNECTED alias true
     catch e
-        set r "ok" false
-        set r "error" (to_str e)
+        msg: to_str e
+        if contains msg "already in use"
+            --! Self-healing: "already in use" literally means the alias IS
+            --! already connected at the Go level — the desired end state is
+            --! already true, regardless of why CONNECTED[alias] here didn't
+            --! already reflect that (live-observed: lazy loading's two
+            --! independent connect triggers, ensure_mcp_for_task's keyword
+            --! pre-match and werkzeug_aktivieren, can legitimately both
+            --! decide the same alias is needed for two different messages).
+            --! Treat as success and correct CONNECTED, instead of surfacing
+            --! a scary, misleading "failed" for something that actually
+            --! worked.
+            set r "ok" true
+            set CONNECTED alias true
+        else
+            set r "ok" false
+            set r "error" msg
     r
 
 --! Connects all configured servers. One failing server doesn't block the
