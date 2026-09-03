@@ -2236,6 +2236,24 @@ fn sched_tick token
                     tel.tel_send_message token (to_num cid) (shorten diag_msg)
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
             continue
+        if kind == "workspace_aufraeumen"
+            --! Sorts loose top-level files in mcp_data into thematic
+            --! subfolders and indexes them — see organize_mcp_data's doc
+            --! comment (swarm.pipe) for the full propose-then-execute
+            --! design. Silent on success (no Telegram message, matches
+            --! selbstdiagnose's "only speak up if actually noteworthy"
+            --! philosophy) — a failure still surfaces via mem.log_error.
+            --! MUST be caught, same reason as job_check/task_check/
+            --! proaktiv above: an uncaught exception here would leak
+            --! sched_tick's DB lock.
+            try
+                result: grm.organize_mcp_data dbh cid
+                print ("workspace_aufraeumen: " ++ (to_str result))
+            catch e16
+                print ("workspace_aufraeumen failed: " ++ (to_str e16))
+                mem.log_error dbh "workspace_aufraeumen" (to_str e16)
+            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
+            continue
         if cid != nil && cid != ""
             try
                 tel.tel_send_message token (to_num cid) msg
@@ -2566,6 +2584,25 @@ else
                     sched.schedule dbhd "selbstdiagnose" allowed "" diag_due "daily"
                     print "Daily self-diagnosis activated."
                 mem.close_locked hld
+            --! Daily workspace cleanup (see sched_tick, kind
+            --! "workspace_aufraeumen" / grm.organize_mcp_data): sorts loose
+            --! top-level files in mcp_data into thematic subfolders —
+            --! NEVER deletes anything, only organizes + indexes (see
+            --! organize_mcp_data's doc comment in swarm.pipe). A quiet,
+            --! off-hours time so it never competes with the briefing/
+            --! self-initiative/self-diagnosis slots. Idempotent like those.
+            if allowed != nil && allowed != ""
+                hlw: mem.open_locked nil
+                dbhw: get hlw "h"
+                has_cleanup: false
+                for e in (sched.list dbhw allowed)
+                    if (get e "kind") == "workspace_aufraeumen"
+                        has_cleanup: true
+                if !has_cleanup
+                    cleanup_due: sched.next_hhmm 3 0 now tz_offset
+                    sched.schedule dbhw "workspace_aufraeumen" allowed "" cleanup_due "daily"
+                    print "Daily workspace cleanup activated."
+                mem.close_locked hlw
             try
                 cmds: []
                 push cmds {command: "start", description: "Greeting"}

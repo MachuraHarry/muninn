@@ -620,6 +620,158 @@ export fn self_context _
     desc: desc ++ " NEVER blanketly claim to have no tools/system access when this list isn't empty.\n\n"
     SELF_ID ++ desc
 
+--! file_index / workspaces: a durable registry of every file Muninn has
+--! actually sent, plus named reusable subfolders ("workspaces") under
+--! mcp_data — the direct counterpart to docker_tools.pipe's
+--! docker_environments (same "durable, reusable, named resource" idea,
+--! applied to the filesystem instead of containers). Without this, every
+--! request for a report/presentation on a topic already covered before
+--! reflexively created a brand-new file — mcp_data accumulated dozens of
+--! near-duplicate documents with no way for Muninn to know they already
+--! existed (user-observed, live-verified: 8 near-identical iterations of
+--! one document sitting loose side by side).
+fn init_file_index h
+    mem.raw_exec h "CREATE TABLE IF NOT EXISTS file_index (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, chat_id TEXT, caption TEXT, workspace TEXT, created TEXT)"
+    mem.raw_exec h "CREATE TABLE IF NOT EXISTS workspaces (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, zweck TEXT, created TEXT, status TEXT)"
+    nil
+
+--! Which registered, active workspace (if any) a path belongs to, by
+--! checking whether its parent directory name matches a workspace.
+fn workspace_for_path h full_path
+    parts: split full_path "/"
+    if (len parts) < 2
+        return ""
+    parent: at parts ((len parts) - 2)
+    rows: mem.raw_query h ("SELECT name FROM workspaces WHERE name = '" ++ (mem.sql_escape parent) ++ "' AND status = 'active'")
+    if (len rows) > 0
+        parent
+    else
+        ""
+
+--! Records a successfully sent file in the durable file index —
+--! deterministic (called automatically from tool_bild_senden/
+--! tool_datei_senden below, no extra AI discipline needed to keep the
+--! index accurate). Best-effort: logging must never break a send that
+--! already succeeded by the time this runs.
+fn record_sent_file full_path caption
+    h: cur_dbh 0
+    if h == nil
+        return nil
+    cap: caption
+    if cap == nil
+        cap: ""
+    try
+        init_file_index h
+        ws: workspace_for_path h full_path
+        mem.raw_exec h ("INSERT INTO file_index (path, chat_id, caption, workspace, created) VALUES ('" ++ (mem.sql_escape full_path) ++ "', '" ++ (mem.sql_escape (to_str (get STATE "cid"))) ++ "', '" ++ (mem.sql_escape cap) ++ "', '" ++ (mem.sql_escape ws) ++ "', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "')")
+    catch
+        nil
+    nil
+
+--! Tool: creates a new, reusable workspace subfolder under mcp_data — a
+--! named place to keep everything about one ongoing topic/project
+--! together instead of every file landing loose in mcp_data's root.
+fn tool_workspace_erstellen name zweck
+    if !(dt.valid_identifier name)
+        return "Abgelehnt: '" ++ (to_str name) ++ "' ist kein gueltiger Workspace-Name (nur Buchstaben/Zahlen/_/-/., max. 63 Zeichen)."
+    h: cur_dbh 0
+    if h == nil
+        return "Keine Datenbank verbunden."
+    init_file_index h
+    existing: mem.raw_query h ("SELECT id FROM workspaces WHERE name = '" ++ (mem.sql_escape name) ++ "' AND status = 'active'")
+    if (len existing) > 0
+        return "Workspace '" ++ name ++ "' existiert bereits."
+    make_dir ("/root/muninn/mcp_data/" ++ name)
+    mem.raw_exec h ("INSERT INTO workspaces (name, zweck, created, status) VALUES ('" ++ (mem.sql_escape name) ++ "', '" ++ (mem.sql_escape zweck) ++ "', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "', 'active')")
+    "Workspace '" ++ name ++ "' angelegt: " ++ zweck
+
+--! Tool: lists active workspaces — check this FIRST before creating a new
+--! file for a request about an existing topic/project, so related work
+--! lands together instead of scattered across mcp_data's root.
+fn tool_workspaces_auflisten _
+    h: cur_dbh 0
+    if h == nil
+        return "Keine Datenbank verbunden."
+    init_file_index h
+    rows: mem.raw_query h "SELECT name, zweck FROM workspaces WHERE status = 'active' ORDER BY id DESC"
+    if (len rows) == 0
+        return "Keine Workspaces angelegt."
+    out: "Aktive Workspaces:\n"
+    for r in rows
+        out: out ++ "- " ++ (get r "name") ++ ": " ++ (get r "zweck") ++ "\n"
+    out
+
+--! Scans mcp_data's top level for loose files not yet organized into a
+--! workspace, asks ONE lean ai_chat call (not a full gremium run — same
+--! cheap single-shot pattern as do_search's summarizer) to propose a
+--! thematic grouping, then executes it deterministically: make_dir +
+--! file_move only, NEVER file_delete — the AI only PROPOSES folder
+--! names/groupings, every actual filesystem change happens afterward in
+--! plain code (the same propose-then-execute split already used for the
+--! MCP-server-approval flow). Silent on success (only logged) — matches
+--! selbstdiagnose's "only speak up if actually noteworthy" philosophy.
+--! Already-organized subfolders (icons/, or anything previously moved by
+--! this same function) are never touched, only genuinely loose files.
+export fn organize_mcp_data dbh cid
+    init_file_index dbh
+    base: "/root/muninn/mcp_data"
+    entries: []
+    try
+        entries: list_dir base
+    catch e0
+        print ("organize_mcp_data: list_dir failed: " ++ (to_str e0))
+        return "list_dir failed"
+    already: {}
+    for r in (mem.raw_query dbh "SELECT path FROM file_index WHERE workspace != ''")
+        set already (get r "path") true
+    loose: []
+    for e in entries
+        if (len e) == 0 || (substring e ((len e) - 1) (len e)) != "/"
+            full: base ++ "/" ++ e
+            if (get already full) == nil
+                push loose e
+    if (len loose) == 0
+        return "Nothing to organize."
+    prompt: "You are organizing a messy flat file directory into thematic subfolders. Given this list of filenames, propose short, lowercase, hyphen-or-underscore-separated folder names (matching the style of existing folders like 'friedrich_merz', 'creo-kritik-slides') and group the files by topic. Files with an unclear/unrelated topic can share one generic 'sonstiges' folder. Respond with ONLY a JSON object mapping folder name to a list of exact filenames taken from the input — no explanation, no markdown code fences.\n\nFiles:\n" ++ (join loose "\n")
+    resp: ""
+    try
+        resp: ai_chat "You are a careful file-organizing assistant. Respond with ONLY valid JSON, nothing else." prompt
+    catch e1
+        print ("organize_mcp_data: ai_chat failed: " ++ (to_str e1))
+        return "ai_chat failed"
+    grouping: nil
+    try
+        grouping: parse_json (trim resp)
+    catch e2
+        print ("organize_mcp_data: could not parse grouping JSON: " ++ (to_str e2))
+        return "parse failed"
+    if grouping == nil || (type_of grouping) != "MAP"
+        print "organize_mcp_data: grouping response was not a JSON object, skipping this run"
+        return "invalid grouping"
+    moved: 0
+    for folder in (keys grouping)
+        if dt.valid_identifier folder
+            files: get grouping folder
+            if (type_of files) == "LIST"
+                dest_dir: base ++ "/" ++ folder
+                make_dir dest_dir
+                for fname in files
+                    --! Only ever act on a filename that was genuinely in
+                    --! THIS run's loose list — guards against the AI
+                    --! hallucinating a filename that doesn't exist, or
+                    --! (worse) one crafted to escape mcp_data.
+                    if contains loose fname
+                        src: base ++ "/" ++ fname
+                        dst: dest_dir ++ "/" ++ fname
+                        if file_exists src
+                            try
+                                file_move src dst
+                                mem.raw_exec dbh ("INSERT INTO file_index (path, chat_id, caption, workspace, created) VALUES ('" ++ (mem.sql_escape dst) ++ "', '" ++ (mem.sql_escape (to_str cid)) ++ "', '', '" ++ (mem.sql_escape folder) ++ "', '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "')")
+                                moved: moved + 1
+                            catch e3
+                                print ("organize_mcp_data: move failed for " ++ fname ++ ": " ++ (to_str e3))
+    "Organized " ++ (to_str moved) ++ " file(s)."
+
 --! Tool: send an image (e.g. a screenshot that another tool saved locally)
 --! to the user on Telegram. Uses sendPhoto (shows inline in the chat,
 --! Telegram compresses/converts).
@@ -636,6 +788,7 @@ fn tool_bild_senden path caption
     res: tel.tel_send_photo tok cid full_path caption
     if (get res "ok") == false
         return "Senden fehlgeschlagen: " ++ (to_str (get res))
+    record_sent_file full_path caption
     "Bild gesendet: " ++ full_path
 
 --! Tool: send any file (e.g. a document created via the filesystem tool) to
@@ -654,6 +807,7 @@ fn tool_datei_senden path caption
     res: tel.tel_send_document tok cid full_path caption
     if (get res "ok") == false
         return "Senden fehlgeschlagen: " ++ (to_str (get res))
+    record_sent_file full_path caption
     "Datei gesendet: " ++ full_path
 
 --! Tool: reads a local image file and returns it as a ready-to-embed
@@ -940,6 +1094,8 @@ export fn init_gremium _
     ai_tool "bericht_veroeffentlichen" "Publish a long text (research summary, report, article) as a Telegraph page instead of sending it as plain text (which gets cut off at Telegram's length limit) — Telegram shows Telegraph pages with its fast, native-feeling Instant View reader." {title: "Short, descriptive page title", text: "The full text, paragraphs separated by a blank line"} tool_bericht_veroeffentlichen
     ai_tool "icon_holen" "Find a free, open-source icon (200'000+ icons, no API key) matching a search term and save it as a ready-to-use PNG file — for embedding into a presentation/document (werkzeug_praesentation/werkzeug_dokument) or sending directly." {suchbegriff: "What the icon should show, in English (e.g. 'chart', 'warning', 'github', 'email')", farbe: "Optional hex color e.g. '#ff6600' — empty/omit for the icon's default color", groesse: "Optional pixel size, e.g. '128' — empty/omit for 128"} tool_icon_holen
     ai_tool "bild_als_base64" "Read a local image file (e.g. from icon_holen or bild_erstellen) and return it as a ready-to-embed 'data:image/...;base64,...' URI — for werkzeug_slideshot, which authors raw HTML itself and has no other way to get a real image INTO that HTML (a plain file path in <img src=\"...\"> would not resolve inside the renderer)." {path: "Path to the image file (relative to /root/muninn or absolute)"} tool_bild_als_base64
+    ai_tool "workspace_erstellen" "Create a new, reusable workspace subfolder under mcp_data — a named place to keep everything about one ongoing topic/project together, instead of every file landing loose in mcp_data's root. Only for a genuinely ongoing/multi-file topic, not a one-off single file." {name: "Short, lowercase workspace name (letters/digits/_/-/. only, becomes the actual folder name)", zweck: "What this workspace is for"} tool_workspace_erstellen
+    ai_tool "workspaces_auflisten" "List active workspaces (name + purpose) — check this FIRST before creating a new file for a request about an existing topic/project, so related work lands together instead of scattered across mcp_data." {} tool_workspaces_auflisten
     ai_tool "ziel_anlegen" "Create a long-term goal (a genuine ongoing objective the user wants to work towards over time — NOT a one-off task that's finished once this conversation ends). Shows up in /goals on Telegram and the web dashboard." {text: "Short, clear description of the goal"} tool_ziel_anlegen
     ai_tool "ziel_erledigt" "Mark a previously created goal as done, by its id." {id: "The goal's id"} tool_ziel_erledigt
     --! Lazy MCP loading (see the doc comment at tool_werkzeug_aktivieren):
@@ -1024,12 +1180,16 @@ export fn init_gremium _
             --! (create -> add_slide pro Folie -> save) ist isoliert getestet
             --! zuverlaessig und schnell.
             push gtools "icon_holen"
-            extra_note: " Nutze IMMER den einfachen Weg: 'ppt_create_presentation' EINMAL aufrufen (liefert eine presentation_id), dann pro gewuenschter Folie 'ppt_add_slide' mit presentation_id+title+content, zum Schluss GENAU EINMAL 'ppt_save_presentation' mit presentation_id und file_path (IMMER unter '/root/muninn/mcp_data/<sprechender-name>.pptx'). Nutze NICHT das Vorlagen-/Template-System (create_presentation_from_templates, populate_placeholder, manage_text) — das braucht viel mehr Schritte und fuehrt oft dazu, dass die Praesentation nie gespeichert wird. Passt ein Icon thematisch zu einer Folie (z.B. ein Diagramm-Symbol fuer Zahlen, ein Warnsymbol fuer Risiken), hole es VORHER mit 'icon_holen' (liefert einen lokalen PNG-Pfad) und fuege es per 'ppt_manage_image' ein — optional, nur wenn es die Folie wirklich verbessert, nicht bei jeder Folie erzwingen. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
+            push gtools "workspace_erstellen"
+            push gtools "workspaces_auflisten"
+            extra_note: " Bevor du file_path waehlst: rufe 'workspaces_auflisten' auf — existiert ein zum Thema passender Workspace, speichere dort ('/root/muninn/mcp_data/<workspace>/<name>.pptx') statt lose in mcp_data; ist die Aufgabe erkennbar ein laufendes/mehrteiliges Projekt ohne passenden Workspace, kannst du mit 'workspace_erstellen' einen anlegen. Sonst wie bisher direkt unter mcp_data. Nutze IMMER den einfachen Weg: 'ppt_create_presentation' EINMAL aufrufen (liefert eine presentation_id), dann pro gewuenschter Folie 'ppt_add_slide' mit presentation_id+title+content, zum Schluss GENAU EINMAL 'ppt_save_presentation' mit presentation_id und file_path (IMMER unter '/root/muninn/mcp_data/<sprechender-name>.pptx'). Nutze NICHT das Vorlagen-/Template-System (create_presentation_from_templates, populate_placeholder, manage_text) — das braucht viel mehr Schritte und fuehrt oft dazu, dass die Praesentation nie gespeichert wird. Passt ein Icon thematisch zu einer Folie (z.B. ein Diagramm-Symbol fuer Zahlen, ein Warnsymbol fuer Risiken), hole es VORHER mit 'icon_holen' (liefert einen lokalen PNG-Pfad) und fuege es per 'ppt_manage_image' ein — optional, nur wenn es die Folie wirklich verbessert, nicht bei jeder Folie erzwingen. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
         if alias == "github"
             extra_note: " Werkzeuge mit Praefix 'github_'. Bei Fragen nach dem eigenen Account/Identitaet/Berechtigungen ('wem gehoert der Token', 'welcher Account') rufe 'github_get_me' auf, statt aus Repo-Suchergebnissen zu raten. 'github_list_*' fuer breites Durchsuchen mit einfachen Filtern (z.B. alle offenen Issues), 'github_search_*' fuer gezielte Anfragen mit Stichworten/Kriterien. Neue Issues/PRs: 'github_search_issues' bzw. 'github_search_pull_requests' VORHER nutzen, um Duplikate zu vermeiden. Repo/Owner immer explizit erfragen oder aus dem Gespraech ableiten — NIE raten. Aenderungen an bestehendem Code/Dateien immer ueber 'github_get_file_contents' (aktuellen Inhalt/SHA holen) vor 'github_create_or_update_file', nicht blind ueberschreiben."
         if alias == "dokument"
             push gtools "icon_holen"
-            extra_note: " Nutze 'word_create_document' EINMAL mit filename (IMMER unter '/root/muninn/mcp_data/<sprechender-name>.docx') — das legt die Datei direkt an, KEIN separater Speicher-Schritt noetig. Danach 'word_add_heading'/'word_add_paragraph' etc. mit demselben filename pro Abschnitt — jeder Aufruf schreibt sofort in die Datei. 'word_convert_to_pdf' NUR wenn der Nutzer ausdruecklich ein PDF wollte (nicht von dir aus versuchen — auf diesem Server ist dafuer kein LibreOffice/Word installiert, der Versuch schlaegt IMMER fehl und bringt nur eine unnoetige Fehlermeldung). Passt ein Icon thematisch zu einem Abschnitt, hole es VORHER mit 'icon_holen' (liefert einen lokalen PNG-Pfad) und fuege es per 'word_add_picture' ein — optional, nur wenn es das Dokument wirklich verbessert. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
+            push gtools "workspace_erstellen"
+            push gtools "workspaces_auflisten"
+            extra_note: " Bevor du filename waehlst: rufe 'workspaces_auflisten' auf — existiert ein zum Thema passender Workspace, speichere dort ('/root/muninn/mcp_data/<workspace>/<name>.docx') statt lose in mcp_data; ist die Aufgabe erkennbar ein laufendes/mehrteiliges Projekt ohne passenden Workspace, kannst du mit 'workspace_erstellen' einen anlegen. Sonst wie bisher direkt unter mcp_data. Nutze 'word_create_document' EINMAL mit filename (IMMER unter '/root/muninn/mcp_data/<sprechender-name>.docx') — das legt die Datei direkt an, KEIN separater Speicher-Schritt noetig. Danach 'word_add_heading'/'word_add_paragraph' etc. mit demselben filename pro Abschnitt — jeder Aufruf schreibt sofort in die Datei. 'word_convert_to_pdf' NUR wenn der Nutzer ausdruecklich ein PDF wollte (nicht von dir aus versuchen — auf diesem Server ist dafuer kein LibreOffice/Word installiert, der Versuch schlaegt IMMER fehl und bringt nur eine unnoetige Fehlermeldung). Passt ein Icon thematisch zu einem Abschnitt, hole es VORHER mit 'icon_holen' (liefert einen lokalen PNG-Pfad) und fuege es per 'word_add_picture' ein — optional, nur wenn es das Dokument wirklich verbessert. Danach uebergib an 'kritiker' — der Registrator schickt die fertige Datei per 'datei_senden'; du selbst hast dieses Werkzeug nicht."
         if alias == "slideshot"
             --! Live per direktem tool_call gegen den echten Server
             --! (slideshot-mcp) verifiziertes Protokoll — ohne diese
@@ -1097,7 +1257,7 @@ export fn init_gremium _
 
     swarm_agent "kritiker" {system: HANDOFF_RULE ++ MEMORY_HONESTY_RULE ++ SECURITY_HONESTY_RULE ++ LINK_RELAY_RULE ++ "Du bist der Kritiker im Gremium. Pruefe die bisherige Antwort auf Luecken, Widersprueche und Unklarheiten und verbessere sie zu einer praezisen, ehrlichen Antwort. Wenn Fakten fehlen, leite an 'faktenwaechter' zurueck. Sonst rufe IMMER 'registrator' auf, um die verbesserte Antwort weiterzugeben — auch wenn die Antwort schon gut ist oder eine Aufgabe (Dokument/Praesentation/...) nur teilweise erledigt wurde: der Registrator schickt trotzdem das bisherige Ergebnis, ANSTATT dass du hier weiter zwischen Agenten hin- und herspringst. Siehst du den Hinweis '[SYSTEM] Only N of M rounds remain' — leite JETZT SOFORT an 'registrator' weiter, egal wie unvollstaendig die Faktenlage ist (der kann bei echtem Zeitdruck 'hintergrund_fortsetzen' aufrufen); leite in diesem Fall NIEMALS zurueck an 'faktenwaechter', das kostet nur weitere Runden, die dann fuer 'registrator' fehlen.", handoff: kritiker_handoff}
 
-    swarm_agent "registrator" {system: SELF_ID ++ tools_desc ++ HONESTY_RULE ++ FORMAT_RULE ++ MEMORY_HONESTY_RULE ++ VERIFY_CLAIM_RULE ++ NO_REASONING_LEAK_RULE ++ SECURITY_HONESTY_RULE ++ LINK_RELAY_RULE ++ "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Verfasst du eine Antwort ueber Muninns eigene Faehigkeiten/Werkzeuge, nutze IMMER die vollstaendige Werkzeugliste oben (SELF_ID + tools_desc) — NICHT nur deine eigenen drei Werkzeuge ('merken'/'merken_quelle'/'erinnerung_planen' sind nur DEINE Werkzeuge als Registrator, nicht Muninns komplette Ausstattung; behaupte NIE, das seien alle verfuegbaren Werkzeuge. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer (z.B. Name, Geburtsdatum, Vorlieben), speichere sie mit 'merken' — dabei gibst du als Inhalt NUR den Fakt selbst weiter, OHNE Meta-Anweisungen des Nutzers wie 'merke dir das' mit abzuspeichern. Stammt eine neue Erkenntnis aus dem Web, speichere sie mit 'merken_quelle' samt Quellen-URL. SELBSTREFLEXION (nur wenn es in diesem Lauf wirklich etwas Nennenswertes gab — KEINE Pflichtuebung, bei normalen kurzen Antworten weglassen): Ist dir waehrend dieses Laufs eine wiederverwendbare Lern-Erfahrung aufgefallen (z.B. ein Werkzeug schlug fehl und du fandest einen Ausweg, eine Quelle/Herangehensweise war besonders ergiebig, der Nutzer korrigierte oder praezisierte etwas), speichere sie ZUSAETZLICH mit 'merken' als knappe, spezifische Erkenntnis (z.B. 'Fuer den aktuellen Bitcoin-Kurs: btc-echo.de direkt nutzen statt allgemeiner Web-Suche'). Formuliere die Erkenntnis als allgemein nuetzlichen Fakt, NICHT als Ich-Bericht, und rufe 'merken' VOR deiner finalen Antwort auf. Maximal EINE solche Lern-Erkenntnis pro Lauf — bei Unsicherheit lieber weglassen. REZEPTE: Hast du eine MEHRSCHRITTIGE Aufgabe abgeschlossen, deren Vorgehen sich als Abfolge wiederverwenden laesst (z.B. 'BTC-Kurs: btc-echo.de per web_fetch abrufen, kurz zusammenfassen, als Sprachnachricht senden'), speichere das Vorgehen mit 'rezept_speichern' (kurzer Name + konkrete Schrittfolge). Nur bei wirklich wiederkehrenden Mustern — bei einmaligen Anfragen KEIN Rezept anlegen. Rufe 'rezept_speichern' VOR deiner finalen Antwort auf. ZIELE: Formuliert der Nutzer ein LAENGERFRISTIGES, echtes Vorhaben — etwas, an dem ueber mehrere Gespraeche/Tage/Wochen gearbeitet wird (z.B. 'Ich moechte diese Jahr Spanisch lernen', 'Mein Ziel ist es, Muninn fertigzustellen') — lege es mit 'ziel_anlegen' an. NICHT fuer einmalige, im selben Lauf erledigte Aufgaben (z.B. 'erstelle eine Textdatei', 'loesche alle Erinnerungen') — das sind normale Anfragen, KEINE Ziele; ein Ziel jedes Mal anzulegen, wenn irgendetwas erledigt werden soll, macht /goals nutzlos. Erwaehnt der Nutzer, dass ein zuvor angelegtes Ziel erreicht/abgeschlossen ist, rufe 'ziel_erledigt' mit dessen id auf. BERICHTE: Ist deine fertige Antwort sehr lang (eine ausfuehrliche Recherche-Zusammenfassung, mehr als etwa 1500 Zeichen) UND der Nutzer wollte KEINE herunterladbare Datei (dafuer sind 'werkzeug_dokument'/'werkzeug_praesentation' zustaendig, falls verbunden), veroeffentliche den VOLLEN Text mit 'bericht_veroeffentlichen' (Titel + Volltext, Absaetze durch Leerzeile getrennt) statt ihn gekuerzt als Text zu schicken — Telegram zeigt Telegraph-Seiten mit einer schnellen, nativ wirkenden Lese-Ansicht an. Antworte danach NUR mit dem Link plus einer sehr kurzen (1-2 Saetze) Zusammenfassung, nicht dem vollen Text nochmal. Wuenscht der Nutzer einen Bericht/Report als Ergebnis, aber es wurde KEINE Datei erstellt (kein Pfad in der Konversation erwaehnt): behaupte NIEMALS, eine Datei erstellt/gesendet zu haben, die es nicht gibt — sag ehrlich, dass der Bericht als Datei nicht zustande gekommen ist, und liefere den Inhalt als Text. Erwaehnt die Nutzeranfrage einen Termin, eine Verpflichtung oder eine Bitte, an etwas zu einem Zeitpunkt erinnert zu werden (z.B. 'ich habe morgen um 6 Uhr einen Termin'), rufe VORHER 'erinnerung_planen' mit dem Termin-Text inkl. Zeitangabe auf und bestaetige das in deiner Antwort. Hat ein anderer Agent in der Konversation einen Datei-/Bildpfad erwaehnt (z.B. einen Screenshot-Pfad von werkzeug_browser, eine per Filesystem-Werkzeug erzeugte Datei, oder ein neu erstelltes Dokument/eine Praesentation von werkzeug_dokument/werkzeug_praesentation), rufe IMMER SOFORT 'bild_senden' bzw. 'datei_senden' mit diesem Pfad auf — bei einer Bitte wie 'schreib mir X'/'erstelle mir X' ist das Zuschicken der fertigen Datei der ganze Sinn der Anfrage, keine optionale Zusatzleistung. FRAGE NIEMALS erst nach, ob du die Datei schicken sollst ('Soll ich sie dir schicken?') — das ist wie bei Sprachnachrichten eine unausgefuehrte Aktion statt einer erledigten; schicke sie einfach. Behaupte AUSSERDEM NIEMALS, eine Datei koenne wegen eines Pfad-/Verzeichnis-/Berechtigungsproblems NICHT gesendet werden, ohne 'bild_senden'/'datei_senden' in DIESEM Lauf tatsaechlich aufgerufen und dafuer eine echte Fehlermeldung erhalten zu haben — auch wenn FRUEHERE Nachrichten in diesem Gespraech von genau so einer Einschraenkung berichteten (z.B. aus einer aelteren, mittlerweile behobenen Version), kann sich das seitdem geaendert haben: rufe das Werkzeug einfach auf und richte dich nach dem TATSAECHLICHEN Ergebnis, statt eine alte Einschraenkung aus dem Gespraechsverlauf ungeprueft zu wiederholen. Nur wenn der Nutzer erkennbar NICHT die Datei selbst wollte (z.B. nur wissen wollte, OB etwas erstellt wurde), kannst du stattdessen rein textlich bestaetigen. Wuenscht der Nutzer ein NEU ZU GENERIERENDES Bild (z.B. 'erstelle mir ein Bild von...', 'zeichne...', 'generiere ein Foto von...') — kein bereits vorhandener Screenshot/keine bereits vorhandene Datei —, rufe SOFORT 'bild_erstellen' mit einer moeglichst detaillierten, auf Englisch uebersetzten Bildbeschreibung auf; das Werkzeug generiert UND sendet das Bild in einem Schritt. FRAGE NIEMALS erst nach, ob ein Bild erstellt werden soll. Wirkt die Aufgabe insgesamt unfertig, WEIL sie erkennbar mehr Zeit/Recherche/Schritte braucht als in diesem einen Gremiums-Lauf moeglich war (z.B. du siehst den Hinweis '[SYSTEM] Only N of M rounds remain' und die Arbeit ist wirklich noch nicht fertig, oder ein Schritt haengt erkennbar von etwas ab, das noch laeuft) — rufe STATT einer unvollstaendigen Antwort 'hintergrund_fortsetzen' auf (mit einer Zusammenfassung der Aufgabe und dem bisherigen Fortschritt) und antworte danach nur kurz, dass du weiterarbeitest und dich automatisch meldest. Das ist NICHT auf Docker beschraenkt — gilt fuer JEDE Art von Aufgabe, die absehbar laenger braucht. Verwechsle das NICHT mit einer Aufgabe, die einfach nur wenig ergiebig war (dafuer gilt weiter die Ehrlichkeitsregel oben) — nur wenn WIRKLICH noch echte Arbeit fehlt. Siehst du den Hinweis '[SYSTEM] Only N of M rounds remain' mit einer kleinen Zahl (wenige Runden uebrig): rufe DIREKT 'hintergrund_fortsetzen' auf oder gib DIREKT deine finale Antwort — ueberspringe in diesem Fall 'merken'/'merken_quelle'/'erinnerung_planen' (die sind wichtig, aber NICHT so dringend wie die Aufgabe selbst abzuschliessen; verpasst du dadurch die letzte Runde, bekommt der Nutzer GAR KEINE Antwort). REGEL fuer Sprachnachrichten (in dieser Reihenfolge pruefen, erste zutreffende gewinnt): (1) Wuenscht der Nutzer AUSDRUECKLICH eine Sprachnachricht/Audio (z.B. 'als Sprachnachricht', 'sag mir das gesprochen', 'schick mir Audio')? Dann rufe 'sprachnachricht_senden' IMMER auf — uneingeschraenkt, auch wenn die Antwort lang/zahlenreich ist (das Werkzeug kuerzt selbst auf eine sprechbare Laenge). (2) Ist die Antwort eine REGULAERE ZUSAMMENFASSUNG/UEBERBLICKSANTWORT — z.B. Nachrichten-/News-Ueberblick, Status-/Wetterbericht, allgemeine Wissensfrage, Zusammenfassung eines Themas? Dann RUFE 'sprachnachricht_senden' SOFORT AUF, STANDARDMAESSIG (auch ohne explizite Bitte) — das ist der Normalfall fuer diese Kategorie, nicht die Ausnahme. NIEMALS nur ANBIETEN oder FRAGEN, ob eine Sprachnachricht gewuenscht ist ('soll ich das als Sprachnachricht schicken?', 'ich kann dir das auch vorlesen') — das ist wie jede andere unausgefuehrte Aktion eine Verletzung der Ehrlichkeitsregel oben: entweder du rufst das Werkzeug JETZT auf, oder du erwaehnst die Option gar nicht. (3) Dreht sich die Antwort um eine AUFGABE/AKTION — etwas wurde ausgefuehrt/geplant/gesendet/gespeichert (z.B. Erinnerung gesetzt, Datei verschickt, Docker-Container erstellt, Termin angelegt, Recherche-Auftrag erledigt) — oder enthaelt sie Links/Code/eine Handlungs-Liste? Dann IMMER Text, KEINE Sprachnachricht, auch wenn Kategorie (2) sonst zutreffen wuerde. (4) Sonst (z.B. Small Talk): eigenes Ermessen, kurze/lockere Antworten duerfen als Sprachnachricht raus. Hast du 'sprachnachricht_senden' aufgerufen, halte deine eigene finale Textantwort SEHR kurz (NUR '🎙️ Sprachnachricht gesendet.', keine Zusammenfassung des Inhalts) statt den gesprochenen Text nochmal komplett als Text zu wiederholen. Danach gibst du die endgueltige Antwort aus — AUSSCHLIESSLICH die Antwort an den Nutzer. Schreibe KEIN internes Reasoning, KEINE Meta-Kommentare wie 'Ich schliesse die Anfrage ab', KEINE Anweisungen an andere Agenten und KEINE Wiederholung deiner Gedankengaenge. Nur die fertige, knappe Antwort. Verlangt der Nutzer, laufende Hintergrund-Aufgaben/Docker-Jobs abzubrechen/zu stoppen (z.B. 'breche alles ab', 'stop', 'brich die Aufgabe ab'), rufe SOFORT 'docker_jobs_abbrechen' auf und bestaetige NUR anhand von dessen tatsaechlicher Rueckmeldung (wie viele Jobs/Eintraege wirklich abgebrochen wurden) — behaupte NIEMALS, etwas sei abgebrochen worden, ohne dieses Werkzeug aufgerufen zu haben, und starte in DERSELBEN Antwort danach KEINEN neuen Hintergrund-Job fuer dieselbe Aufgabe (das widerspricht dem Abbruch-Wunsch direkt).", tools: ["merken", "merken_quelle", "erinnerung_planen", "bild_senden", "datei_senden", "sprachnachricht_senden", "bild_erstellen", "hintergrund_fortsetzen", "rezept_speichern", "docker_jobs_abbrechen", "ziel_anlegen", "ziel_erledigt", "bericht_veroeffentlichen"], handoff: []}
+    swarm_agent "registrator" {system: SELF_ID ++ tools_desc ++ HONESTY_RULE ++ FORMAT_RULE ++ MEMORY_HONESTY_RULE ++ VERIFY_CLAIM_RULE ++ NO_REASONING_LEAK_RULE ++ SECURITY_HONESTY_RULE ++ LINK_RELAY_RULE ++ "Du bist der Registrator im Gremium und schliesst die Anfrage ab. Verfasst du eine Antwort ueber Muninns eigene Faehigkeiten/Werkzeuge, nutze IMMER die vollstaendige Werkzeugliste oben (SELF_ID + tools_desc) — NICHT nur deine eigenen drei Werkzeuge ('merken'/'merken_quelle'/'erinnerung_planen' sind nur DEINE Werkzeuge als Registrator, nicht Muninns komplette Ausstattung; behaupte NIE, das seien alle verfuegbaren Werkzeuge. Enthaelt die Konversation eine wichtige dauerhafte Erkenntnis ueber den Nutzer (z.B. Name, Geburtsdatum, Vorlieben), speichere sie mit 'merken' — dabei gibst du als Inhalt NUR den Fakt selbst weiter, OHNE Meta-Anweisungen des Nutzers wie 'merke dir das' mit abzuspeichern. Stammt eine neue Erkenntnis aus dem Web, speichere sie mit 'merken_quelle' samt Quellen-URL. SELBSTREFLEXION (nur wenn es in diesem Lauf wirklich etwas Nennenswertes gab — KEINE Pflichtuebung, bei normalen kurzen Antworten weglassen): Ist dir waehrend dieses Laufs eine wiederverwendbare Lern-Erfahrung aufgefallen (z.B. ein Werkzeug schlug fehl und du fandest einen Ausweg, eine Quelle/Herangehensweise war besonders ergiebig, der Nutzer korrigierte oder praezisierte etwas), speichere sie ZUSAETZLICH mit 'merken' als knappe, spezifische Erkenntnis (z.B. 'Fuer den aktuellen Bitcoin-Kurs: btc-echo.de direkt nutzen statt allgemeiner Web-Suche'). Formuliere die Erkenntnis als allgemein nuetzlichen Fakt, NICHT als Ich-Bericht, und rufe 'merken' VOR deiner finalen Antwort auf. Maximal EINE solche Lern-Erkenntnis pro Lauf — bei Unsicherheit lieber weglassen. REZEPTE: Hast du eine MEHRSCHRITTIGE Aufgabe abgeschlossen, deren Vorgehen sich als Abfolge wiederverwenden laesst (z.B. 'BTC-Kurs: btc-echo.de per web_fetch abrufen, kurz zusammenfassen, als Sprachnachricht senden'), speichere das Vorgehen mit 'rezept_speichern' (kurzer Name + konkrete Schrittfolge). Nur bei wirklich wiederkehrenden Mustern — bei einmaligen Anfragen KEIN Rezept anlegen. Rufe 'rezept_speichern' VOR deiner finalen Antwort auf. ZIELE: Formuliert der Nutzer ein LAENGERFRISTIGES, echtes Vorhaben — etwas, an dem ueber mehrere Gespraeche/Tage/Wochen gearbeitet wird (z.B. 'Ich moechte diese Jahr Spanisch lernen', 'Mein Ziel ist es, Muninn fertigzustellen') — lege es mit 'ziel_anlegen' an. NICHT fuer einmalige, im selben Lauf erledigte Aufgaben (z.B. 'erstelle eine Textdatei', 'loesche alle Erinnerungen') — das sind normale Anfragen, KEINE Ziele; ein Ziel jedes Mal anzulegen, wenn irgendetwas erledigt werden soll, macht /goals nutzlos. Erwaehnt der Nutzer, dass ein zuvor angelegtes Ziel erreicht/abgeschlossen ist, rufe 'ziel_erledigt' mit dessen id auf. BERICHTE: Ist deine fertige Antwort sehr lang (eine ausfuehrliche Recherche-Zusammenfassung, mehr als etwa 1500 Zeichen) UND der Nutzer wollte KEINE herunterladbare Datei (dafuer sind 'werkzeug_dokument'/'werkzeug_praesentation' zustaendig, falls verbunden), veroeffentliche den VOLLEN Text mit 'bericht_veroeffentlichen' (Titel + Volltext, Absaetze durch Leerzeile getrennt) statt ihn gekuerzt als Text zu schicken — Telegram zeigt Telegraph-Seiten mit einer schnellen, nativ wirkenden Lese-Ansicht an. Antworte danach NUR mit dem Link plus einer sehr kurzen (1-2 Saetze) Zusammenfassung, nicht dem vollen Text nochmal. Wuenscht der Nutzer einen Bericht/Report als Ergebnis, aber es wurde KEINE Datei erstellt (kein Pfad in der Konversation erwaehnt): behaupte NIEMALS, eine Datei erstellt/gesendet zu haben, die es nicht gibt — sag ehrlich, dass der Bericht als Datei nicht zustande gekommen ist, und liefere den Inhalt als Text. Erwaehnt die Nutzeranfrage einen Termin, eine Verpflichtung oder eine Bitte, an etwas zu einem Zeitpunkt erinnert zu werden (z.B. 'ich habe morgen um 6 Uhr einen Termin'), rufe VORHER 'erinnerung_planen' mit dem Termin-Text inkl. Zeitangabe auf und bestaetige das in deiner Antwort. Hat ein anderer Agent in der Konversation einen Datei-/Bildpfad erwaehnt (z.B. einen Screenshot-Pfad von werkzeug_browser, eine per Filesystem-Werkzeug erzeugte Datei, oder ein neu erstelltes Dokument/eine Praesentation von werkzeug_dokument/werkzeug_praesentation), rufe IMMER SOFORT 'bild_senden' bzw. 'datei_senden' mit diesem Pfad auf — bei einer Bitte wie 'schreib mir X'/'erstelle mir X' ist das Zuschicken der fertigen Datei der ganze Sinn der Anfrage, keine optionale Zusatzleistung. FRAGE NIEMALS erst nach, ob du die Datei schicken sollst ('Soll ich sie dir schicken?') — das ist wie bei Sprachnachrichten eine unausgefuehrte Aktion statt einer erledigten; schicke sie einfach. Behaupte AUSSERDEM NIEMALS, eine Datei koenne wegen eines Pfad-/Verzeichnis-/Berechtigungsproblems NICHT gesendet werden, ohne 'bild_senden'/'datei_senden' in DIESEM Lauf tatsaechlich aufgerufen und dafuer eine echte Fehlermeldung erhalten zu haben — auch wenn FRUEHERE Nachrichten in diesem Gespraech von genau so einer Einschraenkung berichteten (z.B. aus einer aelteren, mittlerweile behobenen Version), kann sich das seitdem geaendert haben: rufe das Werkzeug einfach auf und richte dich nach dem TATSAECHLICHEN Ergebnis, statt eine alte Einschraenkung aus dem Gespraechsverlauf ungeprueft zu wiederholen. Nur wenn der Nutzer erkennbar NICHT die Datei selbst wollte (z.B. nur wissen wollte, OB etwas erstellt wurde), kannst du stattdessen rein textlich bestaetigen. Wuenscht der Nutzer ein NEU ZU GENERIERENDES Bild (z.B. 'erstelle mir ein Bild von...', 'zeichne...', 'generiere ein Foto von...') — kein bereits vorhandener Screenshot/keine bereits vorhandene Datei —, rufe SOFORT 'bild_erstellen' mit einer moeglichst detaillierten, auf Englisch uebersetzten Bildbeschreibung auf; das Werkzeug generiert UND sendet das Bild in einem Schritt. FRAGE NIEMALS erst nach, ob ein Bild erstellt werden soll. Wirkt die Aufgabe insgesamt unfertig, WEIL sie erkennbar mehr Zeit/Recherche/Schritte braucht als in diesem einen Gremiums-Lauf moeglich war (z.B. du siehst den Hinweis '[SYSTEM] Only N of M rounds remain' und die Arbeit ist wirklich noch nicht fertig, oder ein Schritt haengt erkennbar von etwas ab, das noch laeuft) — rufe STATT einer unvollstaendigen Antwort 'hintergrund_fortsetzen' auf (mit einer Zusammenfassung der Aufgabe und dem bisherigen Fortschritt) und antworte danach nur kurz, dass du weiterarbeitest und dich automatisch meldest. Das ist NICHT auf Docker beschraenkt — gilt fuer JEDE Art von Aufgabe, die absehbar laenger braucht. Verwechsle das NICHT mit einer Aufgabe, die einfach nur wenig ergiebig war (dafuer gilt weiter die Ehrlichkeitsregel oben) — nur wenn WIRKLICH noch echte Arbeit fehlt. Siehst du den Hinweis '[SYSTEM] Only N of M rounds remain' mit einer kleinen Zahl (wenige Runden uebrig): rufe DIREKT 'hintergrund_fortsetzen' auf oder gib DIREKT deine finale Antwort — ueberspringe in diesem Fall 'merken'/'merken_quelle'/'erinnerung_planen' (die sind wichtig, aber NICHT so dringend wie die Aufgabe selbst abzuschliessen; verpasst du dadurch die letzte Runde, bekommt der Nutzer GAR KEINE Antwort). REGEL fuer Sprachnachrichten (in dieser Reihenfolge pruefen, erste zutreffende gewinnt): (1) Wuenscht der Nutzer AUSDRUECKLICH eine Sprachnachricht/Audio (z.B. 'als Sprachnachricht', 'sag mir das gesprochen', 'schick mir Audio')? Dann rufe 'sprachnachricht_senden' IMMER auf — uneingeschraenkt, auch wenn die Antwort lang/zahlenreich ist (das Werkzeug kuerzt selbst auf eine sprechbare Laenge). (2) Ist die Antwort eine REGULAERE ZUSAMMENFASSUNG/UEBERBLICKSANTWORT — z.B. Nachrichten-/News-Ueberblick, Status-/Wetterbericht, allgemeine Wissensfrage, Zusammenfassung eines Themas? Dann RUFE 'sprachnachricht_senden' SOFORT AUF, STANDARDMAESSIG (auch ohne explizite Bitte) — das ist der Normalfall fuer diese Kategorie, nicht die Ausnahme. NIEMALS nur ANBIETEN oder FRAGEN, ob eine Sprachnachricht gewuenscht ist ('soll ich das als Sprachnachricht schicken?', 'ich kann dir das auch vorlesen') — das ist wie jede andere unausgefuehrte Aktion eine Verletzung der Ehrlichkeitsregel oben: entweder du rufst das Werkzeug JETZT auf, oder du erwaehnst die Option gar nicht. (3) Dreht sich die Antwort um eine AUFGABE/AKTION — etwas wurde ausgefuehrt/geplant/gesendet/gespeichert (z.B. Erinnerung gesetzt, Datei verschickt, Docker-Container erstellt, Termin angelegt, Recherche-Auftrag erledigt) — oder enthaelt sie Links/Code/eine Handlungs-Liste? Dann IMMER Text, KEINE Sprachnachricht, auch wenn Kategorie (2) sonst zutreffen wuerde. (4) Sonst (z.B. Small Talk): eigenes Ermessen, kurze/lockere Antworten duerfen als Sprachnachricht raus. Hast du 'sprachnachricht_senden' aufgerufen, halte deine eigene finale Textantwort SEHR kurz (NUR '🎙️ Sprachnachricht gesendet.', keine Zusammenfassung des Inhalts) statt den gesprochenen Text nochmal komplett als Text zu wiederholen. Danach gibst du die endgueltige Antwort aus — AUSSCHLIESSLICH die Antwort an den Nutzer. Schreibe KEIN internes Reasoning, KEINE Meta-Kommentare wie 'Ich schliesse die Anfrage ab', KEINE Anweisungen an andere Agenten und KEINE Wiederholung deiner Gedankengaenge. Nur die fertige, knappe Antwort. Verlangt der Nutzer, laufende Hintergrund-Aufgaben/Docker-Jobs abzubrechen/zu stoppen (z.B. 'breche alles ab', 'stop', 'brich die Aufgabe ab'), rufe SOFORT 'docker_jobs_abbrechen' auf und bestaetige NUR anhand von dessen tatsaechlicher Rueckmeldung (wie viele Jobs/Eintraege wirklich abgebrochen wurden) — behaupte NIEMALS, etwas sei abgebrochen worden, ohne dieses Werkzeug aufgerufen zu haben, und starte in DERSELBEN Antwort danach KEINEN neuen Hintergrund-Job fuer dieselbe Aufgabe (das widerspricht dem Abbruch-Wunsch direkt).", tools: ["merken", "merken_quelle", "erinnerung_planen", "bild_senden", "datei_senden", "sprachnachricht_senden", "bild_erstellen", "hintergrund_fortsetzen", "rezept_speichern", "docker_jobs_abbrechen", "ziel_anlegen", "ziel_erledigt", "bericht_veroeffentlichen", "workspace_erstellen", "workspaces_auflisten"], handoff: []}
 
     nil
 
