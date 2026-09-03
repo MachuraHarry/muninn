@@ -1007,12 +1007,32 @@ fn tool_icon tool_name
         return "🔎"
     if tool_name == "web_fetch"
         return "🌐"
-    if tool_name == "erinnerungen_suchen" || tool_name == "erinnerung_planen" || tool_name == "merken" || tool_name == "merken_quelle"
+    if tool_name == "erinnerungen_suchen" || tool_name == "merken" || tool_name == "merken_quelle"
         return "🧠"
+    if tool_name == "erinnerung_planen"
+        return "⏰"
     if (len tool_name) > 7 && (substring tool_name 0 7) == "docker_"
         return "🐳"
-    if tool_name == "bild_senden" || tool_name == "datei_senden"
+    if tool_name == "bild_senden"
+        return "📷"
+    if tool_name == "bild_erstellen"
+        return "🎨"
+    if tool_name == "datei_senden"
         return "📎"
+    if tool_name == "sprachnachricht_senden"
+        return "🎙️"
+    if tool_name == "hintergrund_fortsetzen"
+        return "⏳"
+    if tool_name == "rezept_speichern" || tool_name == "rezepte_suchen"
+        return "📋"
+    if tool_name == "bericht_veroeffentlichen"
+        return "📰"
+    if tool_name == "icon_holen"
+        return "🏷️"
+    if tool_name == "ziel_anlegen"
+        return "🎯"
+    if tool_name == "ziel_erledigt"
+        return "✅"
     "🔧"
 
 --! Bare tool-call content (e.g. 🔎 web_search "Berlin population 2026")
@@ -1062,7 +1082,7 @@ fn handoff_reason args_json
     r: get a "reason"
     if r == nil
         return ""
-    truncate_status (to_str r) 120
+    truncate_status (to_str r) 80
 
 --! Renders one agent group as a tree branch: its header
 --! (agent_group_header) plus its collected entries, each a map
@@ -1159,7 +1179,12 @@ fn make_swarm_updater token cid message_id dbh
                 text: "hands off to " ++ (agent_icon_name detail)
                 reason: handoff_reason args_json
                 if reason != ""
-                    text: text ++ ": \"" ++ reason ++ "\""
+                    --! Italic, not quoted — reason is model-written free
+                    --! text and often already contains its own "quoted
+                    --! terms", which visually collided with a literal
+                    --! wrapping quote (looked like a stray doubled mark
+                    --! right at the start).
+                    text: text ++ ": *" ++ reason ++ "*"
                 push (get (at groups ((len groups) - 1)) "lines") {text: text, handoff: true}
         if event == "start"
             last_group: nil
