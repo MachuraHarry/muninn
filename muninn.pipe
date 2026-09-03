@@ -317,6 +317,16 @@ fn extract_pdf_text path dbh
 fn is_mcp_server_question low
     if !contains low "mcp"
         return false
+    --! Discovery/expansion intent ("search for new ones to add", "which
+    --! would you recommend") needs the REAL gremium (mcp_registry_suchen
+    --! + actual reasoning), not this static "what's already configured"
+    --! shortcut — even if it also mentions "server"/"welche"/etc. Live-
+    --! observed: "Suche mal nach MCP Servern die wir einbauen koennten"
+    --! and "welche wuerdest du empfehlen" both got flattened into the
+    --! plain configured-aliases list below instead of ever reaching
+    --! mcp_registry_suchen or an actual recommendation.
+    if contains low "einbauen" || contains low "hinzufuegen" || contains low "hinzufügen" || contains low "empfehl" || contains low "vorschlag" || contains low "neue" || contains low "suche" || contains low "finde"
+        return false
     if contains low "server" || contains low "werkzeug" || contains low "verfuegbar" || contains low "verfugbar" || contains low "verfügbar" || contains low "welche" || contains low "tools"
         return true
     false
