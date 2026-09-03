@@ -765,6 +765,21 @@ dass eine unrelated Folgenachricht direkt nach einem Vorschlag als "installier's
 wurde und einen unnötigen Docker-Umweg auslöste. Erst bei echter Zustimmung wird der
 Server dauerhaft in der Seele vermerkt (`custom_mcp_servers`) und verbunden.
 
+**Live-Vorfall deckte ein Routing- UND ein Ehrlichkeits-Problem auf**: eine
+Folgebitte ("installier auch X") wurde vom Planer an `registrator`
+weitergeleitet — der hat `mcp_registry_suchen`/`mcp_server_vorschlagen` gar
+nicht (nur `faktenwaechter`), gab also nur eine vage Text-Antwort statt echt zu
+suchen/vorzuschlagen. Zusätzlich hatte eine frühere Antwort behauptet, es stehe
+bereits "ein Vorschlag zur Bestätigung" aus, OHNE `mcp_server_vorschlagen`
+tatsächlich aufgerufen zu haben (`pending_mcp_add` war in der DB leer) — der
+oben beschriebene deterministische Gate greift nur bei einem ECHT gesetzten
+Vorschlag, eine bloße Behauptung aktiviert ihn nicht. Gefixt: neue explizite
+Planer-Regel (analog zu Docker/Passwörtern) leitet JEDE MCP-Server-bezogene
+Anfrage — auch Folgebitten wie "mach das auch" — direkt an `faktenwaechter`;
+`faktenwaechter`s Prompt verbietet jetzt ausdrücklich, bei mehreren Kandidaten
+einen offenen Vorschlag zu behaupten, ohne `mcp_server_vorschlagen` wirklich
+für einen davon aufgerufen zu haben.
+
 Ist kein Server konfiguriert oder aktiv verbunden, bleibt `exec` im Sandbox-Profil
 deaktiviert — Muninn läuft unverändert wie zuvor.
 
