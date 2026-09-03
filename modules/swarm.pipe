@@ -812,7 +812,20 @@ fn tool_bild_senden path caption
         return "Datei nicht gefunden: " ++ full_path
     res: tel.tel_send_photo tok cid full_path caption
     if (get res "ok") == false
-        return "Senden fehlgeschlagen: " ++ (to_str (get res))
+        --! Automatic fallback to sendDocument — live-observed repeatedly:
+        --! Telegram's sendPhoto rejects Slideshot's tall 9:16 (1080x1920)
+        --! renders with "Bad Request: PHOTO_INVALID_DIMENSIONS" (an
+        --! inline-photo aspect-ratio limit, not a filesystem/access
+        --! problem — but the AI, seeing only the raw failure, kept
+        --! misdiagnosing it as one). sendDocument has no such dimension
+        --! restriction, so this guarantees delivery regardless of which
+        --! tool the calling agent reached for, instead of relying on it
+        --! to correctly pick 'datei_senden' for a tall image every time.
+        res2: tel.tel_send_document tok cid full_path caption
+        if (get res2 "ok") == false
+            return "Senden fehlgeschlagen (als Bild UND als Datei versucht): " ++ (to_str (get res2))
+        record_sent_file full_path caption
+        return ("Bild gesendet (als Datei, da Telegram das Bild-Format als Inline-Foto ablehnte — z.B. zu extremes Seitenverhaeltnis): " ++ full_path)
     record_sent_file full_path caption
     "Bild gesendet: " ++ full_path
 
