@@ -1748,6 +1748,19 @@ fn handle_callback token dbh cbq allowed uid
     cid: get chat "id"
     message_id: get msg "message_id"
     txt: get msg "text"
+    if txt == nil || txt == ""
+        --! A message sent as a Rich Message (tel_finalize, see
+        --! tel.tel_send_rich_message/tel_edit_rich_message) has NO "text"
+        --! field at all — Telegram puts its content under
+        --! "rich_message.blocks" (a structured block tree) instead. Fall
+        --! back to Muninn's own stored copy of the last answer it sent to
+        --! this chat rather than trying to flatten that block tree back
+        --! into text. Without this, every feedback button (👍/👎/💾
+        --! Remember/🔍 Dig deeper) silently did nothing on any answer sent
+        --! as a Rich Message — live-reported: no feedback at all on 👍.
+        txt: mem.last_assistant_message dbh cid
+        if txt == ""
+            txt: nil
     tel.tel_answer_callback token cbid ""
     if data == "save"
         if txt != nil

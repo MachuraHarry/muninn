@@ -635,6 +635,22 @@ export fn close_thread h chat_id
 export fn add_message h thread_id chat_id role content
     db_exec h ("INSERT INTO messages (thread_id, chat_id, role, content, ts) VALUES (" ++ (to_str thread_id) ++ ", '" ++ (sql_escape (to_str chat_id)) ++ "', '" ++ (sql_escape role) ++ "', '" ++ (sql_escape content) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "')")
 
+--! The most recent assistant message stored for a chat, or "" if none —
+--! a fallback source of "the text of the answer the user is reacting to"
+--! for handle_callback's feedback buttons (up/down/save/more). Needed
+--! since a Rich Message's callback_query.message carries its content
+--! under "rich_message.blocks" (a structured block tree), NOT the plain
+--! "text" field those buttons used to read directly — Telegram simply
+--! omits "text" entirely on a message that was sent as a Rich Message.
+--! Muninn's own stored copy is authoritative regardless of how the
+--! message was actually sent/rendered.
+export fn last_assistant_message h chat_id
+    rows: db_query h ("SELECT content FROM messages WHERE chat_id = '" ++ (sql_escape (to_str chat_id)) ++ "' AND role = 'assistant' ORDER BY id DESC LIMIT 1")
+    if (len rows) > 0
+        get (at rows 0) "content"
+    else
+        ""
+
 --! The last n messages of a thread, chronologically (oldest first).
 export fn thread_history h thread_id n
     rows: db_query h ("SELECT role, content FROM messages WHERE thread_id = " ++ (to_str thread_id) ++ " ORDER BY id DESC LIMIT " ++ (to_str n))
