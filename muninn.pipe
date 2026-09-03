@@ -461,6 +461,16 @@ fn handle_voice token cid dbh msg allowed uid
     --! worked (fresh profile). As with the gremium call sites, set a fresh
     --! budget here before transcribing.
     setup_sandbox all_mcp_servers
+    --! Lazy MCP loading: this path never goes through ensure_mcp_for_task
+    --! (that keyword-matches TASK TEXT, but there is no text yet before
+    --! transcription) — connect "whisper" explicitly here instead. Every
+    --! voice message unconditionally needs it, so there is no keyword
+    --! decision to make; is_connected guards against reconnecting it on
+    --! every single voice message.
+    if !(mcp.is_connected "whisper")
+        for s in all_mcp_servers
+            if (get s "alias") == "whisper"
+                mcp.connect_servers [s]
     text: nil
     last_err: nil
     try
@@ -1789,6 +1799,13 @@ fn day_end_sec now_sec offset_sec
 fn calendar_events_text email time_min_sec time_max_sec
     if email == nil || email == ""
         return nil
+    --! Lazy MCP loading: this runs from the scheduler (sched_tick), OUTSIDE
+    --! the normal message flow that would otherwise connect "google" on
+    --! demand (ensure_mcp_for_task) — a scheduled check has no message
+    --! text to keyword-match against. Check explicitly instead of relying
+    --! on the try/catch below to paper over "tool not registered".
+    if !(mcp.is_connected "google")
+        return nil
     t_min: format_time time_min_sec "2006-01-02T15:04:05Z"
     t_max: format_time time_max_sec "2006-01-02T15:04:05Z"
     try
@@ -1885,6 +1902,12 @@ fn calendar_notify_new token dbh cid email window_minutes
 --! failed proactive check must never disrupt the scheduler tick.
 fn gmail_new_message_ids email window_minutes
     if email == nil || email == ""
+        return []
+    --! Lazy MCP loading: see the identical guard/comment at
+    --! calendar_events_text above — this also runs from the scheduler,
+    --! outside the message flow that would otherwise connect "google" on
+    --! demand.
+    if !(mcp.is_connected "google")
         return []
     query: "newer_than:" ++ (to_str (window_minutes + 5)) ++ "m"
     text: nil

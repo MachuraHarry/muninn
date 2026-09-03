@@ -1019,7 +1019,14 @@ export fn run_gremium dbh cid task
 export fn run_gremium_stream dbh cid task on_update round_check
     set STATE "dbh" dbh
     set STATE "cid" cid
-    set STATE "mcp_activated" []
+    --! "set X key []" (a bare list literal as a NON-first call argument)
+    --! mis-parses in Pipe — live-reproduced: "set expects 3 arguments"
+    --! even though there visibly are 3 (the parser reads "key[]" as an
+    --! index expression on "key" instead of two separate tokens).
+    --! Wrapping it in parens sidesteps the ambiguity — confirmed this
+    --! also affects any list literal, not just empty ones, and any
+    --! non-first call argument, not just set().
+    set STATE "mcp_activated" ([])
     res: ai_swarm_stream task "planer" 150 on_update round_check
     res: apply_registrator_backstop res
     set res "mcp_activated" (get STATE "mcp_activated")
