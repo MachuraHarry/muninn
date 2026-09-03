@@ -111,17 +111,33 @@ export fn update_job h id status result
 --! for what was really one ongoing "set up a Pipe workspace" task, one
 --! new job per follow-up message instead of continuing/checking the
 --! existing one.
+--!
+--! Self-heals via refresh_job_status (below) instead of trusting the DB's
+--! 'running' column blindly: live-diagnosed a follow-up bug from a
+--! container that exits almost immediately (its one-shot setup_command
+--! finished, no long-running process left) — the DB row stays 'running'
+--! until the next scheduled job_check tick (up to 5 minutes later), so a
+--! genuinely-dead job kept blocking a fresh attempt in the meantime. The
+--! AI's only way out was the broad 'docker_jobs_abbrechen' (cancels EVERY
+--! scheduled continuation for the chat, not just this one job) — which
+--! then collaterally cancelled the calling agent's OWN outer
+--! hintergrund_fortsetzen task_check, silently orphaning a task that had
+--! promised to report back automatically. Refreshing here means a
+--! genuinely-dead job self-clears immediately, so that destructive
+--! detour is no longer needed for this case at all.
 export fn running_job_for_chat h chat_id
     init_docker_jobs h
-    rows: mem.raw_query h ("SELECT id, container_name, description, created FROM docker_jobs WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND status = 'running' ORDER BY id DESC LIMIT 1")
-    if (len rows) > 0
-        at rows 0
-    else
-        nil
+    rows: mem.raw_query h ("SELECT id FROM docker_jobs WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND status = 'running' ORDER BY id DESC LIMIT 1")
+    if (len rows) == 0
+        return nil
+    fresh: refresh_job_status h (get (at rows 0) "id")
+    if fresh == nil || (get fresh "status") != "running"
+        return nil
+    fresh
 
 --! Reads a job (nil if not found).
 export fn get_job h id
-    rows: mem.raw_query h ("SELECT id, chat_id, container_name, description, status, result FROM docker_jobs WHERE id = " ++ (to_str id))
+    rows: mem.raw_query h ("SELECT id, chat_id, container_name, description, status, result, created FROM docker_jobs WHERE id = " ++ (to_str id))
     if (len rows) > 0
         at rows 0
     else

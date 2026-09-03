@@ -894,6 +894,37 @@ zwei weitere ernste Probleme auf, beide gefixt:**
     mit expliziter Prompt-Regel, einen Abbruch NIE nur zu behaupten, ohne
     das Werkzeug tatsächlich aufzurufen.
 
+**Live-Vorfall bei einem Sicherheits-Audit-Auftrag deckte einen dritten,
+subtileren Bug auf**: der KI ausgehend angewiesene Container ohne
+dauerhaft laufenden Prozess (nur ein einmaliger Befehl, kein `sleep
+infinity`/`tail -f`) beendeten sich sofort — jeder weitere
+`docker_exec_command` schlug danach mit „container stopped/paused" fehl.
+Die DB blieb dabei bis zum nächsten `job_check`-Tick (bis zu 5 Minuten)
+fälschlich auf „running" stehen, was `docker_hintergrund_setup`s
+Duplikat-Sperre blockierte. Die KI griff daraufhin zu
+`docker_jobs_abbrechen` — storniert aber ALLE geplanten Fortsetzungen des
+Chats, nicht nur den einen Job, und löschte dabei versehentlich die
+eigene `hintergrund_fortsetzen`-Fortsetzung der übergeordneten Aufgabe:
+der Auftrag blieb verwaist stehen, obwohl „ich melde mich automatisch"
+bereits zugesagt war. Gefixt:
+  - `running_job_for_chat` ruft jetzt selbst `refresh_job_status` auf,
+    BEVOR es einen neuen Job blockiert — ein wirklich toter Job wird
+    sofort erkannt und räumt sich selbst auf, der destruktive Umweg über
+    `docker_jobs_abbrechen` ist für diesen Fall nicht mehr nötig. Live
+    verifiziert: ein Container ohne Keep-Alive-Prozess wurde nach
+    Beendigung sofort als nicht mehr laufend erkannt, statt weiter zu
+    blockieren.
+  - `extra_note`/Werkzeug-Beschreibung von `docker_jobs_abbrechen` warnen
+    jetzt explizit vor diesem Nebeneffekt und weisen auf den
+    Selbstheilungs-Mechanismus als Alternative hin.
+  - Neue Anleitung: braucht eine Aufgabe MEHRERE aufeinanderfolgende
+    `docker_exec_command`-Aufrufe im selben Container, MUSS
+    `setup_command` mit einem Keep-Alive-Befehl enden (z.B.
+    `&& tail -f /dev/null`) — sonst stirbt der Container nach dem ersten
+    Befehl. Für einen einmaligen, abschließenden Testlauf (z.B. der
+    GitHub-Repo-Fall oben) ist das bewusst NICHT gewünscht, dort erkennt
+    `job_check` die Fertigstellung gerade am Beenden des Containers.
+
 ### Dauerhafte Docker-Umgebungen wiederverwenden (`docker_environments`)
 
 Nutzerbeobachtung: für jede Anfrage, die „irgendeine Linux-Umgebung" braucht
