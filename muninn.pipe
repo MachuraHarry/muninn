@@ -692,7 +692,7 @@ fn handle_message token cid text dbh allowed uid
     ph: tel.tel_send_message token cid "🧠 Thinking..."
     if (get ph "ok") == true
         message_id: get (get ph "result") "message_id"
-    on_update: make_swarm_updater token cid message_id
+    on_update: make_swarm_updater token cid message_id dbh
     round_check: make_round_check token cid allowed dbh uid
     setup_sandbox all_mcp_servers
     answer: ""
@@ -822,6 +822,9 @@ fn handle_message token cid text dbh allowed uid
         push row2 (tel.tel_button "👍" "up")
         push row2 (tel.tel_button "👎" "down")
         push kb row2
+        row3: []
+        push row3 (tel.tel_button "📜 Verlauf" "gremium_log")
+        push kb row3
         tel_finalize token cid message_id (shorten answer) kb
 
 --! Truncates a status snippet to n characters (for the live status line —
@@ -1018,46 +1021,61 @@ fn tool_call_detail_line detail args_json
         line: line ++ " (" ++ arg_hint ++ ")"
     line
 
---! Renders ONE transcript sub-line — indented under its agent's group
---! header, see make_swarm_updater — from a single "tool"/"reasoning"/
---! "inject" progress event. "start" is handled separately there (it opens
---! a new GROUP instead of a line); "handoff"/"final" are filtered out
---! before this is ever reached. "reasoning" is the model's actual
---! chain-of-thought for that round (only fires when the provider returns
---! one) — the real "watch them think" signal; "inject" reflects a
---! steering message a round_check fed into the run (see make_round_check)
---! back into the transcript, so the user sees their own nudge take
---! effect. Empty string means "nothing to show".
+--! Renders ONE bare transcript sub-line (no indentation of its own — see
+--! render_group, which indents it when rendering the full post-run log)
+--! from a single "tool"/"reasoning"/"inject" progress event. "start" is
+--! handled separately in make_swarm_updater (it opens a new GROUP instead
+--! of a line); "handoff"/"final" are filtered out before this is ever
+--! reached. "reasoning" is the model's actual chain-of-thought for that
+--! round (only fires when the provider returns one) — the real "watch
+--! them think" signal; "inject" reflects a steering message a round_check
+--! fed into the run (see make_round_check), so the full log shows the
+--! user's own nudge take effect. Empty string means "nothing to show".
 fn swarm_transcript_line event detail args_json
     if event == "tool"
-        return "   ↳ " ++ (tool_call_detail_line detail args_json)
+        return (tool_call_detail_line detail args_json)
     if event == "reasoning"
-        return "   ↳ *" ++ (truncate_status detail 180) ++ "*"
+        return "*" ++ (truncate_status detail 180) ++ "*"
     if event == "inject"
-        return "   ↳ 💬 **You**: " ++ (truncate_status detail 180)
+        return "💬 **You**: " ++ (truncate_status detail 180)
     ""
 
 --! Renders one agent group — its header (agent_action_phrase) plus
---! whatever indented sub-lines it collected — as a single multi-line
---! block for render_groups.
+--! whatever sub-lines it collected, each indented — as a single multi-line
+--! block for render_groups (the full post-run log, see the "📜 Verlauf"
+--! button in handle_message/handle_callback).
 fn render_group g
     header: agent_action_phrase (get g "agent")
     lines: get g "lines"
     if (len lines) == 0
         return header
-    header ++ "\n" ++ (join lines "\n")
+    indented: []
+    for l in lines
+        push indented ("   ↳ " ++ l)
+    header ++ "\n" ++ (join indented "\n")
+
+--! Icon-only breadcrumb of every agent group visited so far (one icon per
+--! GROUP, not per round — see make_swarm_updater's dedup) — the compact
+--! "who's been involved" line of the live status, e.g. "🧭→🔍→🧐".
+fn breadcrumb groups
+    icons: []
+    for g in groups
+        d: agent_display_name (get g "agent")
+        push icons (get d "icon")
+    join icons "→"
 
 --! Joins accumulated agent groups (see make_swarm_updater) into the full
---! transcript body shown inside the expandable "tap to see full log"
---! blockquote, kept under a safe character budget — tighter than
---! shorten's 4000 (that one is sized for a single answer block; this has
---! many separate bold/italic/icon runs, each adding its own HTML-tag
---! overhead once tg_html converts the markdown here, plus the blockquote
---! wrapper itself and the always-visible teaser line outside it). Drops
---! the OLDEST groups first when over budget, with a leading marker so it
+--! run log — sent as its own message on demand (the "📜 Verlauf" button),
+--! wrapped in Telegram's native "tap to expand" blockquote by the caller
+--! (%%EXPAND%%, see tg_html in modules/telegram.pipe) so even a long run
+--! stays collapsed by default. Kept under a safe character budget (a bit
+--! tighter than shorten's 4000, since this adds its own blockquote
+--! wrapper and many separate bold/italic/icon runs each carry their own
+--! HTML-tag overhead once tg_html converts the markdown here). Drops the
+--! OLDEST groups first when over budget, with a leading marker so it
 --! reads as "history trimmed", not "nothing happened yet".
 fn render_groups groups
-    budget: 3000
+    budget: 3800
     kept: groups
     fn render_all gs
         rendered: []
@@ -1072,28 +1090,46 @@ fn render_groups groups
         text: "… (earlier steps hidden)\n\n" ++ text
     text
 
---! Builds the on_update closure for run_gremium_stream: groups progress
---! steps by agent — a "start" event opens a new group only when the agent
---! actually CHANGES, so several tool-call rounds in a row from the same
---! agent (the common case) no longer repeat a redundant "agent is
---! thinking..." header before every single tool call — and renders an
---! always-visible one-line teaser (current agent + its most recent step)
---! plus, once there is real history to show (2+ groups), the full grouped
---! log tucked into Telegram's native "tap to expand" blockquote
---! underneath (see render_groups; %%EXPAND%% is tg_html's marker for it,
---! modules/telegram.pipe). Same edit throttle as before (about
---! once/second, skip if text unchanged) gates every event, including the
---! newer "reasoning"/"inject" ones. message_id may be nil (placeholder
---! send failed) — then the closure is a no-op. (sendMessageDraft was
---! tried here instead of the edit — reverted: live feedback was that it
---! made the message visibly jump around in the chat instead of updating
---! calmly in place.)
-fn make_swarm_updater token cid message_id
-    stream_state: {groups: [], last_text: "", last_ms: 0}
+--! Builds the on_update closure for run_gremium_stream. Two jobs:
+--!
+--! 1. Keeps the live placeholder message itself down to just TWO lines —
+--!    a breadcrumb of agent icons (see breadcrumb) plus the single most
+--!    recent step — instead of a growing wall of text. A "start" event
+--!    opens a new breadcrumb entry only when the agent actually CHANGES,
+--!    so several tool-call rounds in a row from the same agent (the
+--!    common case) don't repeat anything. Native Telegram "typing..."
+--!    chat action is kept alive alongside it (re-sent every ~4s,
+--!    independent of the text throttle below) as a zero-footprint
+--!    ambient liveness cue in the chat header — no message text needed
+--!    for that part at all.
+--! 2. On "final", persists the full grouped step history to
+--!    last_run_log:<cid> (mem meta, see save_trace/format_trace for the
+--!    same pattern with /trace) so the "📜 Verlauf" button attached to the
+--!    finished answer (handle_message/handle_callback's "gremium_log"
+--!    branch) can render the whole run afterward via render_groups — the
+--!    detail lives one tap away instead of ever cluttering the live
+--!    status.
+--!
+--! Edit throttle (about once/second, skip if text unchanged) unchanged
+--! from before. message_id may be nil (placeholder send failed) — then
+--! the text-editing half is a no-op (the typing action and log
+--! persistence still happen). (sendMessageDraft was tried here instead of
+--! the edit — reverted: live feedback was that it made the message
+--! visibly jump around in the chat instead of updating calmly in place.)
+fn make_swarm_updater token cid message_id dbh
+    stream_state: {groups: [], last_text: "", last_ms: 0, last_typing_ms: 0}
     fn on_update agent event detail args_json
-        if event == "handoff" || event == "final"
+        ms: time_ms
+        if (ms - (get stream_state "last_typing_ms")) >= 4000
+            set stream_state "last_typing_ms" ms
+            tel.tel_send_chat_action token cid "typing"
+        if event == "handoff"
             return nil
         groups: get stream_state "groups"
+        if event == "final"
+            if (len groups) > 0
+                mem.meta_set dbh ("last_run_log:" ++ (to_str cid)) (to_json groups)
+            return nil
         if event == "start"
             last_group: nil
             if (len groups) > 0
@@ -1110,15 +1146,12 @@ fn make_swarm_updater token cid message_id
             return nil
         last_group: at groups ((len groups) - 1)
         last_lines: get last_group "lines"
-        teaser: agent_action_phrase (get last_group "agent")
+        current: agent_action_phrase (get last_group "agent")
         if (len last_lines) > 0
-            teaser: teaser ++ "\n" ++ (at last_lines ((len last_lines) - 1))
-        text: teaser
-        if (len groups) > 1
-            text: teaser ++ "\n\n%%EXPAND%%\n" ++ (render_groups groups) ++ "\n%%EXPAND%%"
+            current: at last_lines ((len last_lines) - 1)
+        text: (breadcrumb groups) ++ "\n" ++ current
         if text == (get stream_state "last_text")
             return nil
-        ms: time_ms
         if (ms - (get stream_state "last_ms")) < 1000
             return nil
         set stream_state "last_text" text
@@ -1444,6 +1477,25 @@ fn handle_callback token dbh cbq allowed uid
             mem.add_memory dbh (mem.condense_fact txt) "fact" 3 "telegram" "user"
             tel.tel_send_message token cid "Saved in the soul."
         return nil
+    if data == "gremium_log"
+        --! The full step-by-step history behind the "📜 Verlauf" button —
+        --! persisted once per run by make_swarm_updater's "final" handler
+        --! (last_run_log:<cid>), so the live status itself can stay down to
+        --! just a breadcrumb + current step while the detail is one tap
+        --! away. Wrapped in %%EXPAND%% (see tg_html) so a long run still
+        --! starts collapsed even as its own standalone message.
+        raw: mem.meta_get dbh ("last_run_log:" ++ (to_str cid))
+        groups: nil
+        if raw != nil && raw != ""
+            try
+                groups: parse_json raw
+            catch
+                groups: nil
+        if groups == nil || (len groups) == 0
+            tel.tel_send_message token cid "No detailed log available for the last run."
+        else
+            tel.tel_send_message token cid ("📜 **Full run log:**\n\n%%EXPAND%%\n" ++ (render_groups groups) ++ "\n%%EXPAND%%")
+        return nil
     if data == "more"
         if txt != nil
             tel.tel_send_chat_action token cid "typing"
@@ -1451,7 +1503,7 @@ fn handle_callback token dbh cbq allowed uid
             ph: tel.tel_send_message token cid "🧠 Digging deeper..."
             if (get ph "ok") == true
                 message_id: get (get ph "result") "message_id"
-            on_update: make_swarm_updater token cid message_id
+            on_update: make_swarm_updater token cid message_id dbh
             round_check: make_round_check token cid allowed dbh uid
             setup_sandbox all_mcp_servers
             res: grm.run_gremium_stream dbh cid ((mem.settings_prompt_prefix dbh (to_str cid)) ++ "Please dig deeper into this: " ++ txt) on_update round_check
@@ -1463,7 +1515,11 @@ fn handle_callback token dbh cbq allowed uid
                 if a != nil && a != ""
                     tid: mem.active_thread dbh cid
                     mem.add_message dbh tid cid "assistant" a
-                    tel_finalize token cid message_id (shorten a) nil
+                    kb: []
+                    row: []
+                    push row (tel.tel_button "📜 Verlauf" "gremium_log")
+                    push kb row
+                    tel_finalize token cid message_id (shorten a) kb
                 else
                     tel_finalize token cid message_id "Unfortunately I couldn't dig up anything more." nil
         return nil
