@@ -96,6 +96,24 @@ export fn create_job h chat_id container_name description
 export fn update_job h id status result
     mem.raw_exec h ("UPDATE docker_jobs SET status = '" ++ (mem.sql_escape status) ++ "', result = '" ++ (mem.sql_escape result) ++ "', finished = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
 
+--! The most recently started STILL-RUNNING job for this chat, or nil —
+--! used by tool_docker_hintergrund_setup to deterministically REFUSE a
+--! duplicate job instead of relying on the AI to remember to check first.
+--! The prompt-only rule ("call docker_job_status before starting another
+--! job") was live-observed to NOT be reliable — reproduced again in a
+--! single conversation, four separate background jobs
+--! (pipe-workspace-*/pipe-compile-*/pipe-helloworld/pipe-komplex-test)
+--! for what was really one ongoing "set up a Pipe workspace" task, one
+--! new job per follow-up message instead of continuing/checking the
+--! existing one.
+export fn running_job_for_chat h chat_id
+    init_docker_jobs h
+    rows: mem.raw_query h ("SELECT id, container_name, description, created FROM docker_jobs WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND status = 'running' ORDER BY id DESC LIMIT 1")
+    if (len rows) > 0
+        at rows 0
+    else
+        nil
+
 --! Reads a job (nil if not found).
 export fn get_job h id
     rows: mem.raw_query h ("SELECT id, chat_id, container_name, description, status, result FROM docker_jobs WHERE id = " ++ (to_str id))

@@ -888,6 +888,13 @@ fn tool_docker_hintergrund_setup image name setup_command beschreibung
     dbh: get STATE "dbh"
     if tok == nil || cid == nil || dbh == nil
         return "Kein Chat-/Datenbank-Kontext verfuegbar, kann kein Hintergrund-Setup starten."
+    --! Deterministic duplicate-job guard — the prompt-only "check
+    --! docker_job_status first" rule below was NOT reliably followed (see
+    --! dt.running_job_for_chat's doc comment), so this refuses a second
+    --! job outright instead of trusting the model to remember.
+    existing: dt.running_job_for_chat dbh cid
+    if existing != nil
+        return "Es laeuft bereits ein Hintergrund-Job fuer diesen Chat (Container '" ++ (get existing "container_name") ++ "', gestartet " ++ (get existing "created") ++ ": " ++ (get existing "description") ++ ") — KEIN neuer Job wurde gestartet. Warte auf dessen automatische Rueckmeldung, oder rufe 'docker_job_status' fuer Details auf. Soll wirklich etwas anderes/paralleles laufen, muss der laufende Job erst per 'docker_jobs_abbrechen' beendet werden."
     start_res: dt.tool_docker_setup_starten image name setup_command
     if !(get start_res "ok")
         return "Setup konnte nicht gestartet werden: " ++ (get start_res "message")
