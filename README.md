@@ -1070,8 +1070,19 @@ PowerPoint-Vorlagen) und rendert sie per Headless-Chrome zu PNG/PDF/WebP/PPTX.
   auf). Ohne Zugriff auf die rohen Werkzeuge ist dieser Umweg gar nicht mehr möglich.
 - **Kein eingebautes 9:16-Format** — nur `portrait` (4:5), `landscape` (16:9),
   `instagram` (1:1) sind vordefiniert; für 9:16 (häufigster Wunsch) explizit
-  `orientation:'custom'` mit `width:1080, height:1920`, bei BEIDEN Aufrufen (Sondierung
-  und Erstellung) mit denselben Werten.
+  `orientation:'custom'` mit `width:1080, height:1920`.
+- **`render_slides` hat EIGENE, komplett separate `width`/`height`/`scale`-Parameter**
+  (Default 540×675 bei Scale 4 = 2160×2700) — live diagnostiziert als der eigentliche
+  Grund für zwei zusammenhängende Bugs: (1) angeforderte 9:16-Folien kamen als
+  falsches 4:5-Format heraus, weil `render_slides` beim Fehlen expliziter Werte
+  einfach seine eigene Default-Größe nimmt, unabhängig davon, was `create_slides`
+  bekam; (2) bei Scale 4 hätte ein korrektes 1080×1920 sogar als 4320×7680
+  gerendert (Summe 12000), was Telegrams `sendPhoto` mit `PHOTO_INVALID_DIMENSIONS`
+  ablehnt — ursprünglich fälschlich als Dateisystem-Problem vermutet.
+  `slideshot_folien_erstellen` (siehe unten) reicht width/height deshalb IMMER
+  explizit an `render_slides` durch (dieselben Werte wie bei `create_slides`,
+  gelernt aus `slideshot_groesse_ermitteln`s `dimensions`-Antwort) und fixiert
+  `scale` auf 1 (exakte Pixelgröße, bleibt sicher unter Telegrams Summenlimit).
 - **Bild-Einbettung**: der Renderer sieht nur den übergebenen HTML-String, kein
   Dateisystem — ein Dateipfad in `<img src="...">` funktioniert nicht, und ein
   Sprachmodell kann einen echten, zehntausende Zeichen langen Base64-String auch
