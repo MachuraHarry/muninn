@@ -987,80 +987,135 @@ fn agent_action_phrase agent
         label: icon ++ " **" ++ name ++ "** is working (" ++ (substring agent 9 (len agent)) ++ ")..."
     label
 
---! The "→ calling toolname (hint)" half of a gremium status line, for a
---! "tool" event. Empty string if there is no detail (nothing to show).
+--! Icon for a tool call, by tool name — keeps the live transcript scannable
+--! at a glance instead of uniform "→ calling X" text for everything.
+--! Falls back to a generic wrench for anything not specifically known
+--! (the open-ended universe of MCP specialist tool names, e.g.
+--! word_add_paragraph).
+fn tool_icon tool_name
+    if tool_name == "web_search"
+        return "🔎"
+    if tool_name == "web_fetch"
+        return "🌐"
+    if tool_name == "erinnerungen_suchen" || tool_name == "erinnerung_planen" || tool_name == "merken" || tool_name == "merken_quelle"
+        return "🧠"
+    if (len tool_name) > 7 && (substring tool_name 0 7) == "docker_"
+        return "🐳"
+    if tool_name == "bild_senden" || tool_name == "datei_senden"
+        return "📎"
+    "🔧"
+
+--! The tool-call half of a gremium status line, for a "tool" event — an
+--! icon (see tool_icon) instead of a generic arrow, plus a short argument
+--! hint when available. Empty string if there is no detail (nothing to
+--! show).
 fn tool_call_detail_line detail args_json
     if detail == nil || detail == ""
         return ""
-    line: "→ calling " ++ detail
+    line: (tool_icon detail) ++ " " ++ detail
     arg_hint: tool_arg_summary detail args_json
     if arg_hint != ""
         line: line ++ " (" ++ arg_hint ++ ")"
     line
 
---! Renders ONE line for the accumulating live transcript (see
---! make_swarm_updater) from a single ai_swarm_stream progress event.
---! "handoff"/"final" are filtered out by the caller before this is ever
---! reached (the next "start" already announces the new agent; "final" is
---! handled separately by tel_finalize with the real answer). "reasoning"
---! is the model's actual chain-of-thought for that round (only fires when
---! the provider returns one) — the real "watch them think" signal;
---! "inject" reflects a steering message a round_check fed into the run
---! (see make_round_check) back into the transcript, so the user sees their
---! own nudge take effect. Empty string means "nothing to show" (caller
---! skips the edit entirely).
-fn swarm_transcript_line agent event detail args_json
-    if event == "start"
-        return (agent_action_phrase agent)
+--! Renders ONE transcript sub-line — indented under its agent's group
+--! header, see make_swarm_updater — from a single "tool"/"reasoning"/
+--! "inject" progress event. "start" is handled separately there (it opens
+--! a new GROUP instead of a line); "handoff"/"final" are filtered out
+--! before this is ever reached. "reasoning" is the model's actual
+--! chain-of-thought for that round (only fires when the provider returns
+--! one) — the real "watch them think" signal; "inject" reflects a
+--! steering message a round_check fed into the run (see make_round_check)
+--! back into the transcript, so the user sees their own nudge take
+--! effect. Empty string means "nothing to show".
+fn swarm_transcript_line event detail args_json
     if event == "tool"
-        return (tool_call_detail_line detail args_json)
+        return "   ↳ " ++ (tool_call_detail_line detail args_json)
     if event == "reasoning"
-        return "*" ++ (truncate_status detail 180) ++ "*"
+        return "   ↳ *" ++ (truncate_status detail 180) ++ "*"
     if event == "inject"
-        return "💬 **You**: " ++ (truncate_status detail 180)
+        return "   ↳ 💬 **You**: " ++ (truncate_status detail 180)
     ""
 
---! Joins accumulated transcript lines into one message, kept under
---! Telegram's 4096-char hard limit for editMessageText with real margin to
---! spare — deliberately tighter than shorten's 4000 (that one is sized for
---! a single answer block; a multi-line transcript has many separate
---! bold/italic/icon runs, each adding its own HTML-tag overhead once
---! tg_html converts the markdown below). Drops the OLDEST lines first when
---! over budget, with a leading marker so it reads as "history trimmed",
---! not "nothing happened yet".
-fn render_transcript lines
-    budget: 3500
-    kept: lines
-    text: join kept "\n"
+--! Renders one agent group — its header (agent_action_phrase) plus
+--! whatever indented sub-lines it collected — as a single multi-line
+--! block for render_groups.
+fn render_group g
+    header: agent_action_phrase (get g "agent")
+    lines: get g "lines"
+    if (len lines) == 0
+        return header
+    header ++ "\n" ++ (join lines "\n")
+
+--! Joins accumulated agent groups (see make_swarm_updater) into the full
+--! transcript body shown inside the expandable "tap to see full log"
+--! blockquote, kept under a safe character budget — tighter than
+--! shorten's 4000 (that one is sized for a single answer block; this has
+--! many separate bold/italic/icon runs, each adding its own HTML-tag
+--! overhead once tg_html converts the markdown here, plus the blockquote
+--! wrapper itself and the always-visible teaser line outside it). Drops
+--! the OLDEST groups first when over budget, with a leading marker so it
+--! reads as "history trimmed", not "nothing happened yet".
+fn render_groups groups
+    budget: 3000
+    kept: groups
+    fn render_all gs
+        rendered: []
+        for g in gs
+            push rendered (render_group g)
+        join rendered "\n\n"
+    text: render_all kept
     while (len text) > budget && (len kept) > 1
         kept: slice kept 1 (len kept)
-        text: join kept "\n"
-    if (len kept) < (len lines)
-        text: "… (earlier steps hidden)\n" ++ text
+        text: render_all kept
+    if (len kept) < (len groups)
+        text: "… (earlier steps hidden)\n\n" ++ text
     text
 
---! Builds the on_update closure for run_gremium_stream: renders every new
---! progress step as one line, appended to a growing, visually formatted
---! transcript (see swarm_transcript_line/render_transcript) instead of
---! overwriting a single status line — so watching the gremium shows what
---! it has actually been doing/thinking so far, not just its current step.
---! Same edit throttle as before (about once/second, skip if text
---! unchanged) gates every event type uniformly, including the newer
---! "reasoning"/"inject" events. message_id may be nil (placeholder send
---! failed) — then the closure is a no-op. (sendMessageDraft was tried here
---! instead of the edit — reverted: live feedback was that it made the
---! message visibly jump around in the chat instead of updating calmly in
---! place.)
+--! Builds the on_update closure for run_gremium_stream: groups progress
+--! steps by agent — a "start" event opens a new group only when the agent
+--! actually CHANGES, so several tool-call rounds in a row from the same
+--! agent (the common case) no longer repeat a redundant "agent is
+--! thinking..." header before every single tool call — and renders an
+--! always-visible one-line teaser (current agent + its most recent step)
+--! plus, once there is real history to show (2+ groups), the full grouped
+--! log tucked into Telegram's native "tap to expand" blockquote
+--! underneath (see render_groups; %%EXPAND%% is tg_html's marker for it,
+--! modules/telegram.pipe). Same edit throttle as before (about
+--! once/second, skip if text unchanged) gates every event, including the
+--! newer "reasoning"/"inject" ones. message_id may be nil (placeholder
+--! send failed) — then the closure is a no-op. (sendMessageDraft was
+--! tried here instead of the edit — reverted: live feedback was that it
+--! made the message visibly jump around in the chat instead of updating
+--! calmly in place.)
 fn make_swarm_updater token cid message_id
-    stream_state: {lines: [], last_text: "", last_ms: 0}
+    stream_state: {groups: [], last_text: "", last_ms: 0}
     fn on_update agent event detail args_json
         if event == "handoff" || event == "final"
             return nil
-        line: swarm_transcript_line agent event detail args_json
-        if line == ""
+        groups: get stream_state "groups"
+        if event == "start"
+            last_group: nil
+            if (len groups) > 0
+                last_group: at groups ((len groups) - 1)
+            if last_group == nil || (get last_group "agent") != agent
+                push groups {agent: agent, lines: []}
+        else
+            line: swarm_transcript_line event detail args_json
+            if line != ""
+                if (len groups) == 0
+                    push groups {agent: agent, lines: []}
+                push (get (at groups ((len groups) - 1)) "lines") line
+        if (len groups) == 0
             return nil
-        push (get stream_state "lines") line
-        text: render_transcript (get stream_state "lines")
+        last_group: at groups ((len groups) - 1)
+        last_lines: get last_group "lines"
+        teaser: agent_action_phrase (get last_group "agent")
+        if (len last_lines) > 0
+            teaser: teaser ++ "\n" ++ (at last_lines ((len last_lines) - 1))
+        text: teaser
+        if (len groups) > 1
+            text: teaser ++ "\n\n%%EXPAND%%\n" ++ (render_groups groups) ++ "\n%%EXPAND%%"
         if text == (get stream_state "last_text")
             return nil
         ms: time_ms

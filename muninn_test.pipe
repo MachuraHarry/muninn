@@ -9,6 +9,7 @@ import "modules/web.pipe" as web
 import "modules/mcp.pipe" as mcp
 import "modules/scheduler.pipe" as sched
 import "modules/docker_tools.pipe" as dt
+import "modules/telegram.pipe" as tel
 
 --! Regelklassifikation: Kategorien ohne KI.
 test "rule_classify erkennt 'merke/erinnere' als permanent"
@@ -64,6 +65,20 @@ test "mark_injected kappt auf die letzten 30 Eintraege"
     expect_eq (mem.was_injected h 1000) false "aeltestes von 35 faellt nach der Kappung heraus"
     expect_eq (mem.was_injected h 1034) true "juengstes bleibt erhalten"
     mem.close h
+
+--! tg_html: %%EXPAND%%...%%EXPAND%% wird zu Telegrams nativem
+--! aufklappbarem Zitatblock (siehe render_groups/make_swarm_updater in
+--! muninn.pipe fuer den Live-Transkript-Verlauf des Gremiums). Bestehende
+--! Markdown-Konvertierung (Bold) muss innerhalb weiterhin funktionieren,
+--! und Text OHNE den Marker darf gar nicht erst einen Block bekommen.
+test "tg_html wandelt %%EXPAND%% in einen aufklappbaren Zitatblock um"
+    out: tel.tg_html "Kopfzeile\n\n%%EXPAND%%\n**Huginn** denkt nach\nDetail-Zeile\n%%EXPAND%%"
+    expect_contains out "<blockquote expandable>" "Block geoeffnet"
+    expect_contains out "</blockquote>" "Block geschlossen"
+    expect_contains out "<b>Huginn</b> denkt nach" "Bold innerhalb des Blocks konvertiert"
+    expect_contains out "Detail-Zeile" "Inhalt innerhalb des Blocks erhalten"
+    plain: tel.tg_html "Ganz normaler Text ohne Marker"
+    expect_falsy (contains plain "blockquote") "kein Marker -> kein Blockquote"
 
 --! /settings (P6): setting_get/setting_set-Roundtrip + Default ohne
 --! gesetzten Wert, getrennt pro Chat (zwei Chats teilen sich NICHT dieselbe
