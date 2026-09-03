@@ -110,8 +110,15 @@ export fn due h now_sec
 
 --! Marks an entry as done — or, for daily/weekly/hourly/15min/5min, pushes
 --! it to the next occurrence (+86400/+604800/+3600/+900/+300) instead of
---! closing it.
-export fn mark_fired h id repeat due_sec
+--! closing it. now_sec anchors that catch-up: rescheduling purely off the
+--! OLD due_sec means that after any downtime longer than one interval
+--! (a restart, an outage), due_sec + inc can still land in the past, so
+--! the entry fires again on the very next tick, gets pushed by another
+--! fixed increment, still lands in the past, and so on — a burst of
+--! repeated fires (duplicate proactive messages/reminders) until it
+--! finally catches up. If the naive advance would still be <= now_sec,
+--! jump straight to now_sec + inc instead — a single clean catch-up fire.
+export fn mark_fired h id repeat due_sec now_sec
     if repeat == "daily" || repeat == "weekly" || repeat == "hourly" || repeat == "15min" || repeat == "5min"
         inc: 86400
         if repeat == "weekly"
@@ -122,7 +129,10 @@ export fn mark_fired h id repeat due_sec
             inc: 900
         if repeat == "5min"
             inc: 300
-        db_exec h ("UPDATE scheduled SET due_ts = " ++ (to_str (due_sec + inc)) ++ ", last_fired = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
+        next_due: due_sec + inc
+        if next_due <= now_sec
+            next_due: now_sec + inc
+        db_exec h ("UPDATE scheduled SET due_ts = " ++ (to_str next_due) ++ ", last_fired = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
     else
         db_exec h ("UPDATE scheduled SET state = 'done', last_fired = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str id))
     "ok"

@@ -53,11 +53,36 @@ export fn set_google_email email
 --! Resolves a mostly RELATIVE path reported by a tool (e.g. a Playwright
 --! screenshot) into an absolute path. Muninn always runs from /root/muninn
 --! (see all start commands in muninn.pipe).
+--! Resolves a tool-supplied path against the muninn directory, rejecting
+--! anything that would escape it (an absolute path, or "../" traversal in
+--! a relative one) — without this, tool_bild_senden/tool_datei_senden
+--! would happily read+send ANY host file the process can access (e.g.
+--! .env) if the AI is ever tricked into supplying such a path (a
+--! prompt-injected web page, a compromised MCP tool response). Returns
+--! nil on rejection — callers must check for that instead of trusting a
+--! non-empty string is always safe to read.
 fn resolve_muninn_path path
-    if (len path) > 0 && (substring path 0 1) == "/"
-        path
-    else
-        "/root/muninn/" ++ path
+    if path == nil || path == ""
+        return nil
+    base: "/root/muninn/"
+    full: path
+    if !((len path) > 0 && (substring path 0 1) == "/")
+        full: base ++ path
+    --! Normalize ".."/"." segments (no path-normalization builtin in Pipe)
+    --! before checking the prefix — a raw substring/prefix check on the
+    --! unnormalized string would miss "/root/muninn/../../etc/passwd".
+    parts: split full "/"
+    out: []
+    for seg in parts
+        if seg == ".."
+            if (len out) > 0
+                out: slice out 0 ((len out) - 1)
+        else if seg != "." && seg != ""
+            push out seg
+    normalized: "/" ++ (join out "/")
+    if (len normalized) < (len base) || (substring normalized 0 (len base)) != base
+        return nil
+    normalized
 
 --! Tool: fetch relevant memories from the soul.
 fn tool_erinnerungen_suchen query
@@ -236,16 +261,25 @@ fn tool_mcp_server_vorschlagen alias name beschreibung npm_paket
     existing_pending: mem.meta_get h "pending_mcp_add"
     if existing_pending != nil && existing_pending != ""
         return "Es gibt bereits einen offenen Vorschlag, der auf eine Ja/Nein-Antwort wartet — erst DIESEN entscheiden lassen, bevor ein neuer vorgeschlagen wird."
-    mem.meta_set h "pending_mcp_add" (to_json {alias: alias, name: name, beschreibung: beschreibung, npm_paket: npm_paket})
     kb: []
     row: []
     push row (tel.tel_button "✅ Ja, hinzufuegen" "mcp_add_yes")
     push row (tel.tel_button "❌ Nein" "mcp_add_no")
     push kb row
     text: "🔌 Neuer MCP-Server gefunden:\n\n**" ++ name ++ "** (`" ++ alias ++ "`)\n" ++ beschreibung ++ "\nnpm: " ++ npm_paket ++ "\n\nLaeuft bei Zustimmung als uneingeschraenkter lokaler Prozess (`npx -y " ++ npm_paket ++ "`) — bitte nur bestaetigen, wenn du der Quelle vertraust. Antworte mit Ja/Nein oder tippe den Button — bis dahin passiert NICHTS."
-    sendres: tel.tel_send_message_kb tok cid text kb
+    --! The pending-approval gate is only armed AFTER a confirmed successful
+    --! send — armed first and the send fails (network blip, or an
+    --! exception), the user would be permanently locked out by
+    --! handle_message's deterministic gate (muninn.pipe) without ever
+    --! having seen a proposal to answer.
+    sendres: nil
+    try
+        sendres: tel.tel_send_message_kb tok cid text kb
+    catch e
+        return ("Senden des Vorschlags fehlgeschlagen: " ++ (to_str e))
     if (get sendres "ok") == false
         return "Senden des Vorschlags fehlgeschlagen: " ++ (to_str (get sendres))
+    mem.meta_set h "pending_mcp_add" (to_json {alias: alias, name: name, beschreibung: beschreibung, npm_paket: npm_paket})
     "Vorschlag an Harry gesendet, wartet auf Bestaetigung. WICHTIG: bis er antwortet, ist NICHTS installiert. Schreibt er DANACH etwas anderes (z.B. 'installier's', 'teste es') — das System faengt jede Nachricht waehrend eine Bestaetigung aussteht deterministisch VOR dir ab, du bekommst so eine Nachricht erst gar nicht zu sehen. Versuch also NIEMALS selbst, den vorgeschlagenen Server anderweitig (z.B. per Docker) zu installieren oder zu testen — das ist nie noetig."
 
 --! Tool: permanently remember a piece of information.
@@ -334,9 +368,20 @@ fn tool_icon_holen suchbegriff farbe groesse
     if (len ids) == 0
         return "Kein passendes Icon gefunden fuer '" ++ suchbegriff ++ "'."
     icon_id: at ids 0
-    px: "128"
+    --! groesse is interpolated unquoted into a shell command below (unlike
+    --! the paths, which go through shell_quote) — a raw to_str of an
+    --! AI-supplied value would let something like "128; rm -rf /tmp/x"
+    --! reach exec() verbatim. Validate it's actually a plain positive
+    --! integer instead, falling back to the default on anything else.
+    px_n: 128
     if groesse != nil && groesse != ""
-        px: to_str groesse
+        try
+            px_n: to_num groesse
+        catch
+            px_n: 128
+        if !(is_num px_n) || px_n <= 0 || px_n > 2048
+            px_n: 128
+    px: to_str (round px_n)
     svg: web.web_icon_svg icon_id farbe px
     if svg == nil
         return "Icon '" ++ icon_id ++ "' konnte nicht abgerufen werden."
@@ -548,6 +593,8 @@ fn tool_bild_senden path caption
     if tok == nil || cid == nil
         return "Kein Telegram-Kontext verfuegbar, kann kein Bild senden."
     full_path: resolve_muninn_path path
+    if full_path == nil
+        return "Ungueltiger Pfad (ausserhalb von /root/muninn/): " ++ (to_str path)
     if !(file_exists full_path)
         return "Datei nicht gefunden: " ++ full_path
     res: tel.tel_send_photo tok cid full_path caption
@@ -564,6 +611,8 @@ fn tool_datei_senden path caption
     if tok == nil || cid == nil
         return "Kein Telegram-Kontext verfuegbar, kann keine Datei senden."
     full_path: resolve_muninn_path path
+    if full_path == nil
+        return "Ungueltiger Pfad (ausserhalb von /root/muninn/): " ++ (to_str path)
     if !(file_exists full_path)
         return "Datei nicht gefunden: " ++ full_path
     res: tel.tel_send_document tok cid full_path caption

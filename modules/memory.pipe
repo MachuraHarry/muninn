@@ -549,10 +549,14 @@ export fn list_memories h q kind limit
         order_sql: " ORDER BY id DESC"
     db_query h ("SELECT id, content, kind, importance, ts, tags FROM memories" ++ where_sql ++ order_sql ++ " LIMIT " ++ (to_str limit))
 
---! Deletes a memory incl. its embedding (web dashboard P3).
+--! Deletes a memory incl. its embedding (web dashboard P3). id is coerced
+--! via to_num before it reaches SQL — the dashboard passes it through
+--! straight from a JSON request body, so a non-numeric value (e.g. a
+--! crafted string) must never be interpolated into the query as-is.
 export fn delete_memory h id
-    db_exec h ("DELETE FROM memories WHERE id = " ++ (to_str id))
-    db_exec h ("DELETE FROM embeddings WHERE memory_id = " ++ (to_str id))
+    nid: to_num id
+    db_exec h ("DELETE FROM memories WHERE id = " ++ (to_str nid))
+    db_exec h ("DELETE FROM embeddings WHERE memory_id = " ++ (to_str nid))
     "ok"
 
 --! Fetches the N most important memories (high importance first).
@@ -580,14 +584,17 @@ export fn add_goal h text
 export fn list_goals h limit
     db_query h ("SELECT id, goals.text AS goal_text, status FROM goals ORDER BY id DESC LIMIT " ++ (to_str limit))
 
---! Sets a goal's status (e.g. "open"/"done", web dashboard P3).
+--! Sets a goal's status (e.g. "open"/"done", web dashboard P3). id is
+--! coerced via to_num — see delete_memory's comment on why (a JSON
+--! request-body id must never reach SQL unvalidated).
 export fn set_goal_status h id status
-    db_exec h ("UPDATE goals SET status = '" ++ (sql_escape status) ++ "' WHERE id = " ++ (to_str id))
+    db_exec h ("UPDATE goals SET status = '" ++ (sql_escape status) ++ "' WHERE id = " ++ (to_str (to_num id)))
 
 --! Sets a memory's importance directly (web dashboard P3, manual curation
---! alongside automatic consolidation).
+--! alongside automatic consolidation). id/importance coerced via to_num —
+--! see delete_memory's comment.
 export fn set_importance h id importance
-    db_exec h ("UPDATE memories SET importance = " ++ (to_str importance) ++ " WHERE id = " ++ (to_str id))
+    db_exec h ("UPDATE memories SET importance = " ++ (to_str (to_num importance)) ++ " WHERE id = " ++ (to_str (to_num id)))
 
 --! Adjusts the importance of ALL memories whose content exactly matches
 --! `content` (feedback learning P4: 👍/👎 on a stored answer). delta is

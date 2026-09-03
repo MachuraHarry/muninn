@@ -817,7 +817,7 @@ test "schedule/due/mark_fired: einmalige Aufgabe wird erledigt"
     due: sched.due h 1000
     expect_eq (len due) 1 "eine fällige Aufgabe"
     expect_eq (get (at due 0) "kind") "reminder" "kind korrekt"
-    sched.mark_fired h id "" 1000
+    sched.mark_fired h id "" 1000 1000
     expect_eq (len (sched.due h 2000)) 0 "nach mark_fired nicht mehr fällig"
     mem.close h
 
@@ -833,7 +833,7 @@ test "mark_fired schiebt daily-Aufgabe auf den nächsten Tag"
     h: mem.init_db ":memory:"
     sched.init_scheduler h
     id: sched.schedule h "briefing" "42" "Daily" 1000 "daily"
-    sched.mark_fired h id "daily" 1000
+    sched.mark_fired h id "daily" 1000 1000
     due: sched.due h 1000
     expect_eq (len due) 0 "heute nicht mehr fällig"
     due2: sched.due h 87400
@@ -844,7 +844,7 @@ test "mark_fired schiebt 5min-Aufgabe auf den naechsten Takt (Hintergrund-Job-Ch
     h: mem.init_db ":memory:"
     sched.init_scheduler h
     id: sched.schedule h "job_check" "42" "1" 1000 "5min"
-    sched.mark_fired h id "5min" 1000
+    sched.mark_fired h id "5min" 1000 1000
     due: sched.due h 1000
     expect_eq (len due) 0 "gleich nicht mehr faellig"
     due2: sched.due h 1300
@@ -855,11 +855,27 @@ test "mark_fired schiebt hourly-Aufgabe auf den naechsten Takt (E-Mail-Check)"
     h: mem.init_db ":memory:"
     sched.init_scheduler h
     id: sched.schedule h "email_check" "42" "" 1000 "hourly"
-    sched.mark_fired h id "hourly" 1000
+    sched.mark_fired h id "hourly" 1000 1000
     due: sched.due h 1000
     expect_eq (len due) 0 "gleich nicht mehr faellig"
     due2: sched.due h 4600
     expect_eq (len due2) 1 "in einer Stunde wieder faellig (1000 + 3600)"
+    mem.close h
+
+test "mark_fired holt nach langem Ausfall EINMAL sauber auf statt in einem Schub nachzufeuern"
+    h: mem.init_db ":memory:"
+    sched.init_scheduler h
+    id: sched.schedule h "email_check" "42" "" 1000 "hourly"
+    --! Simulates a restart after a 3-hour outage: due_ts was 1000, "now" is
+    --! 1000 + 3*3600. Naive due_sec+inc (1000+3600=4600) would still be far
+    --! in the past -> immediately due again next tick -> fires repeatedly
+    --! until caught up. Must instead jump straight to now_sec + inc.
+    now_after_outage: 1000 + (3 * 3600)
+    sched.mark_fired h id "hourly" 1000 now_after_outage
+    due_now: sched.due h now_after_outage
+    expect_eq (len due_now) 0 "direkt nach dem Aufholen nicht sofort wieder faellig"
+    due_next: sched.due h (now_after_outage + 3600)
+    expect_eq (len due_next) 1 "eine Stunde nach dem Aufholen wieder faellig (now + 3600)"
     mem.close h
 
 test "docker_tools: create_job/get_job/update_job-Rundlauf"

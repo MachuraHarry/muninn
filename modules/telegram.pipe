@@ -12,18 +12,28 @@ fn err_map status body
     set m "body" body
     m
 
---! Generic POST: returns the parse_json result (map with "ok").
+--! Generic POST: returns the parse_json result (map with "ok"). Never
+--! throws — a transport-level failure (timeout, DNS, connection reset)
+--! is returned as an err_map just like an API-level error, so every
+--! caller that checks `(get res "ok") == false` for a fallback (see
+--! tel_post_with_markdown, tel_send_rich_message, tel_edit_rich_message*)
+--! actually gets the chance to run it instead of the exception just
+--! propagating past that check.
 export fn tel_post token method body_map
     url: "https://api.telegram.org/bot" ++ token ++ "/" ++ method
     hdrs: {}
     set hdrs "Content-Type" "application/json"
     body: to_json body_map
-    r: http_request "POST" url hdrs body
+    r: nil
+    try
+        r: http_request "POST" url hdrs body
+    catch e
+        return (err_map 0 (to_str e))
     status: get r "status"
     j: nil
     try
         j: parse_json (get r "body")
-    catch e
+    catch e2
         j: nil
     if j == nil
         return (err_map status (get r "body"))
@@ -33,6 +43,7 @@ export fn tel_post token method body_map
 
 --! Generic GET with query parameters (query is a list of [key, value] pairs).
 --! List literals as function arguments are wrapped in parens: ([]).
+--! Never throws — same transport-failure -> err_map guarantee as tel_post.
 export fn tel_get token method query
     qs: ""
     for pair in query
@@ -43,11 +54,15 @@ export fn tel_get token method query
             sep: "&"
         qs: qs ++ sep ++ k ++ "=" ++ (urlencode v)
     url: "https://api.telegram.org/bot" ++ token ++ "/" ++ method ++ qs
-    r: http_request "GET" url
+    r: nil
+    try
+        r: http_request "GET" url
+    catch e
+        return (err_map 0 (to_str e))
     j: nil
     try
         j: parse_json (get r "body")
-    catch e
+    catch e2
         j: nil
     if j == nil
         return (err_map (get r "status") (get r "body"))
