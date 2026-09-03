@@ -491,7 +491,7 @@ fn handle_photo token cid dbh msg
     row: []
     push row (tel.tel_button "💾 Remember" "save")
     push kb row
-    tel.tel_send_message_kb token cid (shorten answer) kb
+    tel.tel_send_rich_message token cid (shorten answer) kb
     nil
 
 --! Processes an incoming voice message: downloads the OGG/Opus file,
@@ -1456,22 +1456,26 @@ fn make_round_check token cid allowed dbh uid
 --! placeholder message referenced by message_id (optionally with keyboard
 --! kb), but falls back to a new message if message_id is missing
 --! (placeholder couldn't be sent) or the edit itself fails (e.g. the user
---! deleted the message) — so a finished answer is never lost.
+--! deleted the message) — so a finished answer is never lost. Sent as a
+--! Rich Message (tel.tel_send_rich_message/tel_edit_rich_message*, see
+--! FORMAT_RULE in swarm.pipe) so real headings/tables/lists the registrator
+--! writes actually render, not just bold/italic/code/links; each wrapper
+--! falls back to a plain send/edit on its own if the client rejects it.
 fn tel_finalize token cid message_id text kb
     if message_id == nil
         if kb == nil
-            return (tel.tel_send_message token cid text)
-        return (tel.tel_send_message_kb token cid text kb)
+            return (tel.tel_send_rich_message token cid text nil)
+        return (tel.tel_send_rich_message token cid text kb)
     r: nil
     if kb == nil
-        r: tel.tel_edit_message_text token cid message_id text
+        r: tel.tel_edit_rich_message token cid message_id text
     else
-        r: tel.tel_edit_message_text_kb token cid message_id text kb
+        r: tel.tel_edit_rich_message_kb token cid message_id text kb
     if (get r "ok") == false
         if kb == nil
-            r: tel.tel_send_message token cid text
+            r: tel.tel_send_rich_message token cid text nil
         else
-            r: tel.tel_send_message_kb token cid text kb
+            r: tel.tel_send_rich_message token cid text kb
     r
 
 --! Like tel_finalize, but for the specific case of a genuine gremium
@@ -1487,10 +1491,7 @@ fn tel_finalize token cid message_id text kb
 fn tel_finalize_after_tree token cid message_id text kb
     if message_id != nil
         tel.tel_delete_message token cid message_id
-    if kb == nil
-        tel.tel_send_message token cid text
-    else
-        tel.tel_send_message_kb token cid text kb
+    tel.tel_send_rich_message token cid text kb
 
 --! Checks whether an AI answer represents an "I don't know" fallback that
 --! calls for a web research.
@@ -1583,7 +1584,7 @@ fn do_search token cid dbh query
     if ctx == nil || ctx == ""
         fallback: "No usable results found."
         mem.add_message dbh tid cid "assistant" fallback
-        tel.tel_send_message token cid fallback
+        tel.tel_send_rich_message token cid fallback nil
         return nil
     answer: ""
     try
@@ -1601,7 +1602,7 @@ fn do_search token cid dbh query
     row: []
     push row (tel.tel_button "💾 Remember" "save")
     push kb row
-    tel.tel_send_message_kb token cid (shorten full) kb
+    tel.tel_send_rich_message token cid (shorten full) kb
     nil
 
 --! Detects a search intent and returns the search term (or "").
@@ -2099,7 +2100,7 @@ fn sched_tick token
                 ergebnis: (get job "status") ++ ": " ++ (to_str (get job "result"))
             continuation: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "A previously background-started Docker setup has finished. Description: " ++ beschreibung ++ ". Result (incl. container logs/test output, if available): " ++ ergebnis ++ ". Report to the user briefly and cleanly formatted what happened — for test runs: how many tests ran, passed/failed, the most important error message if failed. If the original task still needs a next step, initiate it directly (e.g. calling 'docker_hintergrund_setup' again)."
             res: grm.run_gremium dbh (to_num cid) continuation
-            tel.tel_send_message token (to_num cid) (get res "content")
+            tel.tel_send_rich_message token (to_num cid) (get res "content") nil
             sched.cancel dbh (get item "id")
             continue
         if kind == "task_check"
@@ -2118,7 +2119,7 @@ fn sched_tick token
             setup_sandbox all_mcp_servers
             continuation2: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "You're continuing work on a previously deferred task. Original task: " ++ (get t "task") ++ ". Progress so far: " ++ (get t "progress") ++ ". Continue the work. If you're done NOW, clearly communicate the final result to the user. If you're NOT done yet, call 'hintergrund_fortsetzen' again with the updated progress."
             res2: grm.run_gremium dbh (to_num cid) continuation2
-            tel.tel_send_message token (to_num cid) (get res2 "content")
+            tel.tel_send_rich_message token (to_num cid) (get res2 "content") nil
             sched.cancel dbh (get item "id")
             continue
         if kind == "proaktiv"
@@ -2136,7 +2137,7 @@ fn sched_tick token
                 res_proaktiv: grm.run_gremium dbh (to_num cid) prompt_proaktiv
                 content_proaktiv: get res_proaktiv "content"
                 if content_proaktiv != nil && (lower (trim content_proaktiv)) != "nothing" && (trim content_proaktiv) != ""
-                    tel.tel_send_message token (to_num cid) (shorten (trim content_proaktiv))
+                    tel.tel_send_rich_message token (to_num cid) (shorten (trim content_proaktiv)) nil
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts")
             continue
         if kind == "selbstdiagnose"

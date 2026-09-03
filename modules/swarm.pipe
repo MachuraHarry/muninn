@@ -481,14 +481,17 @@ RESULT_HONESTY_RULE: "Behaupte NIEMALS pauschal, 'web_search'/'web_fetch' seien 
 --! replaced by the gremium, which has real context and real tools).
 HONESTY_RULE: "Ist eine Nutzeranfrage zu vage oder unspezifisch, um eine konkrete, sinnvolle Aktion daraus abzuleiten (z.B. 'mach mal irgendwas'), erfinde NIEMALS eine Aktion und behaupte NIEMALS, etwas getan zu haben, das nicht wirklich stattgefunden hat. Frage stattdessen freundlich und konkret nach, was genau gewuenscht ist. Fragt der Nutzer, WARUM du zuvor etwas Bestimmtes getan/geantwortet hast (z.B. 'wieso hast du recherchiert statt normal zu antworten?'), erfinde NIEMALS eine plausibel klingende, aber unbelegte technische Erklaerung (z.B. 'das war wohl ein versehentlich gesendeter Befehl') — wenn dir der tatsaechliche Grund aus der Konversation nicht wirklich ersichtlich ist, sag ehrlich, dass du es nicht genau weisst, statt eine Vermutung als Tatsache zu praesentieren.\n\n"
 
---! tg_html (telegram.pipe) reliably converts **bold**/*italic*/`code`/
---! [text](url) into Telegram's HTML parse mode (more robust than Telegram's
---! own strict "Markdown", which silently fell back to plain text on
---! unbalanced entities) — so the AI can normally use this basic formatting
---! via CommonMark syntax. What never renders well, though, in any mode:
---! Markdown headings (#), tables, nested lists — those simply don't exist
---! in Telegram chats, so this rule keeps the output structurally simple.
-FORMAT_RULE: "Formatiere deine Antwort fuer einen Telegram-Chat, nicht fuer ein Dokument: keine Markdown-Ueberschriften (#), keine Tabellen, keine verschachtelten Listen. **Fettung**/*Kursiv*/`Code`/[Links](url) darfst du normal per CommonMark-Syntax nutzen, das wird zuverlaessig dargestellt. Kurze Absaetze statt langer Bloecke.\n\n"
+--! The registrator's final answer is sent as a Telegram Rich Message
+--! (Bot API 10.1+, tel.tel_send_rich_message/tel_edit_rich_message* in
+--! telegram.pipe, wired in via muninn.pipe's tel_finalize/
+--! tel_finalize_after_tree) — real GitHub-Flavored-Markdown, natively
+--! rendered by Telegram itself: headings, genuine tables, nested/task
+--! lists, blockquotes, not just the old **bold**/*italic*/`code`/[links]
+--! subset tg_html could convert. Each send falls back to a plain send on
+--! its own if a client ever rejects it (Rich Messages are new), so this
+--! rule can freely tell the model to use the full structure — no risk of
+--! a broken message if the format isn't actually supported somewhere.
+FORMAT_RULE: "Deine Antwort wird als Telegram Rich Message gesendet: echtes GitHub-Flavored-Markdown wird nativ dargestellt, nicht nur **Fettung**/*Kursiv*/`Code`/[Links](url) (die weiterhin normal per CommonMark-Syntax funktionieren), sondern auch Ueberschriften (#/##), echte Tabellen (| Spalte | Spalte |) und Listen (auch verschachtelt). Nutze diese Struktur gezielt, wann immer sie die Antwort klarer macht — z.B. eine Tabelle fuer einen Vergleich/eine Uebersicht mit mehreren Werten, Ueberschriften zur Gliederung einer laengeren Antwort, eine Liste bei mehreren Punkten. Das ist aber kein Zwang: eine kurze, einfache Antwort bleibt ein kurzer Fliesstext ohne unnoetige Struktur. Kurze Absaetze statt langer Bloecke.\n\n"
 
 --! Without this rule, the model wrongly claims things like "I have no
 --! access to tools" for questions about Muninn's own tools — "researched"
