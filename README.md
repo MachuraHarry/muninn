@@ -1110,6 +1110,39 @@ PowerPoint-Vorlagen) und rendert sie per Headless-Chrome zu PNG/PDF/WebP/PPTX.
   hinterlegt, sonst lehnen `bild_senden`/`datei_senden` den Versand als „außerhalb der
   erlaubten Verzeichnisse" ab.
 
+### Browser-Automatisierung (`browser`, `swarm.pipe`)
+
+`werkzeug_browser` (Ratatoskr 🐿️) nutzt den offiziellen `@playwright/mcp` (Microsoft)
+für echte Website-Interaktion — navigieren, klicken, Formulare ausfüllen, Screenshots.
+Live gegen den echten Server verifiziert (`tools/list`, 24 Werkzeuge) und dafür mit einer
+eigenen Ablauf-Anleitung (`extra_note`) ausgestattet, analog zu Slideshot/Docker:
+
+- **`browser_snapshot` statt Screenshot zum Interagieren** — liefert einen
+  Accessibility-Baum mit Element-Referenzen für `browser_click`/`browser_type`/
+  `browser_fill_form`; `browser_take_screenshot` ist NUR zur visuellen Bestätigung an
+  den Nutzer gedacht (steht so auch in der Tool-eigenen Beschreibung: "better than
+  screenshot").
+- **`browser_fill_form`** füllt mehrere Felder (z.B. Login: Nutzername+Passwort) in
+  einem atomaren Aufruf statt einzelner `browser_type`-Aufrufe.
+- **`browser_wait_for`** nach Navigation/Formular-Absenden, bevor der nächste
+  Snapshot/Klick erfolgt — verhindert Aktionen auf einer noch ladenden Seite.
+- **`browser_handle_dialog`** MUSS bei einem nativen Dialogfeld (confirm/alert/prompt)
+  aufgerufen werden, sonst blockiert die Seite; **`browser_tabs`** für Popup-Fenster
+  (z.B. OAuth-Logins); **`browser_run_code_unsafe`** (rohes Playwright-JS) nur als
+  letzter Ausweg.
+- **Login-Scope**: keine Domain-Einschränkung — Muninn loggt sich mit vom Nutzer im
+  Chat gegebenen Zugangsdaten auf jeder Seite ein, die im Moment konkret angewiesen
+  wird (bewusste Nutzer-Entscheidung, kein Allowlist-Gate wie `TRUSTED_PATH_ROOTS`).
+- **Dauerhaftes Browser-Profil**: `--user-data-dir /root/muninn/.playwright-profile`
+  (gitignored, wie `google_creds/`) sorgt dafür, dass ein `systemctl restart muninn`
+  (kommt häufig vor) eine laufende Login-Session nicht mehr zerstört. Live verifiziert:
+  echte, langlebige Cookies (`is_persistent`/`has_expires` gesetzt) überstehen einen
+  vollständigen Neustart des MCP-Prozesses nachweislich. Wichtige Einschränkung, live
+  bestätigt: eine reine In-Memory-Session-Cookie (kein Expires-Attribut) übersteht das
+  NICHT — exakt wie in einem echten Browser ohne "Sitzung wiederherstellen"; betrifft
+  nur Seiten, deren eigene Login-Session bewusst nicht dauerhaft ist, nicht das
+  Profil-Feature selbst.
+
 ### Workspaces & Datei-Index (`swarm.pipe`)
 
 Ohne Wiederverwendungs-Mechanismus legte jede Anfrage nach einem Bericht/einer

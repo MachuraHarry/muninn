@@ -16,6 +16,9 @@
 mcp_data/
 .playwright-mcp/
 
+# Playwright-Browserprofil (echte Session-Cookies fuer dauerhafte Logins)
+.playwright-profile/
+
 # Google-OAuth-Tokens (bewusst AUSSERHALB von mcp_data, siehe google_creds/README)
 google_creds/
 
