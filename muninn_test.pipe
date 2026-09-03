@@ -67,16 +67,13 @@ test "mark_injected kappt auf die letzten 30 Eintraege"
     mem.close h
 
 --! tg_html: dreifache Backticks werden zu einem <pre><code>-Block (Telegrams
---! monospace/Terminal-Look, siehe render_log/make_swarm_updater in
---! muninn.pipe fuer den Boot-Log-Stil des Gremiums-Live-Verlaufs) — auch
---! ohne Sprach-Tag, und die "&gt;"-Pfeile im Boot-Log-Text werden korrekt
---! HTML-escaped statt als spitze Klammern missverstanden zu werden.
+--! Monospace-Darstellung), auch ohne Sprach-Tag, und spitze Klammern im
+--! Inhalt werden korrekt HTML-escaped statt als echte Tags interpretiert.
 test "tg_html wandelt Dreifach-Backticks in einen Code-Block um"
-    out: tel.tg_html "```\n>> HEIMDALL.exe ACTIVE\n> reviewing the answer...\n```"
+    out: tel.tg_html "```\n>> some <raw> text\n```"
     expect_contains out "<pre><code" "Code-Block geoeffnet"
     expect_contains out "</code></pre>" "Code-Block geschlossen"
-    expect_contains out "&gt;&gt; HEIMDALL.exe ACTIVE" "Boot-Log-Pfeile HTML-escaped"
-    expect_contains out "reviewing the answer" "Inhalt erhalten"
+    expect_contains out "&gt;&gt; some &lt;raw&gt; text" "Inhalt korrekt escaped"
 
 --! /settings (P6): setting_get/setting_set-Roundtrip + Default ohne
 --! gesetzten Wert, getrennt pro Chat (zwei Chats teilen sich NICHT dieselbe

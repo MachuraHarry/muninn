@@ -970,56 +970,85 @@ fn agent_display_name agent
         return (werkzeug_display_name (substring agent 9 (len agent)))
     {icon: "🧠", name: agent}
 
---! Bare action phrase for an agent's role — no name/tag prefix, just the
---! verb phrase (e.g. "reviewing the answer...") — the boot-log live
---! status's line 2 while nothing more specific has happened yet this
---! agent-block. Used by make_swarm_updater.
-fn agent_action_phrase agent
+--! Bare verb phrase for an agent's role, no icon/name (e.g. "is checking
+--! facts and memory...") — composed into agent_status_line/
+--! agent_group_header below.
+fn agent_verb_phrase agent
     if agent == "planer"
-        return "planning the answer..."
+        return "is planning the answer..."
     if agent == "faktenwaechter"
-        return "checking facts and memory..."
+        return "is checking facts and memory..."
     if agent == "kritiker"
-        return "reviewing the answer..."
+        return "is reviewing the answer..."
     if agent == "registrator"
-        return "writing the answer..."
+        return "is writing the answer..."
     if (len agent) > 9 && (substring agent 0 9) == "werkzeug_"
-        return "working (" ++ (substring agent 9 (len agent)) ++ ")..."
-    "thinking..."
+        return "is working (" ++ (substring agent 9 (len agent)) ++ ")..."
+    "is thinking..."
 
---! Uppercase boot-log tag for an agent, e.g. "HEIMDALL" — the cyberpunk
---! terminal-log identity used throughout the live status/full run log.
-fn agent_tag agent
+--! Icon + bold name for an agent, e.g. "🔍 **Mimir**" — the shared
+--! identity fragment for the live status, the full-log group header, and
+--! a handoff line's target reference.
+fn agent_icon_name agent
     d: agent_display_name agent
-    upper (get d "name")
+    (get d "icon") ++ " **" ++ (get d "name") ++ "**"
 
---! Bare tool-call content, function-call style (e.g. web_search("Berlin
---! population 2026")) — for a "tool" event. Empty string if there is no
---! detail (nothing to show).
+--! Live-status line 1: icon + bold name + verb phrase, no separator
+--! (e.g. "🔍 **Mimir** is checking facts and memory...").
+fn agent_status_line agent
+    (agent_icon_name agent) ++ " " ++ (agent_verb_phrase agent)
+
+--! Full-log group header: icon + bold name + em-dash + verb phrase (e.g.
+--! "🔍 **Mimir** — is checking facts and memory...") — the dash reads
+--! better as a standalone tree-branch header than run into the phrase.
+fn agent_group_header agent
+    (agent_icon_name agent) ++ " — " ++ (agent_verb_phrase agent)
+
+--! Icon for a tool call, by tool name — keeps the tree scannable at a
+--! glance instead of uniform text for everything. Falls back to a
+--! generic wrench for anything not specifically known (the open-ended
+--! universe of MCP specialist tool names, e.g. word_add_paragraph).
+fn tool_icon tool_name
+    if tool_name == "web_search"
+        return "🔎"
+    if tool_name == "web_fetch"
+        return "🌐"
+    if tool_name == "erinnerungen_suchen" || tool_name == "erinnerung_planen" || tool_name == "merken" || tool_name == "merken_quelle"
+        return "🧠"
+    if (len tool_name) > 7 && (substring tool_name 0 7) == "docker_"
+        return "🐳"
+    if tool_name == "bild_senden" || tool_name == "datei_senden"
+        return "📎"
+    "🔧"
+
+--! Bare tool-call content (e.g. 🔎 web_search "Berlin population 2026")
+--! for a "tool" event. Empty string if there is no detail (nothing to
+--! show).
 fn tool_call_detail_line detail args_json
     if detail == nil || detail == ""
         return ""
+    line: (tool_icon detail) ++ " " ++ detail
     arg_hint: tool_arg_summary detail args_json
     if arg_hint != ""
-        return detail ++ "(\"" ++ arg_hint ++ "\")"
-    detail ++ "()"
+        line: line ++ " \"" ++ arg_hint ++ "\""
+    line
 
 --! Bare content for a single "tool"/"reasoning"/"inject" progress event —
---! the caller (make_swarm_updater) prefixes it with "AGENT :: " for the
---! full boot-log run log. "start"/"handoff"/"final" are handled directly
---! in make_swarm_updater (they don't produce a plain content line like
---! this). "reasoning" is the model's actual chain-of-thought for that
---! round (only fires when the provider returns one) — the real "watch
---! them think" signal; "inject" reflects a steering message a round_check
---! fed into the run (see make_round_check), so the full log shows the
---! user's own nudge take effect. Empty string means "nothing to show".
+--! used both as the live status's line 2 and as a tree-branch entry in
+--! the full run log (see make_swarm_updater). "start"/"handoff"/"final"
+--! are handled directly there. "reasoning" is the model's actual
+--! chain-of-thought for that round (only fires when the provider returns
+--! one) — the real "watch them think" signal; "inject" reflects a
+--! steering message a round_check fed into the run (see make_round_check),
+--! so the full log shows the user's own nudge take effect. Empty string
+--! means "nothing to show".
 fn swarm_transcript_line event detail args_json
     if event == "tool"
         return (tool_call_detail_line detail args_json)
     if event == "reasoning"
-        return "THINKING \"" ++ (truncate_status detail 150) ++ "\""
+        return "💭 *" ++ (truncate_status detail 150) ++ "*"
     if event == "inject"
-        return "USER_INPUT \"" ++ (truncate_status detail 150) ++ "\""
+        return "💬 **You**: " ++ (truncate_status detail 150)
     ""
 
 --! Extracts the optional "reason" note from a handoff tool call's raw
@@ -1041,49 +1070,75 @@ fn handoff_reason args_json
         return ""
     truncate_status (to_str r) 120
 
---! Joins the accumulated boot-log lines (see make_swarm_updater) into the
---! full run log body — sent as its own message on demand (the "📜
---! Verlauf" button), wrapped in a fenced code block by the caller for the
---! monospace terminal look. Kept under a safe character budget (below
---! shorten's 4000, since a fenced code block plus the surrounding message
---! text needs a bit of headroom), dropping the OLDEST lines first with a
---! leading marker when over it.
-fn render_log lines
+--! Renders one agent group as a tree branch: its header
+--! (agent_group_header) plus its collected entries, each a map
+--! {text, handoff} (see make_swarm_updater) — "├─ " for every entry but
+--! the last, "└─▶ " for a trailing handoff (points at the target it's
+--! handing off to), plain "└─ " for any other trailing entry.
+fn render_group g
+    header: agent_group_header (get g "agent")
+    lines: get g "lines"
+    n: len lines
+    if n == 0
+        return header
+    rendered: []
+    i: 0
+    while i < n
+        entry: at lines i
+        connector: "├─ "
+        if i == (n - 1)
+            if (get entry "handoff") == true
+                connector: "└─▶ "
+            else
+                connector: "└─ "
+        push rendered (connector ++ (get entry "text"))
+        i: i + 1
+    header ++ "\n" ++ (join rendered "\n")
+
+--! Joins accumulated agent groups (see make_swarm_updater) into the full
+--! run log — sent as its own message on demand (the "📜 Verlauf" button).
+--! Kept under a safe character budget (a bit below shorten's 4000, since
+--! many separate bold/icon runs each carry their own HTML-tag overhead
+--! once tg_html converts the markdown here), dropping the OLDEST groups
+--! first with a leading marker when over it.
+fn render_groups groups
     budget: 3800
-    kept: lines
-    text: join kept "\n"
+    kept: groups
+    fn render_all gs
+        rendered: []
+        for g in gs
+            push rendered (render_group g)
+        join rendered "\n\n"
+    text: render_all kept
     while (len text) > budget && (len kept) > 1
         kept: slice kept 1 (len kept)
-        text: join kept "\n"
-    if (len kept) < (len lines)
-        text: "[...earlier entries truncated...]\n" ++ text
+        text: render_all kept
+    if (len kept) < (len groups)
+        text: "… (earlier steps hidden)\n\n" ++ text
     text
 
---! Builds the on_update closure for run_gremium_stream. Cyberpunk
---! boot-log aesthetic (a Telegram fenced code block renders monospace —
---! the closest a plain-text bot message gets to a hacker-movie terminal).
---! Two jobs:
+--! Builds the on_update closure for run_gremium_stream. Two jobs:
 --!
---! 1. Keeps the live placeholder message itself down to exactly 2 lines
---!    inside a code block: ">> NAME.exe ACTIVE" + the current bare
---!    action. A "start" event only logs a fresh "NAME.exe initiated" line
---!    (see 2 below) when the agent actually CHANGES, so several
---!    tool-call rounds in a row from the same agent (the common case)
---!    don't repeat it. Telegram's native "typing..." chat action is kept
---!    alive alongside it (re-sent every ~4s, independent of the text
---!    throttle below) as a zero-footprint ambient liveness cue in the
---!    chat header — no message text needed for that part at all.
---! 2. Every step is ALSO appended, fully self-describing, to a flat log —
---!    "NAME.exe initiated" / "NAME :: content" / "NAME >> HANDOFF >>
---!    TARGET :: reason" (the reason is the new optional field on the
---!    handoff tool itself, see handoff_reason — makes visible not just
---!    THAT one agent handed off to another, but what it actually asked
---!    for). Persisted once on "final" to last_run_log:<cid> (mem meta,
---!    same pattern as save_trace/format_trace for /trace) so the "📜
---!    Verlauf" button attached to the finished answer
---!    (handle_message/handle_callback's "gremium_log" branch) can show
---!    the whole run afterward (render_log) without ever cluttering the
---!    live status.
+--! 1. Keeps the live placeholder message down to exactly 2 lines, no
+--!    code block — icon+bold-name+phrase (agent_status_line) plus the
+--!    single most recent step (empty until the first one happens). A
+--!    "start" event opens a new GROUP (see 2) only when the agent
+--!    actually CHANGES, so several tool-call rounds in a row from the
+--!    same agent (the common case) don't repeat anything here either.
+--!    Telegram's native "typing..." chat action is kept alive alongside
+--!    it (re-sent every ~4s, independent of the text throttle below) as
+--!    a zero-footprint ambient liveness cue in the chat header.
+--! 2. Groups every step by agent into a tree (render_group/render_groups)
+--!    — a handoff is recorded as the CLOSING entry of the group it
+--!    happened in (agent = the one handing off; the target's own "start"
+--!    opens ITS OWN group next), carrying the optional "reason" note
+--!    (handoff_reason) so the tree shows not just THAT a handoff
+--!    happened but what it actually asked for. Persisted once on
+--!    "final" to last_run_log:<cid> (mem meta, same pattern as
+--!    save_trace/format_trace for /trace) so the "📜 Verlauf" button
+--!    attached to the finished answer (handle_message/handle_callback's
+--!    "gremium_log" branch) can show the whole tree afterward without
+--!    ever cluttering the live status.
 --!
 --! Edit throttle (about once/second, skip if text unchanged) unchanged
 --! from before. message_id may be nil (placeholder send failed) — then
@@ -1092,37 +1147,46 @@ fn render_log lines
 --! the edit — reverted: live feedback was that it made the message
 --! visibly jump around in the chat instead of updating calmly in place.)
 fn make_swarm_updater token cid message_id dbh
-    stream_state: {lines: [], last_agent: nil, current: "", last_text: "", last_ms: 0, last_typing_ms: 0}
+    stream_state: {groups: [], current: "", last_text: "", last_ms: 0, last_typing_ms: 0}
     fn on_update agent event detail args_json
         ms: time_ms
         if (ms - (get stream_state "last_typing_ms")) >= 4000
             set stream_state "last_typing_ms" ms
             tel.tel_send_chat_action token cid "typing"
-        lines: get stream_state "lines"
+        groups: get stream_state "groups"
         if event == "final"
-            if (len lines) > 0
-                mem.meta_set dbh ("last_run_log:" ++ (to_str cid)) (to_json lines)
+            if (len groups) > 0
+                mem.meta_set dbh ("last_run_log:" ++ (to_str cid)) (to_json groups)
             return nil
         if event == "handoff"
             --! agent = the agent handing off (Go's onProgress passes
             --! "current"); detail = the target agent's name.
-            line: (agent_tag agent) ++ " >> HANDOFF >> " ++ (agent_tag detail)
-            reason: handoff_reason args_json
-            if reason != ""
-                line: line ++ " :: \"" ++ reason ++ "\""
-            push lines line
+            if (len groups) > 0
+                text: "hands off to " ++ (agent_icon_name detail)
+                reason: handoff_reason args_json
+                if reason != ""
+                    text: text ++ ": \"" ++ reason ++ "\""
+                push (get (at groups ((len groups) - 1)) "lines") {text: text, handoff: true}
             return nil
         if event == "start"
-            if agent != (get stream_state "last_agent")
-                set stream_state "last_agent" agent
-                push lines ((agent_tag agent) ++ ".exe initiated")
-                set stream_state "current" (agent_action_phrase agent)
+            last_group: nil
+            if (len groups) > 0
+                last_group: at groups ((len groups) - 1)
+            if last_group == nil || (get last_group "agent") != agent
+                push groups {agent: agent, lines: []}
+                set stream_state "current" ""
         else
             bare: swarm_transcript_line event detail args_json
             if bare != ""
-                push lines ((agent_tag agent) ++ " :: " ++ bare)
+                if (len groups) == 0
+                    push groups {agent: agent, lines: []}
+                push (get (at groups ((len groups) - 1)) "lines") {text: bare, handoff: false}
                 set stream_state "current" bare
-        text: "```\n>> " ++ (agent_tag agent) ++ ".exe ACTIVE\n> " ++ (get stream_state "current") ++ "\n```"
+        if (len groups) == 0
+            return nil
+        text: agent_status_line agent
+        if (get stream_state "current") != ""
+            text: text ++ "\n" ++ (get stream_state "current")
         if text == (get stream_state "last_text")
             return nil
         if (ms - (get stream_state "last_ms")) < 1000
@@ -1451,22 +1515,21 @@ fn handle_callback token dbh cbq allowed uid
             tel.tel_send_message token cid "Saved in the soul."
         return nil
     if data == "gremium_log"
-        --! The full boot-log step history behind the "📜 Verlauf" button —
+        --! The full tree of agent groups behind the "📜 Verlauf" button —
         --! persisted once per run by make_swarm_updater's "final" handler
         --! (last_run_log:<cid>), so the live status itself can stay down to
-        --! just 2 lines while the detail is one tap away. Fenced code block
-        --! for the monospace terminal look (see render_log).
+        --! just 2 lines while the detail is one tap away.
         raw: mem.meta_get dbh ("last_run_log:" ++ (to_str cid))
-        lines: nil
+        groups: nil
         if raw != nil && raw != ""
             try
-                lines: parse_json raw
+                groups: parse_json raw
             catch
-                lines: nil
-        if lines == nil || (len lines) == 0
+                groups: nil
+        if groups == nil || (len groups) == 0
             tel.tel_send_message token cid "No detailed log available for the last run."
         else
-            tel.tel_send_message token cid ("📜 Full run log:\n```\n" ++ (render_log lines) ++ "\n```")
+            tel.tel_send_message token cid ("📜 **Full run log:**\n\n" ++ (render_groups groups))
         return nil
     if data == "more"
         if txt != nil
