@@ -38,6 +38,16 @@ export fn init_db path
     db_exec h "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER, chat_id TEXT, role TEXT, content TEXT, ts TEXT)"
     db_exec h "CREATE TABLE IF NOT EXISTS cost_log (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts TEXT, cost_usd REAL, tokens INTEGER, calls INTEGER, cache_hits INTEGER, cache_misses INTEGER)"
     db_exec h "CREATE TABLE IF NOT EXISTS error_log (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT, message TEXT, ts TEXT)"
+    --! Notizbuecher (NotebookLM-style source-grounded notebooks, see nb_*
+    --! below): deliberately a SEPARATE content+embedding pair from
+    --! memories/embeddings, not just another "kind" there — a notebook's
+    --! Q&A/summary/audio-overview must be groundable in EXACTLY that
+    --! notebook's sources, never accidentally mixed with unrelated general
+    --! memories the way retrieve_context's "document" kind already is.
+    db_exec h "CREATE TABLE IF NOT EXISTS notebooks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, created_ts TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS notebook_sources (id INTEGER PRIMARY KEY AUTOINCREMENT, notebook_id INTEGER, title TEXT, added_ts TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS notebook_chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, notebook_id INTEGER, source_id INTEGER, content TEXT, chunk_index INTEGER, chunk_total INTEGER, ts TEXT)"
+    db_exec h "CREATE TABLE IF NOT EXISTS notebook_embeddings (chunk_id INTEGER PRIMARY KEY, vec TEXT)"
     h
 
 --! Closes the database and persists the changes to the file.
@@ -191,7 +201,13 @@ export fn setting_cycle key cur
                         else
                             "voll"
                     else
-                        cur
+                        if key == "gruppenrechte"
+                            if cur == "alle"
+                                "nur_besitzer"
+                            else
+                                "alle"
+                        else
+                            cur
 
 --! Display text for a setting value in the Telegram menu.
 export fn setting_label key value
@@ -231,7 +247,13 @@ export fn setting_label key value
                         else
                             "Full (live tree)"
                     else
-                        value
+                        if key == "gruppenrechte"
+                            if value == "alle"
+                                "Everyone in this group"
+                            else
+                                "Owner only"
+                        else
+                            value
 
 --! Builds a "[SYSTEM]" note for style/language from the chat settings,
 --! prepended to the gremium task (see the run_gremium(_stream) call sites in
@@ -1160,3 +1182,187 @@ export fn auto_link h text
         apply_extraction h j
     catch e
         nil
+
+--! Notizbuecher (NotebookLM-style notebooks) --------------------------------
+--! A notebook groups user-provided sources (pasted or researched text) into
+--! a SCOPED knowledge base: Q&A, summaries and the Huginn/Muninn audio
+--! overview must be grounded ONLY in that notebook's own chunks, never
+--! mixed with Muninn's general memory (unlike retrieve_context's "document"
+--! kind, which deliberately IS mixed into normal conversation). Sources are
+--! addressed by TITLE (not id) in every function below -- the gremium
+--! cannot reliably carry an opaque numeric id across separate tool
+--! calls/conversation turns, but it can always repeat the notebook's name.
+
+--! Case-insensitive lookup by title. Returns {id, title, created_ts} or nil.
+export fn nb_find h title
+    if title == nil || (trim title) == ""
+        return nil
+    norm: lower (trim title)
+    rows: db_query h "SELECT id, title, created_ts FROM notebooks"
+    for r in rows
+        if (lower (trim (get r "title"))) == norm
+            return r
+    nil
+
+--! Creates a notebook if none with this title exists yet (case-insensitive)
+--! and returns its row either way -- callers should use this instead of a
+--! raw INSERT so "add a source to a notebook that doesn't exist yet" just
+--! works, without a separate explicit create step.
+export fn nb_get_or_create h title
+    existing: nb_find h title
+    if existing != nil
+        return existing
+    db_exec h ("INSERT INTO notebooks (title, created_ts) VALUES ('" ++ (sql_escape (trim title)) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "')")
+    nid: get (at (db_query h "SELECT max(id) AS mid FROM notebooks") 0) "mid"
+    {id: nid, title: (trim title), created_ts: (now_ts 0)}
+
+--! Notebooks with source/chunk counts, newest first ("notizbuecher_auflisten").
+export fn nb_list h
+    rows: db_query h "SELECT id, title, created_ts FROM notebooks ORDER BY id DESC"
+    out: []
+    for r in rows
+        nid: get r "id"
+        srcs: get (at (db_query h ("SELECT COUNT(*) AS c FROM notebook_sources WHERE notebook_id = " ++ (to_str nid))) 0) "c"
+        chunks: get (at (db_query h ("SELECT COUNT(*) AS c FROM notebook_chunks WHERE notebook_id = " ++ (to_str nid))) 0) "c"
+        push out {id: nid, title: (get r "title"), created_ts: (get r "created_ts"), sources: srcs, chunks: chunks}
+    out
+
+--! Deletes a notebook and everything in it (sources, chunks, embeddings).
+--! Returns true if a notebook with this title existed, false otherwise.
+export fn nb_delete h title
+    nb: nb_find h title
+    if nb == nil
+        return false
+    nid: get nb "id"
+    chunk_ids: db_query h ("SELECT id FROM notebook_chunks WHERE notebook_id = " ++ (to_str nid))
+    for c in chunk_ids
+        db_exec h ("DELETE FROM notebook_embeddings WHERE chunk_id = " ++ (to_str (get c "id")))
+    db_exec h ("DELETE FROM notebook_chunks WHERE notebook_id = " ++ (to_str nid))
+    db_exec h ("DELETE FROM notebook_sources WHERE notebook_id = " ++ (to_str nid))
+    db_exec h ("DELETE FROM notebooks WHERE id = " ++ (to_str nid))
+    true
+
+--! Adds a source (already-available text -- pasted by the user, or
+--! researched/fetched content handed over by another agent) to a notebook,
+--! creating the notebook if needed. Splits into chunks (chunk_text, same
+--! pure function as ingest_document) and embeds each chunk exactly like
+--! add_memory does, but into notebook_chunks/notebook_embeddings instead of
+--! memories/embeddings. max_chunks bounds cost/duration for very large
+--! sources. Returns {notebook_id, chunks_total, chunks_ingested}.
+export fn nb_add_source h notebook_title source_title text max_chunks
+    nb: nb_get_or_create h notebook_title
+    nid: get nb "id"
+    db_exec h ("INSERT INTO notebook_sources (notebook_id, title, added_ts) VALUES (" ++ (to_str nid) ++ ", '" ++ (sql_escape source_title) ++ "', '" ++ (sql_escape (now_ts 0)) ++ "')")
+    sid: get (at (db_query h "SELECT max(id) AS mid FROM notebook_sources") 0) "mid"
+    chunks: chunk_text text 1200
+    total: len chunks
+    n: total
+    if n > max_chunks
+        n: max_chunks
+    i: 0
+    while i < n
+        c: at chunks i
+        db_exec h ("INSERT INTO notebook_chunks (notebook_id, source_id, content, chunk_index, chunk_total, ts) VALUES (" ++ (to_str nid) ++ ", " ++ (to_str sid) ++ ", '" ++ (sql_escape c) ++ "', " ++ (to_str (i + 1)) ++ ", " ++ (to_str total) ++ ", '" ++ (sql_escape (now_ts 0)) ++ "')")
+        cid: get (at (db_query h "SELECT max(id) AS mid FROM notebook_chunks") 0) "mid"
+        try
+            vec: embed c
+            if vec != nil
+                db_exec h ("INSERT INTO notebook_embeddings (chunk_id, vec) VALUES (" ++ (to_str cid) ++ ", '" ++ (sql_escape (to_json vec)) ++ "')")
+        catch e
+            nil
+        i: i + 1
+    {notebook_id: nid, chunks_total: total, chunks_ingested: n}
+
+--! Query-aware hybrid search (same keyword TF-IDF + embedding scoring as
+--! retrieve_context/recipe_search) scoped to ONE notebook's chunks. Returns
+--! up to k {content, source_title} maps, best match first. Falls back to
+--! the first k chunks (in storage order) if the query has no real
+--! keyword/semantic signal, same rationale as retrieve_context/
+--! recipe_search: a tie-break of "arbitrary order" is worse than "oldest/
+--! first available content".
+export fn nb_retrieve h notebook_title query k
+    nb: nb_find h notebook_title
+    if nb == nil
+        return []
+    nid: get nb "id"
+    rows: db_query h ("SELECT nc.id AS id, nc.content AS content, ns.title AS source_title FROM notebook_chunks nc JOIN notebook_sources ns ON ns.id = nc.source_id WHERE nc.notebook_id = " ++ (to_str nid) ++ " ORDER BY nc.id ASC")
+    if (len rows) == 0
+        return []
+    top_k: fn rs
+        out0: []
+        i0: 0
+        while i0 < k && i0 < (len rs)
+            r0: at rs i0
+            push out0 {content: (get r0 "content"), source_title: (get r0 "source_title")}
+            i0: i0 + 1
+        out0
+    if query == nil || (trim query) == ""
+        return top_k rows
+    vecs: db_query h ("SELECT nc.id AS chunk_id, ne.vec AS vec FROM notebook_chunks nc JOIN notebook_embeddings ne ON ne.chunk_id = nc.id WHERE nc.notebook_id = " ++ (to_str nid))
+    vecmap: {}
+    for v in vecs
+        set vecmap (to_str (get v "chunk_id")) (get v "vec")
+    contents: []
+    for r in rows
+        push contents (get r "content")
+    n: len contents
+    terms: tokenize query
+    df: build_df contents
+    kw_denom: keyword_denom terms df n
+    qvec: nil
+    try
+        qvec: embed query
+    catch e
+        qvec: nil
+    sem_w: 0.25
+    kw_w: 0.75
+    if qvec != nil
+        if (len qvec) > 300
+            sem_w: 0.7
+            kw_w: 0.3
+    scored: []
+    any_signal: false
+    for r in rows
+        c: get r "content"
+        kw: 0
+        if kw_denom > 0
+            kw: (keyword_score (lower c) terms df n) / kw_denom
+        sem: 0
+        if qvec != nil
+            vj: get vecmap (to_str (get r "id"))
+            if vj != nil
+                cv: nil
+                try
+                    cv: parse_json vj
+                catch e2
+                    cv: nil
+                if cv != nil
+                    sem: cosine_sim qvec cv
+        score: (sem * sem_w) + (kw * kw_w)
+        if score > 0
+            any_signal: true
+        push scored {content: c, source_title: (get r "source_title"), score: score}
+    if !any_signal
+        return top_k rows
+    ordered: sorted_by scored (fn x: (0 - (get x "score")))
+    top_k ordered
+
+--! Concatenates ALL of a notebook's chunks (source-labeled) up to a total
+--! character budget -- used for summary/FAQ/mindmap/audio-overview
+--! generation, which need the notebook's overall content rather than a
+--! query-matched top-k. Truncates on whole-chunk boundaries once the
+--! budget is exhausted, so no chunk is ever cut mid-sentence. Returns nil
+--! if the notebook doesn't exist.
+export fn nb_full_text h notebook_title max_chars
+    nb: nb_find h notebook_title
+    if nb == nil
+        return nil
+    nid: get nb "id"
+    rows: db_query h ("SELECT nc.content AS content, ns.title AS source_title FROM notebook_chunks nc JOIN notebook_sources ns ON ns.id = nc.source_id WHERE nc.notebook_id = " ++ (to_str nid) ++ " ORDER BY nc.source_id ASC, nc.chunk_index ASC")
+    out: ""
+    for r in rows
+        piece: "[Quelle: " ++ (get r "source_title") ++ "]\n" ++ (get r "content") ++ "\n\n"
+        if (len out) + (len piece) > max_chars
+            return out
+        out: out ++ piece
+    out

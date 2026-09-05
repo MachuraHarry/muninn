@@ -8,6 +8,18 @@
 --!     "env":{"GITHUB_TOKEN":"env:GITHUB_TOKEN"}}]
 CONNECTED: {}
 
+--! Aliases whose tools should only ever run for the owner, even in a group
+--! that has "gruppenrechte" set to "alle" (see compute_full_rights in
+--! muninn.pipe/has_full_rights in swarm.pipe — that gate covers Muninn's
+--! OWN local tools like the password manager/Docker; this one covers the
+--! equivalent EXTERNAL MCP specialists so a non-owner group member can't
+--! reach the filesystem/browser/Docker MCP servers or the owner's Google
+--! account through the werkzeug_<alias> route instead).
+OWNER_ONLY_ALIASES: ["browser", "filesystem", "docker", "google"]
+
+export fn is_owner_only_alias alias
+    contains OWNER_ONLY_ALIASES alias
+
 --! "env:NAME" values are resolved at runtime from the real environment, so
 --! secrets don't have to sit twice in .env. Every connection runs under the
 --! "muninn" sandbox profile with an exec whitelist (only configured

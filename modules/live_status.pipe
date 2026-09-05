@@ -1,0 +1,352 @@
+--! live_status.pipe — renders the gremium's live-updating Telegram status
+--! message (see make_swarm_updater in muninn.pipe) and the "📜 Verlauf"/
+--! /trace views built on the same data: agent display names/icons, tool-call
+--! icons and argument summaries, and the tree-formatting of accumulated
+--! agent groups into one growing message. Extracted out of muninn.pipe
+--! (which had grown past 2700 lines) — every function here is already
+--! parameter-driven with no dependency on muninn.pipe's own top-level state
+--! (tz_offset/all_mcp_servers/BOT_ID/...), only mem.meta_get/meta_set for
+--! save_trace/format_trace, so this was the cleanest, lowest-risk slice to
+--! split off first.
+import "modules/memory.pipe" as mem
+
+--! Truncates a status snippet to n characters (for the live status line —
+--! unlike shorten (4000 characters, for Telegram messages) deliberately
+--! short here, so a single tool line doesn't blow up the whole status message.
+export fn truncate_status s n
+    if s == nil
+        return ""
+    if (len s) > n
+        (substring s 0 n) ++ "…"
+    else
+        s
+
+--! Extracts a short, human-readable snippet from a tool call's raw JSON
+--! arguments (the actual search query/URL/etc., not just the tool name) —
+--! for known local tools (see the ai_tool registrations in swarm.pipe)
+--! targets the matching field specifically, otherwise best-effort takes
+--! the first string field in the arguments (covers MCP tools with an
+--! unknown schema).
+fn tool_arg_summary tool_name args_json
+    if args_json == nil || args_json == ""
+        return ""
+    a: nil
+    try
+        a: parse_json args_json
+    catch
+        a: nil
+    if a == nil || (type_of a) != "MAP"
+        return ""
+    field: nil
+    if tool_name == "web_search" || tool_name == "erinnerungen_suchen"
+        field: get a "query"
+    else if tool_name == "web_fetch"
+        field: get a "url"
+    else if tool_name == "erinnerung_planen"
+        field: get a "text"
+    else if tool_name == "merken" || tool_name == "merken_quelle"
+        field: get a "content"
+    else if tool_name == "docker_pull_image"
+        field: get a "image"
+    else if tool_name == "docker_create_container"
+        field: get a "name"
+    else if tool_name == "bild_senden" || tool_name == "datei_senden"
+        field: get a "path"
+    if field == nil
+        for k in (keys a)
+            v: get a k
+            if field == nil && (type_of v) == "STRING" && v != ""
+                field: v
+    if field == nil || field == ""
+        return ""
+    truncate_status (to_str field) 70
+
+--! Norse names for the tool specialists (werkzeug_<alias>) -- Muninn
+--! itself is Odin's raven of memory, so the whole gremium got a matching
+--! theme instead of generic role labels. Purely a DISPLAY-layer mapping
+--! (see agent_display_name below) -- the actual internal alias/agent
+--! identifiers used for routing/handoff (swarm.pipe) are untouched, so
+--! this carries zero risk to existing handoff logic or stored recipes
+--! (unlike renaming the identifiers themselves, deliberately out of scope).
+--! Unknown/future aliases fall back to a generic icon + the alias itself.
+fn werkzeug_display_name alias
+    if alias == "filesystem"
+        return {icon: "🔨", name: "Sindri"}
+    if alias == "memory"
+        return {icon: "📚", name: "Kvasir"}
+    if alias == "denkwerkzeug"
+        return {icon: "🤔", name: "Vili"}
+    if alias == "browser"
+        return {icon: "🐿️", name: "Ratatoskr"}
+    if alias == "doku"
+        return {icon: "📖", name: "Vör"}
+    if alias == "docker"
+        return {icon: "🔥", name: "Brokkr"}
+    if alias == "zeit"
+        return {icon: "⏳", name: "Skuld"}
+    if alias == "google"
+        return {icon: "📅", name: "Frigg"}
+    if alias == "praesentation"
+        return {icon: "🎨", name: "Iðunn"}
+    if alias == "dokument"
+        return {icon: "📝", name: "Fjalar"}
+    if alias == "whisper"
+        return {icon: "🎙️", name: "Sága"}
+    if alias == "github"
+        return {icon: "⚒️", name: "Eitri"}
+    {icon: "🔧", name: alias}
+
+--! Persists the path/round-count of a finished gremium run (see the
+--! {content, path, rounds} shape returned by run_gremium/run_gremium_stream
+--! — path and rounds used to be silently discarded after pulling out just
+--! "content") so /trace can show it afterwards. One slot per chat (most
+--! recent run only), stored via meta like other small persistent values.
+export fn save_trace dbh cid res
+    path: get res "path"
+    if path == nil
+        return nil
+    trace: {}
+    set trace "path" path
+    set trace "rounds" (get res "rounds")
+    mem.meta_set dbh ("last_trace:" ++ (to_str cid)) (to_json trace)
+
+--! Formats a saved trace (see save_trace) as a short, named path for
+--! /trace -- shared formatting so Telegram and any future caller (e.g. the
+--! dashboard) show it identically.
+export fn format_trace dbh cid
+    raw: mem.meta_get dbh ("last_trace:" ++ (to_str cid))
+    if raw == nil || raw == ""
+        return nil
+    trace: nil
+    try
+        trace: parse_json raw
+    catch
+        return nil
+    if trace == nil
+        return nil
+    path: get trace "path"
+    if path == nil || (len path) == 0
+        return nil
+    names: []
+    for a in path
+        d: agent_display_name a
+        push names ((get d "icon") ++ " " ++ (get d "name"))
+    rounds: get trace "rounds"
+    suffix: " round"
+    if rounds != 1
+        suffix: " rounds"
+    (join names " → ") ++ "\n" ++ (to_str rounds) ++ suffix
+
+--! Display name + icon for any gremium agent (the 4 core roles, or a
+--! werkzeug_<alias> specialist). Shared by agent_action_phrase (live
+--! status) and the /trace command, so both always show the same names.
+fn agent_display_name agent
+    if agent == "planer"
+        return {icon: "🧭", name: "Huginn"}
+    if agent == "faktenwaechter"
+        return {icon: "🔍", name: "Mimir"}
+    if agent == "kritiker"
+        return {icon: "🧐", name: "Heimdall"}
+    if agent == "registrator"
+        return {icon: "✍️", name: "Bragi"}
+    if (len agent) > 9 && (substring agent 0 9) == "werkzeug_"
+        return (werkzeug_display_name (substring agent 9 (len agent)))
+    {icon: "🧠", name: agent}
+
+--! Bare verb phrase for an agent's role, no icon/name (e.g. "is checking
+--! facts and memory...") — composed into agent_group_header below.
+export fn agent_verb_phrase agent
+    if agent == "planer"
+        return "is planning the answer..."
+    if agent == "faktenwaechter"
+        return "is checking facts and memory..."
+    if agent == "kritiker"
+        return "is reviewing the answer..."
+    if agent == "registrator"
+        return "is writing the answer..."
+    if agent == "werkzeug_browser"
+        return "is scurrying across the web..."
+    if (len agent) > 9 && (substring agent 0 9) == "werkzeug_"
+        return "is working (" ++ (substring agent 9 (len agent)) ++ ")..."
+    "is thinking..."
+
+--! Icon + bold name for an agent, e.g. "🔍 **Mimir**" — the shared
+--! identity fragment for the tree's group header and a handoff line's
+--! target reference.
+export fn agent_icon_name agent
+    d: agent_display_name agent
+    (get d "icon") ++ " **" ++ (get d "name") ++ "**"
+
+--! Full-log group header: icon + bold name + em-dash + verb phrase (e.g.
+--! "🔍 **Mimir** — is checking facts and memory...") — the dash reads
+--! better as a standalone tree-branch header than run into the phrase.
+fn agent_group_header agent
+    (agent_icon_name agent) ++ " — " ++ (agent_verb_phrase agent)
+
+--! Icon for a tool call, by tool name — keeps the tree scannable at a
+--! glance instead of uniform text for everything. Falls back to a
+--! generic wrench for anything not specifically known (the open-ended
+--! universe of MCP specialist tool names, e.g. word_add_paragraph).
+fn tool_icon tool_name
+    if tool_name == "web_search"
+        return "🔎"
+    if tool_name == "web_fetch"
+        return "🌐"
+    if tool_name == "erinnerungen_suchen" || tool_name == "merken" || tool_name == "merken_quelle"
+        return "🧠"
+    if tool_name == "erinnerung_planen"
+        return "⏰"
+    if (len tool_name) > 7 && (substring tool_name 0 7) == "docker_"
+        return "🐳"
+    --! Playwright (werkzeug_browser, Ratatoskr) — pro Aktions-Art ein
+    --! eigenes Icon statt eines generischen fuer alle browser_*-Tools,
+    --! damit das Live-Update auf einen Blick zeigt WAS gerade passiert
+    --! (navigieren vs. klicken vs. tippen vs. warten ...), nicht nur DASS
+    --! gebrowst wird.
+    if tool_name == "browser_navigate" || tool_name == "browser_navigate_back"
+        return "🧭"
+    if tool_name == "browser_tabs"
+        return "🗂️"
+    if tool_name == "browser_click" || tool_name == "browser_hover" || tool_name == "browser_drag" || tool_name == "browser_drop"
+        return "🖱️"
+    if tool_name == "browser_type" || tool_name == "browser_fill_form" || tool_name == "browser_press_key" || tool_name == "browser_select_option"
+        return "⌨️"
+    if tool_name == "browser_take_screenshot"
+        return "📸"
+    if tool_name == "browser_snapshot" || tool_name == "browser_find"
+        return "🔍"
+    if tool_name == "browser_wait_for"
+        return "⏳"
+    if tool_name == "browser_handle_dialog"
+        return "💬"
+    if tool_name == "browser_file_upload"
+        return "📤"
+    if tool_name == "browser_network_requests" || tool_name == "browser_network_request"
+        return "📡"
+    if tool_name == "browser_console_messages"
+        return "🖥️"
+    if tool_name == "browser_evaluate" || tool_name == "browser_run_code_unsafe"
+        return "⚙️"
+    if tool_name == "browser_resize"
+        return "📐"
+    if tool_name == "browser_close"
+        return "🚪"
+    if tool_name == "bild_senden"
+        return "📷"
+    if tool_name == "bild_erstellen"
+        return "🎨"
+    if tool_name == "datei_senden"
+        return "📎"
+    if tool_name == "sprachnachricht_senden"
+        return "🎙️"
+    if tool_name == "hintergrund_fortsetzen"
+        return "⏳"
+    if tool_name == "rezept_speichern" || tool_name == "rezepte_suchen"
+        return "📋"
+    if tool_name == "bericht_veroeffentlichen"
+        return "📰"
+    if tool_name == "icon_holen"
+        return "🏷️"
+    if tool_name == "ziel_anlegen"
+        return "🎯"
+    if tool_name == "ziel_erledigt"
+        return "✅"
+    "🔧"
+
+--! Bare tool-call content (e.g. 🔎 web_search "Berlin population 2026")
+--! for a "tool" event. Empty string if there is no detail (nothing to
+--! show).
+fn tool_call_detail_line detail args_json
+    if detail == nil || detail == ""
+        return ""
+    line: (tool_icon detail) ++ " " ++ detail
+    arg_hint: tool_arg_summary detail args_json
+    if arg_hint != ""
+        line: line ++ " \"" ++ arg_hint ++ "\""
+    line
+
+--! Bare content for a single "tool"/"reasoning"/"inject" progress event —
+--! used both as the live status's line 2 and as a tree-branch entry in
+--! the full run log (see make_swarm_updater). "start"/"handoff"/"final"
+--! are handled directly there. "reasoning" is the model's actual
+--! chain-of-thought for that round (only fires when the provider returns
+--! one) — the real "watch them think" signal; "inject" reflects a
+--! steering message a round_check fed into the run (see make_round_check),
+--! so the full log shows the user's own nudge take effect. Empty string
+--! means "nothing to show".
+export fn swarm_transcript_line event detail args_json
+    if event == "tool"
+        return (tool_call_detail_line detail args_json)
+    if event == "reasoning"
+        return "💭 *" ++ (truncate_status detail 150) ++ "*"
+    if event == "inject"
+        return "💬 **You**: " ++ (truncate_status detail 150)
+    ""
+
+--! Extracts the optional "reason" note from a handoff tool call's raw
+--! JSON arguments (see ai.ChatSwarm's "handoff" progress event and the
+--! synthesized handoff tool's schema in swarmToolsFor, pipe repo) — ""
+--! if the model didn't provide one (the field is optional).
+export fn handoff_reason args_json
+    if args_json == nil || args_json == ""
+        return ""
+    a: nil
+    try
+        a: parse_json args_json
+    catch
+        a: nil
+    if a == nil || (type_of a) != "MAP"
+        return ""
+    r: get a "reason"
+    if r == nil
+        return ""
+    truncate_status (to_str r) 80
+
+--! Renders one agent group as a tree branch: its header
+--! (agent_group_header) plus its collected entries, each a map
+--! {text, handoff} (see make_swarm_updater) — "├─ " for every entry but
+--! the last, "└─▶ " for a trailing handoff (points at the target it's
+--! handing off to), plain "└─ " for any other trailing entry.
+fn render_group g
+    header: agent_group_header (get g "agent")
+    lines: get g "lines"
+    n: len lines
+    if n == 0
+        return header
+    rendered: []
+    i: 0
+    while i < n
+        entry: at lines i
+        connector: "├─ "
+        if i == (n - 1)
+            if (get entry "handoff") == true
+                connector: "└─▶ "
+            else
+                connector: "└─ "
+        push rendered (connector ++ (get entry "text"))
+        i: i + 1
+    header ++ "\n" ++ (join rendered "\n")
+
+--! Joins accumulated agent groups (see make_swarm_updater) into the full
+--! run tree — used both for the LIVE edited message while the gremium is
+--! working, and again afterward for the standalone "📜 Verlauf" button
+--! message. Kept under a safe character budget (a bit below shorten's
+--! 4000, since many separate bold/icon runs each carry their own HTML-tag
+--! overhead once tg_html converts the markdown here), dropping the OLDEST
+--! groups first with a leading marker when over it.
+export fn render_groups groups
+    budget: 3800
+    kept: groups
+    fn render_all gs
+        rendered: []
+        for g in gs
+            push rendered (render_group g)
+        join rendered "\n\n"
+    text: render_all kept
+    while (len text) > budget && (len kept) > 1
+        kept: slice kept 1 (len kept)
+        text: render_all kept
+    if (len kept) < (len groups)
+        text: "… (earlier steps hidden)\n\n" ++ text
+    text
+

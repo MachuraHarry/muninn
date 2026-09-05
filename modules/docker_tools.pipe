@@ -135,6 +135,35 @@ export fn running_job_for_chat h chat_id
         return nil
     fresh
 
+--! Like running_job_for_chat, but time-window based instead of status-based
+--! — finds the most recent job for this chat created within cooldown_sec
+--! seconds, REGARDLESS of whether it's still running or already finished
+--! (done/failed). running_job_for_chat alone only guards against two
+--! genuinely PARALLEL jobs; it does nothing once the earlier job has
+--! already finished — live-observed: after a job completed with a fully
+--! valid result, the user asked "did you really run it, prove it" three
+--! times in a row, and each time the AI started ANOTHER brand-new job
+--! instead of just relaying the existing (already conclusive) result —
+--! three fresh containers in well under a minute, one of which then even
+--! cloned the wrong repository while re-deriving its setup_command from
+--! scratch. See tool_docker_hintergrund_setup (swarm.pipe) for the gate
+--! built on this. "created" is a formatted string (see mem.now_ts), not a
+--! Unix number — a plain string comparison against a cutoff formatted the
+--! same way still works correctly here, since the format is fixed-width and
+--! zero-padded (lexicographic order matches chronological order).
+export fn recent_job_for_chat h chat_id cooldown_sec
+    init_docker_jobs h
+    cutoff: format_time (now - cooldown_sec) "2006-01-02 15:04:05"
+    rows: mem.raw_query h ("SELECT id, container_name, description, status, result, created FROM docker_jobs WHERE chat_id = '" ++ (mem.sql_escape (to_str chat_id)) ++ "' AND created >= '" ++ (mem.sql_escape cutoff) ++ "' ORDER BY id DESC LIMIT 1")
+    if (len rows) == 0
+        return nil
+    row: at rows 0
+    if (get row "status") == "running"
+        fresh: refresh_job_status h (get row "id")
+        if fresh != nil
+            return fresh
+    row
+
 --! Reads a job (nil if not found).
 export fn get_job h id
     rows: mem.raw_query h ("SELECT id, chat_id, container_name, description, status, result, created FROM docker_jobs WHERE id = " ++ (to_str id))

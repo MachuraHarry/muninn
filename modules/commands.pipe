@@ -1,0 +1,234 @@
+--! commands.pipe — simple text-command builders and fast-path query
+--! detectors (see handle_message in muninn.pipe). Extracted out of
+--! muninn.pipe as part of the same file-size cleanup as live_status.pipe/
+--! calendar_email.pipe. Everything here is parameter-driven (dbh/token/
+--! cid/low/tnorm/...), no dependency on muninn.pipe's own top-level state.
+import "modules/memory.pipe" as mem
+import "modules/telegram.pipe" as tel
+import "modules/web.pipe" as web
+import "modules/swarm.pipe" as grm
+
+--! Greeting text.
+export fn greeting_text _
+    "Muninn is online.\n\nYou can tell me something to remember (e.g. \"Remember that I like tea\"), give me a task (e.g. \"Handle the reporting\"), ask a question, or search the web (e.g. \"/search Odin Norse mythology\").\n\n/help for all commands."
+
+--! Help text.
+export fn help_text _
+    "/start      — greeting\n/help       — this help\n/status     — Muninn's state\n/costs      — AI running-cost summary (sessions, tokens, $)\n/list       — your most important memories\n/search     — search the web (e.g. /search Huginn and Muninn)\n/learn      — learn a document (e.g. /learn https://... or send me a .txt/.md file)\n/graph      — query the knowledge graph (e.g. /graph Harry)\n/remind     — schedule a reminder (e.g. /remind in 10 minutes about the break)\n/reminders  — show open reminders/briefings\n/goals      — show open goals, tap to mark done\n/trace      — see which of the gremium's Norse-named members handled your last request\n/briefing   — activate the daily morning briefing (/briefing stop to cancel)\n/reset      — reset conversation history (fresh context for follow-up questions)\n/consolidate — dream: condense old conversations, let memories decay/be forgotten\n/settings   — configure response style, language, proactive messages, memory aggressiveness, gremium live view\n/stop       — IMMEDIATELY cancel a gremium run currently in progress, plus all running background Docker jobs and scheduled continuations"
+
+--! Status text (statistics from the soul).
+export fn status_text dbh
+    n: mem.memory_count dbh
+    --! mcp_tools throws (not just returns []) when zero MCP tools are
+    --! currently discovered — the normal state right after boot or
+    --! whenever no message has keyword-matched an MCP server yet, now
+    --! that servers connect lazily on demand instead of all at boot (see
+    --! mcp.pipe's discovered_tool_names, which guards the exact same
+    --! call for the exact same reason). Without this try/catch, /status
+    --! crashed with no reply at all whenever nothing was connected yet
+    --! — confirmed live: "handle_update failed: mcp_tools: no tools
+    --! available" with the user seeing no response whatsoever.
+    tool_n: 0
+    try
+        tool_n: len (mcp_tools)
+    catch
+        tool_n: 0
+    gc: mem.graph_counts dbh
+    "Muninn status:\n• Memories: " ++ (to_str n) ++ "\n• Knowledge graph: " ++ (to_str (get gc "entities")) ++ " entities, " ++ (to_str (get gc "relations")) ++ " relations\n• Provider: DeepSeek\n• Gremium: 4-5 agents (with web research + MCP tools)\n• Connected MCP tools: " ++ (to_str tool_n) ++ " (only servers actually connected right now — MCP connects lazily on demand)\n• Executor: active\n• Web: DDG + Wikipedia"
+
+--! /costs: AI-generated cost summary. The numbers themselves are computed
+--! DETERMINISTICALLY from cost_log (mem.cost_summary) — the AI is only
+--! given the task of phrasing these FIXED numbers readably; it must NOT
+--! compute or estimate anything itself (otherwise risk of hallucinated
+--! numbers, see the lessons from the rest of the gremium today).
+export fn costs_text dbh
+    s: mem.cost_summary dbh
+    sessions: get s "sessions"
+    if (len sessions) == 0
+        return "No costs recorded yet — this accumulates as the bot keeps running."
+    lines: "Total across " ++ (to_str (get s "session_count")) ++ " sessions: $" ++ (to_str (get s "total_cost_usd")) ++ ", " ++ (to_str (get s "total_tokens")) ++ " tokens, " ++ (to_str (get s "total_calls")) ++ " AI calls.\n\nRecent sessions (newest first):\n"
+    i: 0
+    while i < 10 && i < (len sessions)
+        sess: at sessions i
+        lines: lines ++ "- Session " ++ (to_str (get sess "session_id")) ++ " (" ++ (get sess "first_ts") ++ " to " ++ (get sess "last_ts") ++ "): $" ++ (to_str (get sess "cost_usd")) ++ ", " ++ (to_str (get sess "tokens")) ++ " tokens, " ++ (to_str (get sess "calls")) ++ " calls, " ++ (to_str (get sess "cache_hits")) ++ " cache hits\n"
+        i: i + 1
+    summary: ""
+    try
+        summary: ai_chat "You are Muninn and you summarize running costs for your user. You are given ALREADY-COMPUTED numbers — take them over EXACTLY and verbatim, don't compute or estimate anything yourself, don't invent additional numbers. Write a short, natural summary in 3-5 sentences: total cost, how many sessions, a rough trend if visible (rising/falling/stable), and whether any session was noticeably expensive. Telegram formatting: single asterisks for bold, no headings." lines
+    catch
+        summary: ""
+    if summary == nil || summary == ""
+        return lines
+    summary ++ "\n\n" ++ lines
+
+--! List of the most important memories.
+export fn list_text dbh
+    rows: mem.top_memories dbh 10
+    if (len rows) == 0
+        return "No memories saved yet."
+    out: "Your most important memories:\n"
+    for r in rows
+        out: out ++ "• " ++ (get r "content") ++ "\n"
+    out
+
+
+--! Checks whether an AI answer represents an "I don't know" fallback that
+--! calls for a web research.
+export fn question_needs_research answer
+    if answer == nil || answer == ""
+        return true
+    trimmed: trim answer
+    --! If the answer ends with a question mark, it's very likely a
+    --! legitimate clarifying question (HONESTY_RULE: for a too-vague/
+    --! context-dependent request, prefer asking over guessing) — NOT a case
+    --! for a blind web search using the unchanged user text as the search
+    --! term. Observed live: "What would you suggest?" (referred to the
+    --! ongoing conversation context) triggered exactly that and searched the
+    --! web verbatim for "what would you suggest" — pure dictionary/
+    --! conjugation hits, completely beside the point.
+    if (len trimmed) > 0 && (substring trimmed ((len trimmed) - 1) (len trimmed)) == "?"
+        return false
+    --! Only treat it as "gave up" below for SHORT answers — a longer,
+    --! substantial answer that contains one of these phrases only in passing
+    --! as part of a real explanation (e.g. "there's no information on that,
+    --! but X is known...") is not a failed answer and shouldn't be discarded.
+    if (len trimmed) > 300
+        return false
+    low: lower answer
+    if contains low "ich weiß es nicht"
+        return true
+    if contains low "ich weiss es nicht"
+        return true
+    if contains low "weis es nicht"
+        return true
+    if contains low "kein wissen"
+        return true
+    if contains low "kein wissen darüber"
+        return true
+    if contains low "keine informationen"
+        return true
+    if contains low "keine relevanten informationen"
+        return true
+    if contains low "keine ahnung"
+        return true
+    if contains low "ich kenne keine"
+        return true
+    if contains low "ich kann dir nicht sagen"
+        return true
+    if contains low "ich weiss nichts"
+        return true
+    if contains low "ich weiß nichts"
+        return true
+    if contains low "konnte keine"
+        return true
+    if contains low "echtzeitdaten"
+        return true
+    if contains low "echtzeitzugriff"
+        return true
+    if contains low "keine echtzeit"
+        return true
+    if contains low "als sprachmodell"
+        return true
+    if contains low "kein internetzugriff"
+        return true
+    if contains low "keinen zugriff auf das internet"
+        return true
+    if contains low "kann ich nicht abrufen"
+        return true
+    if contains low "aktuell nicht bekannt"
+        return true
+    false
+
+--! Returns a direct overview of capabilities instead of a factual answer.
+export fn capability_text _
+    "I can help you with:\n• Answering questions and researching the web on my own when I lack the knowledge\n• Storing information with sources in my soul and finding it again later\n• Planning tasks and executing them via the executor\n• Managing goals and time-based reminders\n• Building knowledge graphs and documents (incl. PDFs — text is extracted and learned automatically)\n• Understanding and describing photos (just send one, optionally with a caption as a question)\n• Generating images on request (free AI image generator)\n• Cloning and testing GitHub repos (isolated Docker container, runs in the background)\n• Understanding voice messages (local transcription, no API key)\n• Using connected MCP tools in a controlled way\n• Working through Telegram and the web dashboard\n\nJust write a question or a concrete task."
+
+--! Truncates text to the Telegram limit (4096 characters).
+export fn shorten s
+    if s == nil
+        return ""
+    if (len s) > 4000
+        (substring s 0 4000) ++ "…"
+    else
+        s
+
+--! Runs a web research and replies with sources + buttons.
+export fn do_search token cid dbh query
+    tel.tel_send_chat_action token cid "typing"
+    tid: mem.active_thread dbh cid
+    mem.add_message dbh tid cid "user" ("/search " ++ query)
+    rr: web.research query
+    ctx: get rr "context"
+    srcs: get rr "sources"
+    if ctx == nil || ctx == ""
+        fallback: "No usable results found."
+        mem.add_message dbh tid cid "assistant" fallback
+        tel.tel_send_rich_message token cid fallback nil
+        return nil
+    answer: ""
+    try
+        answer: ai_chat ((grm.self_context 0) ++ "You are a precise research assistant. Answer the question based on the researched context, briefly and factually. IMPORTANT: this call here is pure text summarization WITHOUT tool access — NEVER claim that you generally can't create/send documents/files (you very much can, just not in THIS call); if the question mentions that, just say instead that you need to be asked directly for that (not as a research request).") ("Question: " ++ query ++ "\n\nContext:\n" ++ ctx)
+    catch e5
+        print ("do_search ai_chat failed: " ++ (to_str e5))
+        mem.log_error dbh "do_search_ai_chat" (to_str e5)
+        answer: ctx
+    mem.add_message dbh tid cid "assistant" answer
+    src_text: ""
+    for u in srcs
+        src_text: src_text ++ "\n" ++ u
+    full: (shorten answer) ++ "\n— Sources:" ++ (shorten src_text)
+    kb: []
+    row: []
+    push row (tel.tel_button "💾 Remember" "save")
+    push kb row
+    tel.tel_send_rich_message token cid (shorten full) kb
+    nil
+
+--! Detects a search intent and returns the search term (or "").
+export fn search_query low tnorm
+    if (len low) >= 8
+        if (substring low 0 8) == "/search "
+            return (trim (substring tnorm 8 (len tnorm)))
+    if (len low) >= 6
+        if (substring low 0 6) == "suche "
+            return (trim (substring tnorm 6 (len tnorm)))
+    if (len low) >= 12
+        if (substring low 0 12) == "recherchiere "
+            return (trim (substring tnorm 12 (len tnorm)))
+    if (len low) >= 6
+        if (substring low 0 6) == "finde "
+            return (trim (substring tnorm 6 (len tnorm)))
+    ""
+
+--! Detects a /graph request and returns the entity name (or "").
+export fn graph_query low tnorm
+    if (len low) >= 7
+        if (substring low 0 7) == "/graph "
+            return (trim (substring tnorm 7 (len tnorm)))
+    ""
+
+--! Detects a /learn request and returns the URL (or "").
+export fn learn_query low tnorm
+    if (len low) >= 7
+        if (substring low 0 7) == "/learn "
+            return (trim (substring tnorm 7 (len tnorm)))
+    ""
+
+--! Detects a /remind OR a freely worded "remind me..." request and
+--! returns the reminder instruction (or ""). Deliberately deterministic
+--! instead of routed through the gremium tool 'erinnerung_planen': it was
+--! observed that the AI, given "Remind me in 30 seconds...", output a
+--! confirmation WITHOUT actually calling the tool — no entry in the
+--! 'scheduled' table despite an "I've scheduled the reminder" reply. For
+--! such an expectation-setting promise, this can't rely on the LLM
+--! following through on a tool call. 'erinnerung_planen' remains
+--! responsible for implicit cases (e.g. "I have an appointment
+--! tomorrow...") that don't match this pattern.
+export fn remind_query low tnorm
+    if (len low) >= 8
+        if (substring low 0 8) == "/remind "
+            return (trim (substring tnorm 8 (len tnorm)))
+    if contains low "erinnere mich"
+        return tnorm
+    ""
+

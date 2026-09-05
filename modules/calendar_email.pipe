@@ -1,0 +1,208 @@
+--! calendar_email.pipe — proactive calendar/email checks (see sched_tick
+--! in muninn.pipe, branches "calendar_check"/"email_check", and the
+--! briefing-enrichment call site for calendar_events_text/
+--! parse_calendar_events). Extracted out of muninn.pipe as part of the
+--! same file-size cleanup as live_status.pipe — every function here is
+--! parameter-driven (email/token/dbh/cid/window_minutes/...), no dependency
+--! on muninn.pipe's own top-level state beyond what's passed in explicitly
+--! (e.g. tz_offset is passed into day_end_sec by the caller, never read as
+--! a global here).
+import "modules/memory.pipe" as mem
+import "modules/mcp.pipe" as mcp
+import "modules/telegram.pipe" as tel
+
+--! Splits BRIEFING_TIME ("HH:MM") into {hh, mm}. Default 08:00.
+export fn parse_briefing_time raw
+    hh: 8
+    mm: 0
+    if raw != nil && raw != ""
+        p: split raw ":"
+        if (len p) >= 2
+            hh: to_num (trim (at p 0))
+            mm: to_num (trim (at p 1))
+    out: {}
+    set out "hh" hh
+    set out "mm" mm
+    out
+
+--! Unix seconds of "tomorrow 00:00" in the configured timezone (for
+--! "appointments until the end of today" in the briefing enrichment below
+--! — same day-boundary logic as next_hhmm in scheduler.pipe).
+export fn day_end_sec now_sec offset_sec
+    shifted: now_sec + offset_sec
+    day_start: shifted - (shifted % 86400)
+    (day_start + 86400) - offset_sec
+
+--! Calls the Google Calendar MCP tool for appointments in the time
+--! window. Returns the text formatted by the tool (no raw JSON
+--! available) or nil on any error (Google not connected, token expired —
+--! testing-mode refresh tokens expire after 7 days, see README). Purely
+--! best-effort: a failed proactive calendar check must never disrupt the
+--! scheduler tick or another message.
+export fn calendar_events_text email time_min_sec time_max_sec
+    if email == nil || email == ""
+        return nil
+    --! Lazy MCP loading: this runs from the scheduler (sched_tick), OUTSIDE
+    --! the normal message flow that would otherwise connect "google" on
+    --! demand (ensure_mcp_for_task) — a scheduled check has no message
+    --! text to keyword-match against. Check explicitly instead of relying
+    --! on the try/catch below to paper over "tool not registered".
+    if !(mcp.is_connected "google")
+        return nil
+    t_min: format_time time_min_sec "2006-01-02T15:04:05Z"
+    t_max: format_time time_max_sec "2006-01-02T15:04:05Z"
+    try
+        return (tool_call "google_get_events" {user_google_email: email, calendar_id: "primary", time_min: t_min, time_max: t_max})
+    catch e
+        return nil
+
+--! Parses a get_events response into [{id, line}, ...]. No raw JSON
+--! available (only formatted text: '- "Title" (Starts: ...) ID: <id> |
+--! Link: ...' per line) — so it searches line by line for 'ID: '. Fragile
+--! against format changes in the MCP server, but more practical than the
+--! alternative (no structured result available).
+export fn parse_calendar_events text
+    out: []
+    if text == nil || text == ""
+        return out
+    lines: split text "\n"
+    for line in lines
+        idx: index_of line "ID: "
+        if idx >= 0
+            rest: substring line (idx + 4) (len line)
+            endidx: index_of rest " | Link"
+            id: rest
+            if endidx >= 0
+                id: substring rest 0 endidx
+            push out {id: (trim id), line: line}
+    out
+
+--! Meta key for the dedup list of already-reported calendar events
+--! (format: "<id>:<unix_ts>,<id>:<unix_ts>,..."). Title+start time could
+--! also have worked as a dedup key, but get_events includes a real event
+--! ID in the text — more reliable than free-text matching.
+NOTIFIED_CAL_KEY: "notified_calendar_events"
+
+--! Same idea, for already-checked Gmail message ids (see email_notify_new
+--! below) — a message only ever needs to be judged for importance ONCE,
+--! whether or not it turned out worth a notification.
+NOTIFIED_MAIL_KEY: "notified_gmail_messages"
+
+--! Loads a dedup list stored under meta key `key` (see NOTIFIED_CAL_KEY/
+--! NOTIFIED_MAIL_KEY), removes entries older than 24h (so the list doesn't
+--! grow unbounded for daily recurring events/frequent mail checks).
+fn load_notified_ids dbh key
+    raw: mem.meta_get dbh key
+    out: {}
+    if raw != nil && raw != ""
+        cutoff: now - 86400
+        for p in (split raw ",")
+            kv: split p ":"
+            if (len kv) == 2
+                ts: to_num (at kv 1)
+                if ts > cutoff
+                    set out (at kv 0) ts
+    out
+
+fn save_notified_ids dbh key idmap
+    parts: []
+    for id in (keys idmap)
+        push parts (id ++ ":" ++ (to_str (get idmap id)))
+    mem.meta_set dbh key (join parts ",")
+
+--! Proactive calendar reminder: checks upcoming appointments within the
+--! configured lead window (calendar_reminder_minutes) and reports new (not
+--! yet reported) appointments once via Telegram — dedup via
+--! load_notified_ids/save_notified_ids prevents repeats on every
+--! 15-minute tick.
+export fn calendar_notify_new token dbh cid email window_minutes
+    text: calendar_events_text email now (now + window_minutes * 60)
+    events: parse_calendar_events text
+    if (len events) == 0
+        return nil
+    notified: load_notified_ids dbh NOTIFIED_CAL_KEY
+    changed: false
+    for ev in events
+        id: get ev "id"
+        if (get notified id) == nil
+            try
+                tel.tel_send_message token (to_num cid) ("📅 Coming up: " ++ (get ev "line"))
+            catch e6
+                --! Still gets marked as "notified" (no repeat) — so it's
+                --! important to at least log a failed send instead of
+                --! losing it silently.
+                print ("Failed to send calendar reminder: " ++ (to_str e6))
+                mem.log_error dbh "calendar_reminder_send" (to_str e6)
+            set notified id now
+            changed: true
+    if changed
+        save_notified_ids dbh NOTIFIED_CAL_KEY notified
+
+--! Calls the Gmail search MCP tool for messages newer than the given
+--! window and extracts their message ids (no raw JSON available, only the
+--! formatted text the MCP tool returns — same tradeoff as
+--! calendar_events_text/parse_calendar_events). Purely best-effort: a
+--! failed proactive check must never disrupt the scheduler tick.
+fn gmail_new_message_ids email window_minutes
+    if email == nil || email == ""
+        return []
+    --! Lazy MCP loading: see the identical guard/comment at
+    --! calendar_events_text above — this also runs from the scheduler,
+    --! outside the message flow that would otherwise connect "google" on
+    --! demand.
+    if !(mcp.is_connected "google")
+        return []
+    query: "newer_than:" ++ (to_str (window_minutes + 5)) ++ "m"
+    text: nil
+    try
+        text: tool_call "google_search_gmail_messages" {user_google_email: email, query: query, page_size: 15}
+    catch e10
+        return []
+    if text == nil
+        return []
+    --! Searches for "Message ID: " ANYWHERE in the line, not as a prefix:
+    --! the tool's actual output nests it ("  1. Message ID: <id>"), and
+    --! also has "Thread ID: " lines right below it that a naive prefix
+    --! check could confuse — index_of matches only the exact substring, so
+    --! it can't accidentally hit those. Same approach as
+    --! parse_calendar_events above for "ID: ".
+    ids: []
+    for line in (split text "\n")
+        idx: index_of line "Message ID: "
+        if idx >= 0
+            push ids (trim (substring line (idx + 12) (len line)))
+    ids
+
+--! Proactive new-mail check: finds genuinely new messages (dedup via
+--! load_notified_ids/save_notified_ids, same mechanism as
+--! calendar_notify_new) and, if there are any, lets the AI judge whether
+--! ANY of them are important enough to interrupt the user about — most new
+--! mail is newsletters/marketing/notifications (live-checked against a
+--! real inbox: even the most recent messages were mostly promotional), so
+--! unconditionally notifying on every new message would just be noise.
+--! Every new message gets marked as checked regardless of the verdict, so
+--! it's never re-judged on the next tick.
+export fn email_notify_new token dbh cid email
+    ids: gmail_new_message_ids email 65
+    if (len ids) == 0
+        return nil
+    notified: load_notified_ids dbh NOTIFIED_MAIL_KEY
+    new_ids: []
+    for id in ids
+        if (get notified id) == nil
+            push new_ids id
+    if (len new_ids) == 0
+        return nil
+    try
+        content: tool_call "google_get_gmail_messages_content_batch" {user_google_email: email, message_ids: new_ids}
+        if content != nil && content != ""
+            verdict: ai_chat "You screen new emails for a personal assistant. Given the raw content of one or more new emails, decide: is ANY of them important or time-sensitive enough that the user should be interrupted about it right now (e.g. from a real person, needs a timely reply/action)? Newsletters, marketing, automated notifications, and routine confirmations are NOT important. If none of them are important, respond with EXACTLY the single word NOTHING and nothing else. Otherwise write a short, concrete notification (1-2 sentences per relevant email: sender, subject, what it's about) for ONLY the important one(s) — ignore the unimportant ones entirely." content
+            if verdict != nil && (lower (trim verdict)) != "nothing" && (trim verdict) != ""
+                tel.tel_send_message token (to_num cid) ("📬 " ++ (trim verdict))
+    catch e11
+        print ("Email importance check failed: " ++ (to_str e11))
+        mem.log_error dbh "email_check_judge" (to_str e11)
+    for id in new_ids
+        set notified id now
+    save_notified_ids dbh NOTIFIED_MAIL_KEY notified
+

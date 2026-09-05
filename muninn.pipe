@@ -13,6 +13,9 @@ import "modules/mcp.pipe" as mcp
 import "modules/dashboard.pipe" as dash
 import "modules/scheduler.pipe" as sched
 import "modules/docker_tools.pipe" as dt
+import "modules/live_status.pipe" as ls
+import "modules/calendar_email.pipe" as ce
+import "modules/commands.pipe" as cmd
 
 --! Loads KEY=VALUE lines from a .env file into a map.
 --! Values are split at the FIRST "=" (not every one), so values that themselves
@@ -97,6 +100,17 @@ fn setup_sandbox servers
     --! exec() (no MCP server for this). Fixed script path, no AI-controllable
     --! flags — only the two file paths are passed.
     push wl "tts_synth.sh"
+    --! "tts_synth_dialog.sh" added to the whitelist: swarm.pipe
+    --! (tts_synthesize_dialog, notizbuch_audio_uebersicht) calls the
+    --! two-voice Huginn/Muninn dialogue pipeline directly via exec() — same
+    --! pattern as tts_synth.sh, only file paths passed in, the speaker tag
+    --! is validated against a fixed 2-value enum inside the script itself.
+    push wl "tts_synth_dialog.sh"
+    --! "html_to_pdf.sh" added to the whitelist: swarm.pipe (pdf_synthesize,
+    --! tool_pdf_erstellen) calls the fixed wkhtmltopdf HTML->PDF pipeline
+    --! directly via exec() — same pattern as tts_synth.sh, only file paths
+    --! passed in, no AI-controllable flags.
+    push wl "html_to_pdf.sh"
     --! "systemd-notify" added to the whitelist: the main loop (see below)
     --! uses it to periodically check in with the systemd watchdog
     --! (WatchdogSec in muninn.service) — a purely trusted system command with
@@ -154,7 +168,17 @@ fn setup_sandbox servers
     nil
 
 fn ensure_mcp_for_task task dbh
-    results: mcp.ensure_for_task mcp_auto_servers task
+    servers_for_task: mcp_auto_servers
+    if !(get MSG_CTX "full_rights")
+        --! A restricted (non-owner, non-"alle") group sender must not be
+        --! able to reach an owner-only MCP specialist (browser/filesystem/
+        --! docker/google) just by keyword-matching into it — mirrors
+        --! has_full_rights' gate on Muninn's own local tools.
+        servers_for_task: []
+        for s in mcp_auto_servers
+            if !(mcp.is_owner_only_alias (get s "alias"))
+                push servers_for_task s
+    results: mcp.ensure_for_task servers_for_task task
     for r in results
         if get r "ok"
             print ("MCP auto-connected: " ++ (get r "alias"))
@@ -246,72 +270,148 @@ fn is_allowed cid allowed
             return true
     false
 
---! Greeting text.
-fn greeting_text _
-    "Muninn is online.\n\nYou can tell me something to remember (e.g. \"Remember that I like tea\"), give me a task (e.g. \"Handle the reporting\"), ask a question, or search the web (e.g. \"/search Odin Norse mythology\").\n\n/help for all commands."
+--! Muninn's own Telegram identity — resolved once at startup via
+--! tel_get_me (see the main setup below), needed to recognize an
+--! "@BotUsername" mention in a group. nil until that first call succeeds
+--! (a private chat and slash commands in a group are unaffected either way).
+BOT_ID: nil
+BOT_USERNAME: nil
 
---! Help text.
-fn help_text _
-    "/start      — greeting\n/help       — this help\n/status     — Muninn's state\n/costs      — AI running-cost summary (sessions, tokens, $)\n/list       — your most important memories\n/search     — search the web (e.g. /search Huginn and Muninn)\n/learn      — learn a document (e.g. /learn https://... or send me a .txt/.md file)\n/graph      — query the knowledge graph (e.g. /graph Harry)\n/remind     — schedule a reminder (e.g. /remind in 10 minutes about the break)\n/reminders  — show open reminders/briefings\n/goals      — show open goals, tap to mark done\n/trace      — see which of the gremium's Norse-named members handled your last request\n/briefing   — activate the daily morning briefing (/briefing stop to cancel)\n/reset      — reset conversation history (fresh context for follow-up questions)\n/consolidate — dream: condense old conversations, let memories decay/be forgotten\n/settings   — configure response style, language, proactive messages, memory aggressiveness, gremium live view\n/stop       — IMMEDIATELY cancel a gremium run currently in progress, plus all running background Docker jobs and scheduled continuations"
+--! Per-message context, recomputed at the top of every handle_update call
+--! (see there) — read throughout handle_message/handle_document/tool code
+--! via this single shared map instead of threading 4-5 extra parameters
+--! through every function in the call chain. Defaults match "private chat,
+--! owner" so any code path that runs OUTSIDE handle_update (CLI ask mode,
+--! dashboard) keeps behaving exactly as before this existed.
+MSG_CTX: {chat_type: "private", is_owner: true, full_rights: true, sender_name: nil, reply_snippet: nil, reply_from_id: nil, reply_from_name: nil}
 
---! Status text (statistics from the soul).
-fn status_text dbh
-    n: mem.memory_count dbh
-    --! mcp_tools throws (not just returns []) when zero MCP tools are
-    --! currently discovered — the normal state right after boot or
-    --! whenever no message has keyword-matched an MCP server yet, now
-    --! that servers connect lazily on demand instead of all at boot (see
-    --! mcp.pipe's discovered_tool_names, which guards the exact same
-    --! call for the exact same reason). Without this try/catch, /status
-    --! crashed with no reply at all whenever nothing was connected yet
-    --! — confirmed live: "handle_update failed: mcp_tools: no tools
-    --! available" with the user seeing no response whatsoever.
-    tool_n: 0
-    try
-        tool_n: len (mcp_tools)
-    catch
-        tool_n: 0
-    gc: mem.graph_counts dbh
-    "Muninn status:\n• Memories: " ++ (to_str n) ++ "\n• Knowledge graph: " ++ (to_str (get gc "entities")) ++ " entities, " ++ (to_str (get gc "relations")) ++ " relations\n• Provider: DeepSeek\n• Gremium: 4-5 agents (with web research + MCP tools)\n• Connected MCP tools: " ++ (to_str tool_n) ++ " (only servers actually connected right now — MCP connects lazily on demand)\n• Executor: active\n• Web: DDG + Wikipedia"
+--! Whether the sender of the CURRENT message may use Muninn's powerful,
+--! owner-gated tools (password manager, Docker, browser/filesystem/Google
+--! MCP, document learning, and the group-admin toolset if that ever comes
+--! back). Always true for the owner, always true in a private chat
+--! (nothing to restrict there), and in a group only if that group's
+--! "gruppenrechte" setting (see /settings) is "alle" instead of the
+--! default "nur_besitzer".
+fn compute_full_rights dbh cid sender_is_owner
+    if sender_is_owner
+        return true
+    if cid > 0
+        return true
+    (mem.setting_get dbh (to_str cid) "gruppenrechte" "nur_besitzer") == "alle"
 
---! /costs: AI-generated cost summary. The numbers themselves are computed
---! DETERMINISTICALLY from cost_log (mem.cost_summary) — the AI is only
---! given the task of phrasing these FIXED numbers readably; it must NOT
---! compute or estimate anything itself (otherwise risk of hallucinated
---! numbers, see the lessons from the rest of the gremium today).
-fn costs_text dbh
-    s: mem.cost_summary dbh
-    sessions: get s "sessions"
-    if (len sessions) == 0
-        return "No costs recorded yet — this accumulates as the bot keeps running."
-    lines: "Total across " ++ (to_str (get s "session_count")) ++ " sessions: $" ++ (to_str (get s "total_cost_usd")) ++ ", " ++ (to_str (get s "total_tokens")) ++ " tokens, " ++ (to_str (get s "total_calls")) ++ " AI calls.\n\nRecent sessions (newest first):\n"
-    i: 0
-    while i < 10 && i < (len sessions)
-        sess: at sessions i
-        lines: lines ++ "- Session " ++ (to_str (get sess "session_id")) ++ " (" ++ (get sess "first_ts") ++ " to " ++ (get sess "last_ts") ++ "): $" ++ (to_str (get sess "cost_usd")) ++ ", " ++ (to_str (get sess "tokens")) ++ " tokens, " ++ (to_str (get sess "calls")) ++ " calls, " ++ (to_str (get sess "cache_hits")) ++ " cache hits\n"
-        i: i + 1
-    summary: ""
-    try
-        summary: ai_chat "You are Muninn and you summarize running costs for your user. You are given ALREADY-COMPUTED numbers — take them over EXACTLY and verbatim, don't compute or estimate anything yourself, don't invent additional numbers. Write a short, natural summary in 3-5 sentences: total cost, how many sessions, a rough trend if visible (rising/falling/stable), and whether any session was noticeably expensive. Telegram formatting: single asterisks for bold, no headings." lines
-    catch
-        summary: ""
-    if summary == nil || summary == ""
-        return lines
-    summary ++ "\n\n" ++ lines
+--! TELEGRAM_ALLOWED_CHAT_ID can hold several comma-separated chat ids now
+--! that group support exists (owner's private chat, plus one or more
+--! groups) — a scheduled background message (briefing, proactive impulse,
+--! workspace cleanup) always targets the single OWNER chat specifically,
+--! never the raw multi-value allow-list string (which "to_num" can't
+--! parse as one chat_id at all — this fixed a real startup crash loop).
+fn owner_chat_id allowed
+    if allowed == nil || allowed == ""
+        return nil
+    first: at (split allowed ",") 0
+    to_num (trim first)
 
---! List of the most important memories.
-fn list_text dbh
-    rows: mem.top_memories dbh 10
-    if (len rows) == 0
-        return "No memories saved yet."
-    out: "Your most important memories:\n"
-    for r in rows
-        out: out ++ "• " ++ (get r "content") ++ "\n"
-    out
+--! Whether a group message actually addresses Muninn: a slash command,
+--! an "@BotUsername" mention, or a reply to one of Muninn's own messages.
+--! A plain, un-addressed message in a group must NOT be treated as a
+--! request (see handle_update below, which stores it as passive context
+--! instead) — shared here so handle_update's own gate and a live
+--! round_check peek (make_round_check) apply EXACTLY the same criterion.
+fn is_addressed_in_group msg ctype
+    if ctype != "group" && ctype != "supergroup"
+        return true
+    txt: get msg "text"
+    if txt == nil
+        txt: get msg "caption"
+    if txt != nil
+        if (len txt) > 0 && (substring txt 0 1) == "/"
+            return true
+        if BOT_USERNAME != nil && (contains txt ("@" ++ BOT_USERNAME))
+            return true
+    if (get msg "reply_to_message") != nil
+        rtm_from: get (get msg "reply_to_message") "from"
+        if rtm_from != nil && BOT_ID != nil && (get rtm_from "id") == BOT_ID
+            return true
+    false
 
 --! Processes an incoming update (extracts text, handles non-text).
+--! Also computes reply_snippet (the text/caption of whatever message is
+--! being replied to, if any) so handle_message can weave it into the
+--! gremium task as explicit context — useful even outside groups, e.g.
+--! replying to an OLDER Muninn message than the most recent one to
+--! specifically reference it.
 fn handle_update token cid msg dbh allowed uid
+    chat: get msg "chat"
+    ctype: "private"
+    if chat != nil
+        ct: get chat "type"
+        if ct != nil && ct != ""
+            ctype: ct
+    is_group: ctype == "group" || ctype == "supergroup"
+    from: get msg "from"
+    from_id: nil
+    from_name: "jemand"
+    if from != nil
+        from_id: get from "id"
+        fname: get from "first_name"
+        if fname != nil && fname != ""
+            from_name: fname
+    sender_is_owner: is_allowed from_id allowed
+    set MSG_CTX "chat_type" ctype
+    set MSG_CTX "is_owner" sender_is_owner
+    full_rights_now: compute_full_rights dbh cid sender_is_owner
+    set MSG_CTX "full_rights" full_rights_now
+    grm.set_full_rights full_rights_now
+    set MSG_CTX "sender_name" from_name
+    reply_snippet: nil
+    reply_from_id: nil
+    reply_from_name: nil
+    rtm: get msg "reply_to_message"
+    if rtm != nil
+        rtext: get rtm "text"
+        if rtext == nil
+            rtext: get rtm "caption"
+        if rtext != nil && (trim rtext) != ""
+            snippet: rtext
+            if (len snippet) > 300
+                snippet: (slice snippet 0 300) ++ "…"
+            reply_snippet: snippet
+        --! Who wrote the replied-to message — lets the AI target a group
+        --! moderation action at a real Telegram user_id via a reply,
+        --! without needing a username lookup.
+        rtm_from2: get rtm "from"
+        if rtm_from2 != nil
+            reply_from_id: get rtm_from2 "id"
+            rfn: get rtm_from2 "first_name"
+            if rfn != nil && rfn != ""
+                reply_from_name: rfn
+    set MSG_CTX "reply_snippet" reply_snippet
+    set MSG_CTX "reply_from_id" reply_from_id
+    set MSG_CTX "reply_from_name" reply_from_name
+
     txt: get msg "text"
+    if is_group
+        check_text: txt
+        if check_text == nil
+            check_text: get msg "caption"
+        if !(is_addressed_in_group msg ctype)
+            --! Not addressed, but still stored (NOT processed/answered) as
+            --! passive context — so when Muninn IS later addressed in this
+            --! same group, mem.thread_history (read in handle_message) picks
+            --! up the surrounding conversation, not just its own exchanges.
+            --! Requires Telegram privacy mode OFF for this chat (BotFather
+            --! /setprivacy) — with it on, Telegram never delivers an
+            --! unaddressed group message here at all, this code just never
+            --! runs. Text only (not photos/documents/voice) — a bystander
+            --! posting a file doesn't mean Muninn should learn/process it.
+            if check_text != nil && (trim check_text) != ""
+                tid_passive: mem.active_thread dbh cid
+                stored_passive: from_name ++ ": " ++ check_text
+                mem.add_message dbh tid_passive cid "user" stored_passive
+            return nil
+        if txt != nil && BOT_USERNAME != nil
+            txt: replace_all txt ("@" ++ BOT_USERNAME) ""
+
     if txt == nil
         doc: get msg "document"
         if doc != nil
@@ -426,6 +526,9 @@ fn safe_filename fname
 --! noticeable while; without an intermediate status Muninn would look
 --! stuck.
 fn handle_document token cid dbh doc
+    if !(get MSG_CTX "full_rights")
+        tel.tel_send_message token cid "Nur der Besitzer kann Muninn Dokumente lernen lassen — Dokumente landen dauerhaft im gemeinsamen Gedaechtnis, nicht nur in diesem Chat. Der Besitzer kann das ueber /settings fuer diese Gruppe freischalten."
+        return nil
     fname: get doc "file_name"
     if fname == nil
         fname: "document"
@@ -511,7 +614,7 @@ fn handle_photo token cid dbh msg
     row: []
     push row (tel.tel_button "💾 Remember" "save")
     push kb row
-    tel.tel_send_rich_message token cid (shorten answer) kb
+    tel.tel_send_rich_message token cid (cmd.shorten answer) kb
     nil
 
 --! Processes an incoming voice message: downloads the OGG/Opus file,
@@ -592,20 +695,20 @@ fn handle_message token cid text dbh allowed uid
         return nil
     low: lower tnorm
     if low == "/start" || low == "/hello" || low == "hallo" || low == "hi"
-        tel.tel_send_message token cid (greeting_text 0)
+        tel.tel_send_message token cid (cmd.greeting_text 0)
         return nil
     if low == "/help" || low == "hilfe" || low == "help"
-        tel.tel_send_message token cid (help_text 0)
+        tel.tel_send_message token cid (cmd.help_text 0)
         return nil
     if low == "/status"
-        tel.tel_send_message token cid (status_text dbh)
+        tel.tel_send_message token cid (cmd.status_text dbh)
         return nil
     if low == "/costs"
         tel.tel_send_chat_action token cid "typing"
-        tel.tel_send_message token cid (shorten (costs_text dbh))
+        tel.tel_send_message token cid (cmd.shorten (cmd.costs_text dbh))
         return nil
     if low == "/list"
-        tel.tel_send_message token cid (list_text dbh)
+        tel.tel_send_message token cid (cmd.list_text dbh)
         return nil
     if low == "/goals"
         rows: mem.list_goals dbh 20
@@ -619,12 +722,12 @@ fn handle_message token cid text dbh allowed uid
             kb: []
             for r in open_rows
                 row: []
-                push row (tel.tel_button ("✓ " ++ (truncate_status (get r "goal_text") 60)) ("goal_done:" ++ (to_str (get r "id"))))
+                push row (tel.tel_button ("✓ " ++ (ls.truncate_status (get r "goal_text") 60)) ("goal_done:" ++ (to_str (get r "id"))))
                 push kb row
             tel.tel_send_message_kb token cid "Open goals — tap one to mark it done:" kb
         return nil
     if low == "/trace"
-        t: format_trace dbh cid
+        t: ls.format_trace dbh cid
         if t == nil
             tel.tel_send_message token cid "No trace yet — ask me something first."
         else
@@ -638,7 +741,7 @@ fn handle_message token cid text dbh allowed uid
             out: "Open reminders/briefings:\n"
             for r in rows
                 out: out ++ "• [" ++ (get r "kind") ++ "] " ++ (get r "note") ++ " — on " ++ (format_time ((get r "due_ts") + tz_offset) "2006-01-02 15:04:05") ++ "\n"
-            tel.tel_send_message token cid (shorten out)
+            tel.tel_send_message token cid (cmd.shorten out)
         return nil
     if low == "/briefing stop"
         rows: sched.list dbh cid
@@ -657,7 +760,7 @@ fn handle_message token cid text dbh allowed uid
         for r in rows
             if (get r "kind") == "briefing"
                 sched.cancel dbh (get r "id")
-        bt: parse_briefing_time briefing_time
+        bt: ce.parse_briefing_time briefing_time
         nsec: now
         first_due: sched.next_hhmm (get bt "hh") (get bt "mm") nsec tz_offset
         sched.schedule dbh "briefing" (to_str cid) "Daily briefing" first_due "daily"
@@ -669,7 +772,7 @@ fn handle_message token cid text dbh allowed uid
         --! the general gremium/AI path instead of a clean usage hint.
         tel.tel_send_message token cid "Please provide a time and text: /remind <time> about <text> (e.g. /remind in 10 minutes about the break)"
         return nil
-    rq: remind_query low tnorm
+    rq: cmd.remind_query low tnorm
     if rq != ""
         nsec2: now
         parsed: sched.parse_reminder rq nsec2 tz_offset
@@ -687,6 +790,9 @@ fn handle_message token cid text dbh allowed uid
         tel.tel_send_message token cid ("Consolidation: " ++ (to_str (get res "threads_summarized")) ++ " threads condensed, " ++ (to_str (get res "memories_decayed")) ++ " memories decayed, " ++ (to_str (get res "memories_forgotten")) ++ " forgotten.")
         return nil
     if low == "/settings"
+        if cid < 0 && !(get MSG_CTX "is_owner")
+            tel.tel_send_message token cid "Nur der Besitzer kann die Einstellungen dieser Gruppe aendern."
+            return nil
         tel.tel_send_message_kb token cid (settings_menu_text dbh cid) (settings_kb dbh cid)
         return nil
     if low == "/stop"
@@ -712,7 +818,7 @@ fn handle_message token cid text dbh allowed uid
     if low == "/graph"
         tel.tel_send_message token cid "Please provide an entity: /graph <name>"
         return nil
-    gname: graph_query low tnorm
+    gname: cmd.graph_query low tnorm
     if gname != ""
         n: mem.neighbors_of dbh gname
         if (len n) == 0
@@ -721,12 +827,12 @@ fn handle_message token cid text dbh allowed uid
             out: gname ++ ":\n"
             for x in n
                 out: out ++ "• " ++ (get x "rel") ++ " → " ++ (get x "target") ++ "\n"
-            tel.tel_send_message token cid (shorten out)
+            tel.tel_send_message token cid (cmd.shorten out)
         return nil
     if low == "/search"
         tel.tel_send_message token cid "Please provide a search term: /search <term>"
         return nil
-    sq: search_query low tnorm
+    sq: cmd.search_query low tnorm
     --! "suche .../recherchiere .../finde ..." is a deliberate shortcut
     --! straight to a plain web search (do_search), skipping the full
     --! gremium for speed — but that also means it skips
@@ -739,12 +845,12 @@ fn handle_message token cid text dbh allowed uid
     --! real registry, with no live status either (do_search doesn't use
     --! the gremium's live transcript).
     if sq != "" && !(contains (lower sq) "mcp")
-        do_search token cid dbh sq
+        cmd.do_search token cid dbh sq
         return nil
     if low == "/learn"
         tel.tel_send_message token cid "Please provide a URL: /learn <URL> — or send me a .txt/.md file directly."
         return nil
-    lurl: learn_query low tnorm
+    lurl: cmd.learn_query low tnorm
     if lurl != ""
         tel.tel_send_chat_action token cid "typing"
         dtext: web.web_fetch_raw lurl
@@ -755,7 +861,7 @@ fn handle_message token cid text dbh allowed uid
         tel.tel_send_message token cid ("Learned from " ++ lurl ++ ": " ++ (to_str (get res "chunks_ingested")) ++ " of " ++ (to_str (get res "chunks_total")) ++ " chunks stored.")
         return nil
     if contains low "was kannst du"
-        tel.tel_send_message token cid (capability_text 0)
+        tel.tel_send_message token cid (cmd.capability_text 0)
         return nil
     --! Deterministic pending-MCP-proposal gate (see
     --! tool_mcp_server_vorschlagen/resolve_mcp_proposal): while a proposal
@@ -806,15 +912,6 @@ fn handle_message token cid text dbh allowed uid
     --! tools, memory, history) ALWAYS gets the full context and decides for
     --! itself whether to remember something, schedule a reminder, do
     --! research, or simply answer.
-    ensure_mcp_for_task tnorm dbh
-    tel.tel_send_chat_action token cid "typing"
-    tid: mem.active_thread dbh cid
-    hist: mem.thread_history dbh tid 12
-    task: tnorm
-    if (len hist) > 0
-        task: "Bisheriger Gespraechsverlauf (aeltester zuerst, ungekuerzt):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
-    task: (mem.settings_prompt_prefix dbh (to_str cid)) ++ task
-    mem.log_event dbh (to_str cid) tnorm "chat"
     --! Live status: send ONE placeholder message and keep updating it via
     --! editMessageText, instead of new message blocks or complete silence
     --! while the gremium works (see swarm_transcript_line/tel_finalize below,
@@ -822,15 +919,55 @@ fn handle_message token cid text dbh allowed uid
     --! instead — reverted: it visibly made the message jump around in the
     --! chat instead of updating in place, worse than the plain edit-based
     --! version.)
+    --!
+    --! Sent BEFORE ensure_mcp_for_task (moved here — was after it):
+    --! ensure_mcp_for_task synchronously spawns/connects an MCP server the
+    --! FIRST time a message matches its keywords (e.g. "termin" -> Google,
+    --! "bericht" -> Word, "docker" -> Docker) — live-measured 1-4.5s each,
+    --! sequentially if several match at once. With the placeholder sent
+    --! only afterward, that entire connect time was completely invisible to
+    --! the user (no typing indicator, no message, nothing) before this fix —
+    --! now "🧠 Thinking..." appears immediately, and the MCP connect (if
+    --! any) happens while it's already visible.
     message_id: nil
     ph: tel.tel_send_message token cid "🧠 Thinking..."
     if (get ph "ok") == true
         message_id: get (get ph "result") "message_id"
+    tel.tel_send_chat_action token cid "typing"
+    ensure_mcp_for_task tnorm dbh
+    tid: mem.active_thread dbh cid
+    hist: mem.thread_history dbh tid 12
+    task: tnorm
+    if (len hist) > 0
+        task: "Bisheriger Gespraechsverlauf (aeltester zuerst, ungekuerzt):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ tnorm
+    --! Reply/sender context for the gremium (see handle_update, where
+    --! reply_snippet/reply_from_id/sender_name/full_rights are captured from
+    --! the incoming message) — weaves in facts the model otherwise has no
+    --! way to know, e.g. WHO is actually asking in a group and whether they
+    --! have full rights, or what message a reply is targeting.
+    sys_notes: ""
+    reply_snip: get MSG_CTX "reply_snippet"
+    if reply_snip != nil
+        sys_notes: sys_notes ++ "[SYSTEM] Die Nachricht antwortet auf eine fruehere Nachricht: \"" ++ reply_snip ++ "\""
+        reply_from_id_ctx: get MSG_CTX "reply_from_id"
+        if reply_from_id_ctx != nil
+            sys_notes: sys_notes ++ " (von " ++ (to_str (get MSG_CTX "reply_from_name")) ++ ", user_id " ++ (to_str reply_from_id_ctx) ++ ")"
+        sys_notes: sys_notes ++ "\n"
+    if ((get MSG_CTX "chat_type") == "group" || (get MSG_CTX "chat_type") == "supergroup") && !(get MSG_CTX "is_owner")
+        sys_notes: sys_notes ++ "[SYSTEM] Diese Nachricht kommt von " ++ (to_str (get MSG_CTX "sender_name")) ++ ", einem Gruppenmitglied (nicht dem Besitzer)."
+        if !(get MSG_CTX "full_rights")
+            sys_notes: sys_notes ++ " Nur eingeschraenkte Werkzeuge verfuegbar (kein Passwortmanager/Docker/Browser/Dateisystem/Google, keine Dokumente lernen)."
+        sys_notes: sys_notes ++ "\n"
+    if sys_notes != ""
+        task: sys_notes ++ "\n" ++ task
+    task: (mem.settings_prompt_prefix dbh (to_str cid)) ++ task
+    mem.log_event dbh (to_str cid) tnorm "chat"
     on_update: make_swarm_updater token cid message_id dbh
     round_check: make_round_check token cid allowed dbh uid
     setup_sandbox all_mcp_servers
     answer: ""
     crashed: false
+    crash_error: ""
     aborted: false
     abort_reason: ""
     res_final: nil
@@ -842,7 +979,7 @@ fn handle_message token cid text dbh allowed uid
             abort_reason: get res "abort_reason"
         else
             answer: get res "content"
-            save_trace dbh cid res
+            ls.save_trace dbh cid res
     catch e
         print ("run_gremium_stream failed (attempt 1): " ++ (to_str e))
         mem.log_error dbh "run_gremium_stream" (to_str e)
@@ -862,7 +999,7 @@ fn handle_message token cid text dbh allowed uid
                 abort_reason: get res2 "abort_reason"
             else
                 answer: get res2 "content"
-                save_trace dbh cid res2
+                ls.save_trace dbh cid res2
         catch e2
             --! Without this log, a REAL gremium crash (e.g. max rounds exceeded,
             --! an interpreter error) looked identical to "the AI doesn't know" —
@@ -870,9 +1007,16 @@ fn handle_message token cid text dbh allowed uid
             --! journal log makes the difference visible.
             print ("run_gremium_stream failed (attempt 2, giving up): " ++ (to_str e2))
             mem.log_error dbh "run_gremium_stream" (to_str e2)
+            crash_error: to_str e2
             answer: ""
             crashed: true
-    mem.add_message dbh tid cid "user" tnorm
+    stored_text: tnorm
+    if (get MSG_CTX "chat_type") == "group" || (get MSG_CTX "chat_type") == "supergroup"
+        --! Sender-prefixed in groups (matches the passive-listening storage
+        --! in handle_update) — so mem.thread_history later shows WHO said
+        --! what, not just an anonymous stream of "user" turns.
+        stored_text: (to_str (get MSG_CTX "sender_name")) ++ ": " ++ tnorm
+    mem.add_message dbh tid cid "user" stored_text
     if aborted
         --! An intentional /stop is not a crash — no retry happened for it
         --! (checked right after each attempt, before the crash path), and
@@ -890,7 +1034,21 @@ fn handle_message token cid text dbh allowed uid
         --! error, the Merz research task ended up verbatim as a DuckDuckGo
         --! search query and returned "no usable results" instead of honestly
         --! saying that something went technically wrong.
-        tel_finalize token cid message_id "Something went technically wrong (e.g. a brief connection drop to the AI provider) — please send your request again and I'll retry." nil
+        --! "Content Exists Risk" is DeepSeek's OWN content-safety filter
+        --! rejecting the request server-side — live-observed on a completely
+        --! benign query ("list the world's most valuable companies"), so
+        --! this is a false-positive classification, not a real risk. Telling
+        --! the user to "just send it again" is actively misleading here: a
+        --! verbatim retry hits the identical filter and fails identically
+        --! (confirmed live — both automatic attempts above failed with the
+        --! SAME error) — only a DIFFERENTLY WORDED request has a chance to
+        --! get through, since the trigger is almost always specific phrasing
+        --! (or something in the research results this exact query pulled in
+        --! along the way), not the topic itself.
+        if contains crash_error "Content Exists Risk"
+            tel_finalize token cid message_id "DeepSeek hat die Anfrage serverseitig aus Sicherheitsgruenden abgelehnt (\"Content Exists Risk\") — das betrifft NICHT den Inhalt selbst, es ist bei diesem Provider gelegentlich eine Fehlklassifizierung auch bei ganz normalen Anfragen. Ein Wiederholen der EXAKT gleichen Anfrage hilft meist nicht (schlaegt genauso wieder fehl) — formuliere es einmal anders oder etwas eingegrenzter, dann klappt es in der Regel." nil
+        else
+            tel_finalize token cid message_id "Something went technically wrong (e.g. a brief connection drop to the AI provider) — please send your request again and I'll retry." nil
         return nil
     --! Lazy MCP loading: 'planer' may have called 'werkzeug_aktivieren'
     --! mid-run (see modules/swarm.pipe) — that connects a new specialist
@@ -914,7 +1072,7 @@ fn handle_message token cid text dbh allowed uid
                     abort_reason: get res3 "abort_reason"
                 else
                     answer: get res3 "content"
-                    save_trace dbh cid res3
+                    ls.save_trace dbh cid res3
             catch e3
                 --! MUST overwrite `answer`, not just log — live-observed:
                 --! attempt 1 (before the specialist was even connected)
@@ -934,9 +1092,9 @@ fn handle_message token cid text dbh allowed uid
             if aborted
                 tel_finalize token cid message_id ("🛑 " ++ abort_reason) nil
                 return nil
-    if question_needs_research answer
+    if cmd.question_needs_research answer
         tel_finalize token cid message_id "No knowledge of that. Researching..." nil
-        do_search token cid dbh tnorm
+        cmd.do_search token cid dbh tnorm
         return nil
     if answer == nil || answer == ""
         ctx: mem.retrieve_context dbh tnorm 3
@@ -979,7 +1137,7 @@ fn handle_message token cid text dbh allowed uid
                 src_text: ""
                 for u in srcs2
                     src_text: src_text ++ "\n" ++ u
-                full: (shorten answer2) ++ "\n— Sources:" ++ (shorten src_text)
+                full: (cmd.shorten answer2) ++ "\n— Sources:" ++ (cmd.shorten src_text)
                 kb: []
                 row: []
                 push row (tel.tel_button "💾 Remember" "save")
@@ -989,7 +1147,7 @@ fn handle_message token cid text dbh allowed uid
                 push row2 (tel.tel_button "👍" "up")
                 push row2 (tel.tel_button "👎" "down")
                 push kb row2
-                tel_finalize token cid message_id (shorten full) kb
+                tel_finalize token cid message_id (cmd.shorten full) kb
     else
         mem.add_message dbh tid cid "assistant" answer
         kb: []
@@ -1004,347 +1162,7 @@ fn handle_message token cid text dbh allowed uid
         row3: []
         push row3 (tel.tel_button "📜 Verlauf" "gremium_log")
         push kb row3
-        tel_finalize_after_tree token cid message_id (shorten answer) kb
-
---! Truncates a status snippet to n characters (for the live status line —
---! unlike shorten (4000 characters, for Telegram messages) deliberately
---! short here, so a single tool line doesn't blow up the whole status message.
-fn truncate_status s n
-    if s == nil
-        return ""
-    if (len s) > n
-        (substring s 0 n) ++ "…"
-    else
-        s
-
---! Extracts a short, human-readable snippet from a tool call's raw JSON
---! arguments (the actual search query/URL/etc., not just the tool name) —
---! for known local tools (see the ai_tool registrations in swarm.pipe)
---! targets the matching field specifically, otherwise best-effort takes
---! the first string field in the arguments (covers MCP tools with an
---! unknown schema).
-fn tool_arg_summary tool_name args_json
-    if args_json == nil || args_json == ""
-        return ""
-    a: nil
-    try
-        a: parse_json args_json
-    catch
-        a: nil
-    if a == nil || (type_of a) != "MAP"
-        return ""
-    field: nil
-    if tool_name == "web_search" || tool_name == "erinnerungen_suchen"
-        field: get a "query"
-    else if tool_name == "web_fetch"
-        field: get a "url"
-    else if tool_name == "erinnerung_planen"
-        field: get a "text"
-    else if tool_name == "merken" || tool_name == "merken_quelle"
-        field: get a "content"
-    else if tool_name == "docker_pull_image"
-        field: get a "image"
-    else if tool_name == "docker_create_container"
-        field: get a "name"
-    else if tool_name == "bild_senden" || tool_name == "datei_senden"
-        field: get a "path"
-    if field == nil
-        for k in (keys a)
-            v: get a k
-            if field == nil && (type_of v) == "STRING" && v != ""
-                field: v
-    if field == nil || field == ""
-        return ""
-    truncate_status (to_str field) 70
-
---! Norse names for the tool specialists (werkzeug_<alias>) -- Muninn
---! itself is Odin's raven of memory, so the whole gremium got a matching
---! theme instead of generic role labels. Purely a DISPLAY-layer mapping
---! (see agent_display_name below) -- the actual internal alias/agent
---! identifiers used for routing/handoff (swarm.pipe) are untouched, so
---! this carries zero risk to existing handoff logic or stored recipes
---! (unlike renaming the identifiers themselves, deliberately out of scope).
---! Unknown/future aliases fall back to a generic icon + the alias itself.
-fn werkzeug_display_name alias
-    if alias == "filesystem"
-        return {icon: "🔨", name: "Sindri"}
-    if alias == "memory"
-        return {icon: "📚", name: "Kvasir"}
-    if alias == "denkwerkzeug"
-        return {icon: "🤔", name: "Vili"}
-    if alias == "browser"
-        return {icon: "🐿️", name: "Ratatoskr"}
-    if alias == "doku"
-        return {icon: "📖", name: "Vör"}
-    if alias == "docker"
-        return {icon: "🔥", name: "Brokkr"}
-    if alias == "zeit"
-        return {icon: "⏳", name: "Skuld"}
-    if alias == "google"
-        return {icon: "📅", name: "Frigg"}
-    if alias == "praesentation"
-        return {icon: "🎨", name: "Iðunn"}
-    if alias == "dokument"
-        return {icon: "📝", name: "Fjalar"}
-    if alias == "whisper"
-        return {icon: "🎙️", name: "Sága"}
-    if alias == "github"
-        return {icon: "⚒️", name: "Eitri"}
-    {icon: "🔧", name: alias}
-
---! Persists the path/round-count of a finished gremium run (see the
---! {content, path, rounds} shape returned by run_gremium/run_gremium_stream
---! — path and rounds used to be silently discarded after pulling out just
---! "content") so /trace can show it afterwards. One slot per chat (most
---! recent run only), stored via meta like other small persistent values.
-fn save_trace dbh cid res
-    path: get res "path"
-    if path == nil
-        return nil
-    trace: {}
-    set trace "path" path
-    set trace "rounds" (get res "rounds")
-    mem.meta_set dbh ("last_trace:" ++ (to_str cid)) (to_json trace)
-
---! Formats a saved trace (see save_trace) as a short, named path for
---! /trace -- shared formatting so Telegram and any future caller (e.g. the
---! dashboard) show it identically.
-fn format_trace dbh cid
-    raw: mem.meta_get dbh ("last_trace:" ++ (to_str cid))
-    if raw == nil || raw == ""
-        return nil
-    trace: nil
-    try
-        trace: parse_json raw
-    catch
-        return nil
-    if trace == nil
-        return nil
-    path: get trace "path"
-    if path == nil || (len path) == 0
-        return nil
-    names: []
-    for a in path
-        d: agent_display_name a
-        push names ((get d "icon") ++ " " ++ (get d "name"))
-    rounds: get trace "rounds"
-    suffix: " round"
-    if rounds != 1
-        suffix: " rounds"
-    (join names " → ") ++ "\n" ++ (to_str rounds) ++ suffix
-
---! Display name + icon for any gremium agent (the 4 core roles, or a
---! werkzeug_<alias> specialist). Shared by agent_action_phrase (live
---! status) and the /trace command, so both always show the same names.
-fn agent_display_name agent
-    if agent == "planer"
-        return {icon: "🧭", name: "Huginn"}
-    if agent == "faktenwaechter"
-        return {icon: "🔍", name: "Mimir"}
-    if agent == "kritiker"
-        return {icon: "🧐", name: "Heimdall"}
-    if agent == "registrator"
-        return {icon: "✍️", name: "Bragi"}
-    if (len agent) > 9 && (substring agent 0 9) == "werkzeug_"
-        return (werkzeug_display_name (substring agent 9 (len agent)))
-    {icon: "🧠", name: agent}
-
---! Bare verb phrase for an agent's role, no icon/name (e.g. "is checking
---! facts and memory...") — composed into agent_group_header below.
-fn agent_verb_phrase agent
-    if agent == "planer"
-        return "is planning the answer..."
-    if agent == "faktenwaechter"
-        return "is checking facts and memory..."
-    if agent == "kritiker"
-        return "is reviewing the answer..."
-    if agent == "registrator"
-        return "is writing the answer..."
-    if agent == "werkzeug_browser"
-        return "is scurrying across the web..."
-    if (len agent) > 9 && (substring agent 0 9) == "werkzeug_"
-        return "is working (" ++ (substring agent 9 (len agent)) ++ ")..."
-    "is thinking..."
-
---! Icon + bold name for an agent, e.g. "🔍 **Mimir**" — the shared
---! identity fragment for the tree's group header and a handoff line's
---! target reference.
-fn agent_icon_name agent
-    d: agent_display_name agent
-    (get d "icon") ++ " **" ++ (get d "name") ++ "**"
-
---! Full-log group header: icon + bold name + em-dash + verb phrase (e.g.
---! "🔍 **Mimir** — is checking facts and memory...") — the dash reads
---! better as a standalone tree-branch header than run into the phrase.
-fn agent_group_header agent
-    (agent_icon_name agent) ++ " — " ++ (agent_verb_phrase agent)
-
---! Icon for a tool call, by tool name — keeps the tree scannable at a
---! glance instead of uniform text for everything. Falls back to a
---! generic wrench for anything not specifically known (the open-ended
---! universe of MCP specialist tool names, e.g. word_add_paragraph).
-fn tool_icon tool_name
-    if tool_name == "web_search"
-        return "🔎"
-    if tool_name == "web_fetch"
-        return "🌐"
-    if tool_name == "erinnerungen_suchen" || tool_name == "merken" || tool_name == "merken_quelle"
-        return "🧠"
-    if tool_name == "erinnerung_planen"
-        return "⏰"
-    if (len tool_name) > 7 && (substring tool_name 0 7) == "docker_"
-        return "🐳"
-    --! Playwright (werkzeug_browser, Ratatoskr) — pro Aktions-Art ein
-    --! eigenes Icon statt eines generischen fuer alle browser_*-Tools,
-    --! damit das Live-Update auf einen Blick zeigt WAS gerade passiert
-    --! (navigieren vs. klicken vs. tippen vs. warten ...), nicht nur DASS
-    --! gebrowst wird.
-    if tool_name == "browser_navigate" || tool_name == "browser_navigate_back"
-        return "🧭"
-    if tool_name == "browser_tabs"
-        return "🗂️"
-    if tool_name == "browser_click" || tool_name == "browser_hover" || tool_name == "browser_drag" || tool_name == "browser_drop"
-        return "🖱️"
-    if tool_name == "browser_type" || tool_name == "browser_fill_form" || tool_name == "browser_press_key" || tool_name == "browser_select_option"
-        return "⌨️"
-    if tool_name == "browser_take_screenshot"
-        return "📸"
-    if tool_name == "browser_snapshot" || tool_name == "browser_find"
-        return "🔍"
-    if tool_name == "browser_wait_for"
-        return "⏳"
-    if tool_name == "browser_handle_dialog"
-        return "💬"
-    if tool_name == "browser_file_upload"
-        return "📤"
-    if tool_name == "browser_network_requests" || tool_name == "browser_network_request"
-        return "📡"
-    if tool_name == "browser_console_messages"
-        return "🖥️"
-    if tool_name == "browser_evaluate" || tool_name == "browser_run_code_unsafe"
-        return "⚙️"
-    if tool_name == "browser_resize"
-        return "📐"
-    if tool_name == "browser_close"
-        return "🚪"
-    if tool_name == "bild_senden"
-        return "📷"
-    if tool_name == "bild_erstellen"
-        return "🎨"
-    if tool_name == "datei_senden"
-        return "📎"
-    if tool_name == "sprachnachricht_senden"
-        return "🎙️"
-    if tool_name == "hintergrund_fortsetzen"
-        return "⏳"
-    if tool_name == "rezept_speichern" || tool_name == "rezepte_suchen"
-        return "📋"
-    if tool_name == "bericht_veroeffentlichen"
-        return "📰"
-    if tool_name == "icon_holen"
-        return "🏷️"
-    if tool_name == "ziel_anlegen"
-        return "🎯"
-    if tool_name == "ziel_erledigt"
-        return "✅"
-    "🔧"
-
---! Bare tool-call content (e.g. 🔎 web_search "Berlin population 2026")
---! for a "tool" event. Empty string if there is no detail (nothing to
---! show).
-fn tool_call_detail_line detail args_json
-    if detail == nil || detail == ""
-        return ""
-    line: (tool_icon detail) ++ " " ++ detail
-    arg_hint: tool_arg_summary detail args_json
-    if arg_hint != ""
-        line: line ++ " \"" ++ arg_hint ++ "\""
-    line
-
---! Bare content for a single "tool"/"reasoning"/"inject" progress event —
---! used both as the live status's line 2 and as a tree-branch entry in
---! the full run log (see make_swarm_updater). "start"/"handoff"/"final"
---! are handled directly there. "reasoning" is the model's actual
---! chain-of-thought for that round (only fires when the provider returns
---! one) — the real "watch them think" signal; "inject" reflects a
---! steering message a round_check fed into the run (see make_round_check),
---! so the full log shows the user's own nudge take effect. Empty string
---! means "nothing to show".
-fn swarm_transcript_line event detail args_json
-    if event == "tool"
-        return (tool_call_detail_line detail args_json)
-    if event == "reasoning"
-        return "💭 *" ++ (truncate_status detail 150) ++ "*"
-    if event == "inject"
-        return "💬 **You**: " ++ (truncate_status detail 150)
-    ""
-
---! Extracts the optional "reason" note from a handoff tool call's raw
---! JSON arguments (see ai.ChatSwarm's "handoff" progress event and the
---! synthesized handoff tool's schema in swarmToolsFor, pipe repo) — ""
---! if the model didn't provide one (the field is optional).
-fn handoff_reason args_json
-    if args_json == nil || args_json == ""
-        return ""
-    a: nil
-    try
-        a: parse_json args_json
-    catch
-        a: nil
-    if a == nil || (type_of a) != "MAP"
-        return ""
-    r: get a "reason"
-    if r == nil
-        return ""
-    truncate_status (to_str r) 80
-
---! Renders one agent group as a tree branch: its header
---! (agent_group_header) plus its collected entries, each a map
---! {text, handoff} (see make_swarm_updater) — "├─ " for every entry but
---! the last, "└─▶ " for a trailing handoff (points at the target it's
---! handing off to), plain "└─ " for any other trailing entry.
-fn render_group g
-    header: agent_group_header (get g "agent")
-    lines: get g "lines"
-    n: len lines
-    if n == 0
-        return header
-    rendered: []
-    i: 0
-    while i < n
-        entry: at lines i
-        connector: "├─ "
-        if i == (n - 1)
-            if (get entry "handoff") == true
-                connector: "└─▶ "
-            else
-                connector: "└─ "
-        push rendered (connector ++ (get entry "text"))
-        i: i + 1
-    header ++ "\n" ++ (join rendered "\n")
-
---! Joins accumulated agent groups (see make_swarm_updater) into the full
---! run tree — used both for the LIVE edited message while the gremium is
---! working, and again afterward for the standalone "📜 Verlauf" button
---! message. Kept under a safe character budget (a bit below shorten's
---! 4000, since many separate bold/icon runs each carry their own HTML-tag
---! overhead once tg_html converts the markdown here), dropping the OLDEST
---! groups first with a leading marker when over it.
-fn render_groups groups
-    budget: 3800
-    kept: groups
-    fn render_all gs
-        rendered: []
-        for g in gs
-            push rendered (render_group g)
-        join rendered "\n\n"
-    text: render_all kept
-    while (len text) > budget && (len kept) > 1
-        kept: slice kept 1 (len kept)
-        text: render_all kept
-    if (len kept) < (len groups)
-        text: "… (earlier steps hidden)\n\n" ++ text
-    text
+        tel_finalize_after_tree token cid message_id (cmd.shorten answer) kb
 
 --! Builds the on_update closure for run_gremium_stream: renders the REAL,
 --! growing tree live (render_groups — see it for the exact format), edited
@@ -1399,8 +1217,8 @@ fn make_swarm_updater token cid message_id dbh
             --! agent = the agent handing off (Go's onProgress passes
             --! "current"); detail = the target agent's name.
             if (len groups) > 0
-                text: "hands off to " ++ (agent_icon_name detail)
-                reason: handoff_reason args_json
+                text: "hands off to " ++ (ls.agent_icon_name detail)
+                reason: ls.handoff_reason args_json
                 if reason != ""
                     --! Italic, not quoted — reason is model-written free
                     --! text and often already contains its own "quoted
@@ -1425,7 +1243,7 @@ fn make_swarm_updater token cid message_id dbh
                 push groups {agent: agent, lines: []}
                 set stream_state "current" ""
         if event == "tool" || event == "reasoning" || event == "inject"
-            bare: swarm_transcript_line event detail args_json
+            bare: ls.swarm_transcript_line event detail args_json
             if bare != ""
                 if (len groups) == 0
                     push groups {agent: agent, lines: []}
@@ -1435,11 +1253,11 @@ fn make_swarm_updater token cid message_id dbh
             return nil
         text: ""
         if verlauf_mode == "knapp"
-            text: (agent_icon_name agent) ++ " " ++ (agent_verb_phrase agent)
+            text: (ls.agent_icon_name agent) ++ " " ++ (ls.agent_verb_phrase agent)
             if (get stream_state "current") != ""
                 text: text ++ "\n" ++ (get stream_state "current")
         else
-            text: render_groups groups
+            text: ls.render_groups groups
         if text == (get stream_state "last_text")
             return nil
         if (ms - (get stream_state "last_ms")) < 1000
@@ -1516,12 +1334,31 @@ fn make_round_check token cid allowed dbh uid
             msg: get upd "message"
             if msg != nil && !(contains (get state "injected_ids") this_uid) && !(mem.was_injected dbh this_uid)
                 chat: get msg "chat"
-                if chat != nil && (is_allowed (get chat "id") allowed)
-                    txt: get msg "text"
-                    if txt != nil
-                        low: lower (trim txt)
-                        if low == "/stop"
-                            return {abort: true, abort_reason: "Cancelled by /stop."}
+                --! With more than one allowed chat (private + a group, since
+                --! group support exists), a message from a DIFFERENT chat B
+                --! arriving while a run for chat A is in progress must NOT be
+                --! treated as steering input for A's UNRELATED task —
+                --! live-reproduced: a message in a group got injected into
+                --! (and visibly derailed) a run that was actually working for
+                --! the private chat. "(get chat "id") == cid" is the fix.
+                if chat != nil && (get chat "id") == cid && (is_allowed (get chat "id") allowed)
+                    ctype_rc: "private"
+                    ct_rc: get chat "type"
+                    if ct_rc != nil && ct_rc != ""
+                        ctype_rc: ct_rc
+                    --! Group chat: same addressed-check as handle_update — a
+                    --! plain message between two OTHER people in the group
+                    --! (not @mentioning/replying-to Muninn) must NOT be
+                    --! swallowed as steering input for an unrelated, already
+                    --! running gremium task. Left alone here, it flows
+                    --! through the normal handle_update path once this run
+                    --! finishes, same as any other unaddressed group message.
+                    if is_addressed_in_group msg ctype_rc
+                        txt: get msg "text"
+                        if txt != nil
+                            low: lower (trim txt)
+                            if low == "/stop"
+                                return {abort: true, abort_reason: "Cancelled by /stop."}
                         --! A DIFFERENT gremium run may still be in progress
                         --! while the user answers a pending MCP-server
                         --! proposal (see tool_mcp_server_vorschlagen/
@@ -1544,7 +1381,7 @@ fn make_round_check token cid allowed dbh uid
                             continue
                         push (get state "injected_ids") this_uid
                         mem.mark_injected dbh this_uid
-                        ack: tel.tel_send_message token cid ("👀 Got it, working it in: *" ++ (truncate_status txt 200) ++ "*")
+                        ack: tel.tel_send_message token cid ("👀 Got it, working it in: *" ++ (ls.truncate_status txt 200) ++ "*")
                         if (get ack "ok") == true
                             set state "pending_ack_id" (get (get ack "result") "message_id")
                         return {inject: txt}
@@ -1595,166 +1432,6 @@ fn tel_finalize_after_tree token cid message_id text kb
         tel.tel_delete_message token cid message_id
     tel.tel_send_rich_message token cid text kb
 
---! Checks whether an AI answer represents an "I don't know" fallback that
---! calls for a web research.
-fn question_needs_research answer
-    if answer == nil || answer == ""
-        return true
-    trimmed: trim answer
-    --! If the answer ends with a question mark, it's very likely a
-    --! legitimate clarifying question (HONESTY_RULE: for a too-vague/
-    --! context-dependent request, prefer asking over guessing) — NOT a case
-    --! for a blind web search using the unchanged user text as the search
-    --! term. Observed live: "What would you suggest?" (referred to the
-    --! ongoing conversation context) triggered exactly that and searched the
-    --! web verbatim for "what would you suggest" — pure dictionary/
-    --! conjugation hits, completely beside the point.
-    if (len trimmed) > 0 && (substring trimmed ((len trimmed) - 1) (len trimmed)) == "?"
-        return false
-    --! Only treat it as "gave up" below for SHORT answers — a longer,
-    --! substantial answer that contains one of these phrases only in passing
-    --! as part of a real explanation (e.g. "there's no information on that,
-    --! but X is known...") is not a failed answer and shouldn't be discarded.
-    if (len trimmed) > 300
-        return false
-    low: lower answer
-    if contains low "ich weiß es nicht"
-        return true
-    if contains low "ich weiss es nicht"
-        return true
-    if contains low "weis es nicht"
-        return true
-    if contains low "kein wissen"
-        return true
-    if contains low "kein wissen darüber"
-        return true
-    if contains low "keine informationen"
-        return true
-    if contains low "keine relevanten informationen"
-        return true
-    if contains low "keine ahnung"
-        return true
-    if contains low "ich kenne keine"
-        return true
-    if contains low "ich kann dir nicht sagen"
-        return true
-    if contains low "ich weiss nichts"
-        return true
-    if contains low "ich weiß nichts"
-        return true
-    if contains low "konnte keine"
-        return true
-    if contains low "echtzeitdaten"
-        return true
-    if contains low "echtzeitzugriff"
-        return true
-    if contains low "keine echtzeit"
-        return true
-    if contains low "als sprachmodell"
-        return true
-    if contains low "kein internetzugriff"
-        return true
-    if contains low "keinen zugriff auf das internet"
-        return true
-    if contains low "kann ich nicht abrufen"
-        return true
-    if contains low "aktuell nicht bekannt"
-        return true
-    false
-
---! Returns a direct overview of capabilities instead of a factual answer.
-fn capability_text _
-    "I can help you with:\n• Answering questions and researching the web on my own when I lack the knowledge\n• Storing information with sources in my soul and finding it again later\n• Planning tasks and executing them via the executor\n• Managing goals and time-based reminders\n• Building knowledge graphs and documents (incl. PDFs — text is extracted and learned automatically)\n• Understanding and describing photos (just send one, optionally with a caption as a question)\n• Generating images on request (free AI image generator)\n• Cloning and testing GitHub repos (isolated Docker container, runs in the background)\n• Understanding voice messages (local transcription, no API key)\n• Using connected MCP tools in a controlled way\n• Working through Telegram and the web dashboard\n\nJust write a question or a concrete task."
-
---! Truncates text to the Telegram limit (4096 characters).
-fn shorten s
-    if s == nil
-        return ""
-    if (len s) > 4000
-        (substring s 0 4000) ++ "…"
-    else
-        s
-
---! Runs a web research and replies with sources + buttons.
-fn do_search token cid dbh query
-    tel.tel_send_chat_action token cid "typing"
-    tid: mem.active_thread dbh cid
-    mem.add_message dbh tid cid "user" ("/search " ++ query)
-    rr: web.research query
-    ctx: get rr "context"
-    srcs: get rr "sources"
-    if ctx == nil || ctx == ""
-        fallback: "No usable results found."
-        mem.add_message dbh tid cid "assistant" fallback
-        tel.tel_send_rich_message token cid fallback nil
-        return nil
-    answer: ""
-    try
-        answer: ai_chat ((grm.self_context 0) ++ "You are a precise research assistant. Answer the question based on the researched context, briefly and factually. IMPORTANT: this call here is pure text summarization WITHOUT tool access — NEVER claim that you generally can't create/send documents/files (you very much can, just not in THIS call); if the question mentions that, just say instead that you need to be asked directly for that (not as a research request).") ("Question: " ++ query ++ "\n\nContext:\n" ++ ctx)
-    catch e5
-        print ("do_search ai_chat failed: " ++ (to_str e5))
-        mem.log_error dbh "do_search_ai_chat" (to_str e5)
-        answer: ctx
-    mem.add_message dbh tid cid "assistant" answer
-    src_text: ""
-    for u in srcs
-        src_text: src_text ++ "\n" ++ u
-    full: (shorten answer) ++ "\n— Sources:" ++ (shorten src_text)
-    kb: []
-    row: []
-    push row (tel.tel_button "💾 Remember" "save")
-    push kb row
-    tel.tel_send_rich_message token cid (shorten full) kb
-    nil
-
---! Detects a search intent and returns the search term (or "").
-fn search_query low tnorm
-    if (len low) >= 8
-        if (substring low 0 8) == "/search "
-            return (trim (substring tnorm 8 (len tnorm)))
-    if (len low) >= 6
-        if (substring low 0 6) == "suche "
-            return (trim (substring tnorm 6 (len tnorm)))
-    if (len low) >= 12
-        if (substring low 0 12) == "recherchiere "
-            return (trim (substring tnorm 12 (len tnorm)))
-    if (len low) >= 6
-        if (substring low 0 6) == "finde "
-            return (trim (substring tnorm 6 (len tnorm)))
-    ""
-
---! Detects a /graph request and returns the entity name (or "").
-fn graph_query low tnorm
-    if (len low) >= 7
-        if (substring low 0 7) == "/graph "
-            return (trim (substring tnorm 7 (len tnorm)))
-    ""
-
---! Detects a /learn request and returns the URL (or "").
-fn learn_query low tnorm
-    if (len low) >= 7
-        if (substring low 0 7) == "/learn "
-            return (trim (substring tnorm 7 (len tnorm)))
-    ""
-
---! Detects a /remind OR a freely worded "remind me..." request and
---! returns the reminder instruction (or ""). Deliberately deterministic
---! instead of routed through the gremium tool 'erinnerung_planen': it was
---! observed that the AI, given "Remind me in 30 seconds...", output a
---! confirmation WITHOUT actually calling the tool — no entry in the
---! 'scheduled' table despite an "I've scheduled the reminder" reply. For
---! such an expectation-setting promise, this can't rely on the LLM
---! following through on a tool call. 'erinnerung_planen' remains
---! responsible for implicit cases (e.g. "I have an appointment
---! tomorrow...") that don't match this pattern.
-fn remind_query low tnorm
-    if (len low) >= 8
-        if (substring low 0 8) == "/remind "
-            return (trim (substring tnorm 8 (len tnorm)))
-    if contains low "erinnere mich"
-        return tnorm
-    ""
-
 --! /settings menu: display text + inline keyboard, the current values sit
 --! directly on the buttons (tapping rotates to the next value, see
 --! handle_callback below "settings_*"). Both functions read the same four
@@ -1767,7 +1444,15 @@ fn settings_menu_text dbh cid
     proaktiv: mem.setting_get dbh (to_str cid) "proaktiv" "on"
     gedaechtnis: mem.setting_get dbh (to_str cid) "gedaechtnis" "normal"
     live_verlauf: mem.setting_get dbh (to_str cid) "live_verlauf" "voll"
-    "⚙️ Settings\n\nStyle: " ++ (mem.setting_label "style" style) ++ "\nLanguage: " ++ (mem.setting_label "sprache" sprache) ++ "\nProactive messages: " ++ (mem.setting_label "proaktiv" proaktiv) ++ "\nMemory: " ++ (mem.setting_label "gedaechtnis" gedaechtnis) ++ "\nGremium live view: " ++ (mem.setting_label "live_verlauf" live_verlauf) ++ "\n\nTap a value to change it."
+    out: "⚙️ Settings\n\nStyle: " ++ (mem.setting_label "style" style) ++ "\nLanguage: " ++ (mem.setting_label "sprache" sprache) ++ "\nProactive messages: " ++ (mem.setting_label "proaktiv" proaktiv) ++ "\nMemory: " ++ (mem.setting_label "gedaechtnis" gedaechtnis) ++ "\nGremium live view: " ++ (mem.setting_label "live_verlauf" live_verlauf)
+    --! Group-permissions row: only meaningful (and only shown) in a group
+    --! chat — see compute_full_rights/OWNER_ONLY_ALIASES for what
+    --! "everyone" actually unlocks (password manager, Docker, browser/
+    --! filesystem/Google MCP, document learning).
+    if cid < 0
+        gruppenrechte: mem.setting_get dbh (to_str cid) "gruppenrechte" "nur_besitzer"
+        out: out ++ "\nGroup permissions: " ++ (mem.setting_label "gruppenrechte" gruppenrechte)
+    out ++ "\n\nTap a value to change it."
 
 fn settings_kb dbh cid
     style: mem.setting_get dbh (to_str cid) "style" "normal"
@@ -1791,6 +1476,11 @@ fn settings_kb dbh cid
     r5: []
     push r5 (tel.tel_button ("Gremium live view: " ++ (mem.setting_label "live_verlauf" live_verlauf)) "settings_live_verlauf")
     push kb r5
+    if cid < 0
+        gruppenrechte2: mem.setting_get dbh (to_str cid) "gruppenrechte" "nur_besitzer"
+        r7: []
+        push r7 (tel.tel_button ("Group permissions: " ++ (mem.setting_label "gruppenrechte" gruppenrechte2)) "settings_gruppenrechte")
+        push kb r7
     r6: []
     push r6 (tel.tel_button "Done" "settings_done")
     push kb r6
@@ -1839,7 +1529,7 @@ fn handle_callback token dbh cbq allowed uid
         if groups == nil || (len groups) == 0
             tel.tel_send_message token cid "No detailed log available for the last run."
         else
-            tel.tel_send_message token cid ("📜 **Full run log:**\n\n" ++ (render_groups groups))
+            tel.tel_send_message token cid ("📜 **Full run log:**\n\n" ++ (ls.render_groups groups))
         return nil
     if data == "more"
         if txt != nil
@@ -1877,7 +1567,7 @@ fn handle_callback token dbh cbq allowed uid
                 tel_finalize token cid message_id ("🛑 " ++ (get res "abort_reason")) nil
             else
                 a: get res "content"
-                save_trace dbh cid res
+                ls.save_trace dbh cid res
                 kb: []
                 row: []
                 push row (tel.tel_button "📜 Verlauf" "gremium_log")
@@ -1885,7 +1575,7 @@ fn handle_callback token dbh cbq allowed uid
                 if a != nil && a != ""
                     tid: mem.active_thread dbh cid
                     mem.add_message dbh tid cid "assistant" a
-                    tel_finalize_after_tree token cid message_id (shorten a) kb
+                    tel_finalize_after_tree token cid message_id (cmd.shorten a) kb
                 else
                     tel_finalize_after_tree token cid message_id "Unfortunately I couldn't dig up anything more." kb
         return nil
@@ -1942,7 +1632,19 @@ fn handle_callback token dbh cbq allowed uid
     --! memory.pipe) and rebuilds the menu directly in the same message
     --! (editMessageText instead of a new message) — feels like a real toggle,
     --! no growing message history per click.
-    if data == "settings_style" || data == "settings_sprache" || data == "settings_proaktiv" || data == "settings_gedaechtnis" || data == "settings_live_verlauf"
+    if data == "settings_style" || data == "settings_sprache" || data == "settings_proaktiv" || data == "settings_gedaechtnis" || data == "settings_live_verlauf" || data == "settings_gruppenrechte"
+        --! Group chat: same owner-only gate as the /settings command itself
+        --! (see there) — a button on an ALREADY-OPEN settings message could
+        --! otherwise still be tapped by a non-owner group member, most
+        --! importantly the group-permissions toggle itself.
+        if cid < 0
+            from_cb: get cbq "from"
+            from_id_cb: nil
+            if from_cb != nil
+                from_id_cb: get from_cb "id"
+            if !(is_allowed from_id_cb allowed)
+                tel.tel_send_message token cid "Nur der Besitzer kann die Einstellungen dieser Gruppe aendern."
+                return nil
         key: substring data 9 (len data)
         cid_str: to_str cid
         deflt: "normal"
@@ -1954,6 +1656,9 @@ fn handle_callback token dbh cbq allowed uid
             else
                 if key == "live_verlauf"
                     deflt: "voll"
+                else
+                    if key == "gruppenrechte"
+                        deflt: "nur_besitzer"
         cur: mem.setting_get dbh cid_str key deflt
         nxt: mem.setting_cycle key cur
         mem.setting_set dbh cid_str key nxt
@@ -1963,201 +1668,6 @@ fn handle_callback token dbh cbq allowed uid
         tel.tel_delete_message token cid message_id
         return nil
     tel.tel_send_message token cid "Unknown action."
-
---! Splits BRIEFING_TIME ("HH:MM") into {hh, mm}. Default 08:00.
-fn parse_briefing_time raw
-    hh: 8
-    mm: 0
-    if raw != nil && raw != ""
-        p: split raw ":"
-        if (len p) >= 2
-            hh: to_num (trim (at p 0))
-            mm: to_num (trim (at p 1))
-    out: {}
-    set out "hh" hh
-    set out "mm" mm
-    out
-
---! Unix seconds of "tomorrow 00:00" in the configured timezone (for
---! "appointments until the end of today" in the briefing enrichment below
---! — same day-boundary logic as next_hhmm in scheduler.pipe).
-fn day_end_sec now_sec offset_sec
-    shifted: now_sec + offset_sec
-    day_start: shifted - (shifted % 86400)
-    (day_start + 86400) - offset_sec
-
---! Calls the Google Calendar MCP tool for appointments in the time
---! window. Returns the text formatted by the tool (no raw JSON
---! available) or nil on any error (Google not connected, token expired —
---! testing-mode refresh tokens expire after 7 days, see README). Purely
---! best-effort: a failed proactive calendar check must never disrupt the
---! scheduler tick or another message.
-fn calendar_events_text email time_min_sec time_max_sec
-    if email == nil || email == ""
-        return nil
-    --! Lazy MCP loading: this runs from the scheduler (sched_tick), OUTSIDE
-    --! the normal message flow that would otherwise connect "google" on
-    --! demand (ensure_mcp_for_task) — a scheduled check has no message
-    --! text to keyword-match against. Check explicitly instead of relying
-    --! on the try/catch below to paper over "tool not registered".
-    if !(mcp.is_connected "google")
-        return nil
-    t_min: format_time time_min_sec "2006-01-02T15:04:05Z"
-    t_max: format_time time_max_sec "2006-01-02T15:04:05Z"
-    try
-        return (tool_call "google_get_events" {user_google_email: email, calendar_id: "primary", time_min: t_min, time_max: t_max})
-    catch e
-        return nil
-
---! Parses a get_events response into [{id, line}, ...]. No raw JSON
---! available (only formatted text: '- "Title" (Starts: ...) ID: <id> |
---! Link: ...' per line) — so it searches line by line for 'ID: '. Fragile
---! against format changes in the MCP server, but more practical than the
---! alternative (no structured result available).
-fn parse_calendar_events text
-    out: []
-    if text == nil || text == ""
-        return out
-    lines: split text "\n"
-    for line in lines
-        idx: index_of line "ID: "
-        if idx >= 0
-            rest: substring line (idx + 4) (len line)
-            endidx: index_of rest " | Link"
-            id: rest
-            if endidx >= 0
-                id: substring rest 0 endidx
-            push out {id: (trim id), line: line}
-    out
-
---! Meta key for the dedup list of already-reported calendar events
---! (format: "<id>:<unix_ts>,<id>:<unix_ts>,..."). Title+start time could
---! also have worked as a dedup key, but get_events includes a real event
---! ID in the text — more reliable than free-text matching.
-NOTIFIED_CAL_KEY: "notified_calendar_events"
-
---! Same idea, for already-checked Gmail message ids (see email_notify_new
---! below) — a message only ever needs to be judged for importance ONCE,
---! whether or not it turned out worth a notification.
-NOTIFIED_MAIL_KEY: "notified_gmail_messages"
-
---! Loads a dedup list stored under meta key `key` (see NOTIFIED_CAL_KEY/
---! NOTIFIED_MAIL_KEY), removes entries older than 24h (so the list doesn't
---! grow unbounded for daily recurring events/frequent mail checks).
-fn load_notified_ids dbh key
-    raw: mem.meta_get dbh key
-    out: {}
-    if raw != nil && raw != ""
-        cutoff: now - 86400
-        for p in (split raw ",")
-            kv: split p ":"
-            if (len kv) == 2
-                ts: to_num (at kv 1)
-                if ts > cutoff
-                    set out (at kv 0) ts
-    out
-
-fn save_notified_ids dbh key idmap
-    parts: []
-    for id in (keys idmap)
-        push parts (id ++ ":" ++ (to_str (get idmap id)))
-    mem.meta_set dbh key (join parts ",")
-
---! Proactive calendar reminder: checks upcoming appointments within the
---! configured lead window (calendar_reminder_minutes) and reports new (not
---! yet reported) appointments once via Telegram — dedup via
---! load_notified_ids/save_notified_ids prevents repeats on every
---! 15-minute tick.
-fn calendar_notify_new token dbh cid email window_minutes
-    text: calendar_events_text email now (now + window_minutes * 60)
-    events: parse_calendar_events text
-    if (len events) == 0
-        return nil
-    notified: load_notified_ids dbh NOTIFIED_CAL_KEY
-    changed: false
-    for ev in events
-        id: get ev "id"
-        if (get notified id) == nil
-            try
-                tel.tel_send_message token (to_num cid) ("📅 Coming up: " ++ (get ev "line"))
-            catch e6
-                --! Still gets marked as "notified" (no repeat) — so it's
-                --! important to at least log a failed send instead of
-                --! losing it silently.
-                print ("Failed to send calendar reminder: " ++ (to_str e6))
-                mem.log_error dbh "calendar_reminder_send" (to_str e6)
-            set notified id now
-            changed: true
-    if changed
-        save_notified_ids dbh NOTIFIED_CAL_KEY notified
-
---! Calls the Gmail search MCP tool for messages newer than the given
---! window and extracts their message ids (no raw JSON available, only the
---! formatted text the MCP tool returns — same tradeoff as
---! calendar_events_text/parse_calendar_events). Purely best-effort: a
---! failed proactive check must never disrupt the scheduler tick.
-fn gmail_new_message_ids email window_minutes
-    if email == nil || email == ""
-        return []
-    --! Lazy MCP loading: see the identical guard/comment at
-    --! calendar_events_text above — this also runs from the scheduler,
-    --! outside the message flow that would otherwise connect "google" on
-    --! demand.
-    if !(mcp.is_connected "google")
-        return []
-    query: "newer_than:" ++ (to_str (window_minutes + 5)) ++ "m"
-    text: nil
-    try
-        text: tool_call "google_search_gmail_messages" {user_google_email: email, query: query, page_size: 15}
-    catch e10
-        return []
-    if text == nil
-        return []
-    --! Searches for "Message ID: " ANYWHERE in the line, not as a prefix:
-    --! the tool's actual output nests it ("  1. Message ID: <id>"), and
-    --! also has "Thread ID: " lines right below it that a naive prefix
-    --! check could confuse — index_of matches only the exact substring, so
-    --! it can't accidentally hit those. Same approach as
-    --! parse_calendar_events above for "ID: ".
-    ids: []
-    for line in (split text "\n")
-        idx: index_of line "Message ID: "
-        if idx >= 0
-            push ids (trim (substring line (idx + 12) (len line)))
-    ids
-
---! Proactive new-mail check: finds genuinely new messages (dedup via
---! load_notified_ids/save_notified_ids, same mechanism as
---! calendar_notify_new) and, if there are any, lets the AI judge whether
---! ANY of them are important enough to interrupt the user about — most new
---! mail is newsletters/marketing/notifications (live-checked against a
---! real inbox: even the most recent messages were mostly promotional), so
---! unconditionally notifying on every new message would just be noise.
---! Every new message gets marked as checked regardless of the verdict, so
---! it's never re-judged on the next tick.
-fn email_notify_new token dbh cid email
-    ids: gmail_new_message_ids email 65
-    if (len ids) == 0
-        return nil
-    notified: load_notified_ids dbh NOTIFIED_MAIL_KEY
-    new_ids: []
-    for id in ids
-        if (get notified id) == nil
-            push new_ids id
-    if (len new_ids) == 0
-        return nil
-    try
-        content: tool_call "google_get_gmail_messages_content_batch" {user_google_email: email, message_ids: new_ids}
-        if content != nil && content != ""
-            verdict: ai_chat "You screen new emails for a personal assistant. Given the raw content of one or more new emails, decide: is ANY of them important or time-sensitive enough that the user should be interrupted about it right now (e.g. from a real person, needs a timely reply/action)? Newsletters, marketing, automated notifications, and routine confirmations are NOT important. If none of them are important, respond with EXACTLY the single word NOTHING and nothing else. Otherwise write a short, concrete notification (1-2 sentences per relevant email: sender, subject, what it's about) for ONLY the important one(s) — ignore the unimportant ones entirely." content
-            if verdict != nil && (lower (trim verdict)) != "nothing" && (trim verdict) != ""
-                tel.tel_send_message token (to_num cid) ("📬 " ++ (trim verdict))
-    catch e11
-        print ("Email importance check failed: " ++ (to_str e11))
-        mem.log_error dbh "email_check_judge" (to_str e11)
-    for id in new_ids
-        set notified id now
-    save_notified_ids dbh NOTIFIED_MAIL_KEY notified
 
 --! Scheduler tick (P4): proactively fires due reminders/briefings — runs
 --! in the bot loop after every poll, single-threaded (no goroutine/DB
@@ -2175,18 +1685,18 @@ fn sched_tick token allowed
         if kind == "briefing"
             msg: sched.compose_briefing dbh
             if mcp.is_connected "google" && user_google_email != nil && user_google_email != ""
-                evt: calendar_events_text user_google_email now_sec (day_end_sec now_sec tz_offset)
-                if (len (parse_calendar_events evt)) > 0
+                evt: ce.calendar_events_text user_google_email now_sec (ce.day_end_sec now_sec tz_offset)
+                if (len (ce.parse_calendar_events evt)) > 0
                     msg: msg ++ "\n\n📅 Today's appointments:\n" ++ evt
         if kind == "calendar_check"
             if mem.setting_proaktiv_enabled dbh (to_str cid)
-                calendar_notify_new token dbh cid user_google_email calendar_reminder_minutes
+                ce.calendar_notify_new token dbh cid user_google_email calendar_reminder_minutes
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
             continue
         if kind == "email_check"
             if mem.setting_proaktiv_enabled dbh (to_str cid)
                 try
-                    email_notify_new token dbh cid user_google_email
+                    ce.email_notify_new token dbh cid user_google_email
                 catch e12
                     print ("email_check failed: " ++ (to_str e12))
                     mem.log_error dbh "email_check" (to_str e12)
@@ -2234,7 +1744,7 @@ fn sched_tick token allowed
             if job != nil
                 beschreibung: get job "description"
                 ergebnis: (get job "status") ++ ": " ++ (to_str (get job "result"))
-            continuation: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "A previously background-started Docker setup has finished. Description: " ++ beschreibung ++ ". Result (incl. container logs/test output, if available): " ++ ergebnis ++ ". Report to the user briefly and cleanly formatted what happened — for test runs: how many tests ran, passed/failed, the most important error message if failed. If the original task still needs a next step, initiate it directly (e.g. calling 'docker_hintergrund_setup' again)."
+            continuation: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "A previously background-started Docker setup has finished. Description: " ++ beschreibung ++ ". Result (incl. container logs/test output, if available): " ++ ergebnis ++ ". Report to the user briefly and cleanly formatted what happened — for test runs: how many tests ran, passed/failed, the most important error message if failed, and explicitly confirm this was a REAL execution with real output (quote the concrete exit status/result), not a claim — a clear, confident report here avoids the user having to ask again whether it actually ran. If the original task still needs a next step, initiate it directly (e.g. calling 'docker_hintergrund_setup' again) — but repeating the SAME task again shortly after will be blocked by its own cooldown and return the existing result instead of starting a new container."
             --! MUST be caught: an uncaught exception here (e.g. a transient
             --! AI-provider timeout) would unwind straight out of sched_tick,
             --! skipping mem.close_locked at the end and leaking the
@@ -2329,7 +1839,7 @@ fn sched_tick token allowed
                     res_proaktiv: grm.run_gremium_stream dbh cid prompt_proaktiv on_update_bg3 round_check_bg3
                     content_proaktiv: get res_proaktiv "content"
                     if content_proaktiv != nil && (lower (trim content_proaktiv)) != "nothing" && (trim content_proaktiv) != ""
-                        tel.tel_send_rich_message token (to_num cid) (shorten (trim content_proaktiv)) nil
+                        tel.tel_send_rich_message token (to_num cid) (cmd.shorten (trim content_proaktiv)) nil
                 catch e15
                     print ("proaktiv failed: " ++ (to_str e15))
                     mem.log_error dbh "proaktiv" (to_str e15)
@@ -2353,7 +1863,7 @@ fn sched_tick token allowed
                     diag_msg: "⚠️ Self-diagnosis: these errors occurred repeatedly over the last 3 days, might be worth a look:\n"
                     for row in auffaellig
                         diag_msg: diag_msg ++ "• " ++ (get row "tag") ++ " (" ++ (to_str (get row "cnt")) ++ "x, last at " ++ (get row "last_ts") ++ ")\n"
-                    tel.tel_send_message token (to_num cid) (shorten diag_msg)
+                    tel.tel_send_message token (to_num cid) (cmd.shorten diag_msg)
             sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
             continue
         if kind == "workspace_aufraeumen"
@@ -2629,6 +2139,29 @@ else
             print "TELEGRAM_BOT_TOKEN is missing (env or .env). Aborting."
         else
             print "Muninn started."
+            --! Bot's own identity — needed for group-chat @mention/reply
+            --! detection (see is_addressed_in_group). Best-effort: a
+            --! failure here must not stop the bot from starting, group
+            --! chats just won't be addressable by @mention until the next
+            --! successful restart (a private chat and slash commands in a
+            --! group are unaffected).
+            try
+                me: tel.tel_get_me tok
+                if (get me "ok") == true
+                    result_me: get me "result"
+                    BOT_ID: get result_me "id"
+                    BOT_USERNAME: get result_me "username"
+            catch e_getme
+                print ("tel_get_me failed (group @mentions won't work until next restart): " ++ (to_str e_getme))
+            --! owner_chat_id allowed: TELEGRAM_ALLOWED_CHAT_ID can hold
+            --! several comma-separated chat ids now that group support
+            --! exists (owner's private chat, plus one or more groups) — a
+            --! scheduled background message always targets the single
+            --! OWNER chat specifically, never the raw multi-value
+            --! allow-list string (which crashed the WHOLE scheduler cycle
+            --! every tick once a group was added — "to_num:
+            --! '8288410155,-1004450121859' is not a number").
+            owner_cid: owner_chat_id allowed
             --! Proactive calendar reminders (see calendar_notify_new above):
             --! automatically active once Google is connected AND a fixed
             --! TELEGRAM_ALLOWED_CHAT_ID is configured — without a configured
@@ -2637,15 +2170,15 @@ else
             --! only registers if no "calendar_check" exists yet for this
             --! chat (otherwise duplicate scheduler entries would pile up on
             --! every restart).
-            if mcp.is_connected "google" && allowed != nil && allowed != ""
+            if mcp.is_connected "google" && owner_cid != nil
                 hlc: mem.open_locked nil
                 dbhc: get hlc "h"
                 has_check: false
-                for e in (sched.list dbhc allowed)
+                for e in (sched.list dbhc owner_cid)
                     if (get e "kind") == "calendar_check"
                         has_check: true
                 if !has_check
-                    sched.schedule dbhc "calendar_check" allowed "" (now + 60) "15min"
+                    sched.schedule dbhc "calendar_check" owner_cid "" (now + 60) "15min"
                     print "Proactive calendar reminders activated."
                 mem.close_locked hlc
             --! Proactive new-mail check (see email_notify_new above): same
@@ -2653,15 +2186,15 @@ else
             --! hourly instead of every 15min (a lightweight importance
             --! judgment runs per new message, no need to check as often as
             --! upcoming-appointment reminders).
-            if mcp.is_connected "google" && allowed != nil && allowed != ""
+            if mcp.is_connected "google" && owner_cid != nil
                 hle: mem.open_locked nil
                 dbhe: get hle "h"
                 has_email_check: false
-                for e in (sched.list dbhe allowed)
+                for e in (sched.list dbhe owner_cid)
                     if (get e "kind") == "email_check"
                         has_email_check: true
                 if !has_email_check
-                    sched.schedule dbhe "email_check" allowed "" (now + 120) "hourly"
+                    sched.schedule dbhe "email_check" owner_cid "" (now + 120) "hourly"
                     print "Proactive email checks activated."
                 mem.close_locked hle
             --! Daily proactive self-initiative (see sched_tick, kind
@@ -2672,16 +2205,16 @@ else
             --! calendar_check above). Idempotent: only ONE "proaktiv" entry
             --! per chat, otherwise duplicate ticks would pile up on every
             --! restart.
-            if allowed != nil && allowed != ""
+            if owner_cid != nil
                 hlp: mem.open_locked nil
                 dbhp: get hlp "h"
                 has_proaktiv: false
-                for e in (sched.list dbhp allowed)
+                for e in (sched.list dbhp owner_cid)
                     if (get e "kind") == "proaktiv"
                         has_proaktiv: true
                 if !has_proaktiv
                     proaktiv_due: sched.next_hhmm 12 0 now tz_offset
-                    sched.schedule dbhp "proaktiv" allowed "" proaktiv_due "daily"
+                    sched.schedule dbhp "proaktiv" owner_cid "" proaktiv_due "daily"
                     print "Daily proactive self-initiative activated."
                 mem.close_locked hlp
             --! Daily self-diagnosis (see sched_tick, kind "selbstdiagnose"):
@@ -2692,16 +2225,16 @@ else
             --! self-initiative). A different time than the briefing (08:00)
             --! and self-initiative (12:00), so proactive messages don't
             --! cluster. Idempotent like the two entries above.
-            if allowed != nil && allowed != ""
+            if owner_cid != nil
                 hld: mem.open_locked nil
                 dbhd: get hld "h"
                 has_diag: false
-                for e in (sched.list dbhd allowed)
+                for e in (sched.list dbhd owner_cid)
                     if (get e "kind") == "selbstdiagnose"
                         has_diag: true
                 if !has_diag
                     diag_due: sched.next_hhmm 9 0 now tz_offset
-                    sched.schedule dbhd "selbstdiagnose" allowed "" diag_due "daily"
+                    sched.schedule dbhd "selbstdiagnose" owner_cid "" diag_due "daily"
                     print "Daily self-diagnosis activated."
                 mem.close_locked hld
             --! Daily workspace cleanup (see sched_tick, kind
@@ -2711,16 +2244,16 @@ else
             --! organize_mcp_data's doc comment in swarm.pipe). A quiet,
             --! off-hours time so it never competes with the briefing/
             --! self-initiative/self-diagnosis slots. Idempotent like those.
-            if allowed != nil && allowed != ""
+            if owner_cid != nil
                 hlw: mem.open_locked nil
                 dbhw: get hlw "h"
                 has_cleanup: false
-                for e in (sched.list dbhw allowed)
+                for e in (sched.list dbhw owner_cid)
                     if (get e "kind") == "workspace_aufraeumen"
                         has_cleanup: true
                 if !has_cleanup
                     cleanup_due: sched.next_hhmm 3 0 now tz_offset
-                    sched.schedule dbhw "workspace_aufraeumen" allowed "" cleanup_due "daily"
+                    sched.schedule dbhw "workspace_aufraeumen" owner_cid "" cleanup_due "daily"
                     print "Daily workspace cleanup activated."
                 mem.close_locked hlw
             try
