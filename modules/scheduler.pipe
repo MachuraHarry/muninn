@@ -240,6 +240,28 @@ export fn parse_reminder text now_sec offset_sec
         out: parse_reminder_rule text now_sec offset_sec
     out
 
+--! Parses a time/schedule description (natural language) into {due,
+--! repeat} ONLY — unlike parse_reminder above, does NOT also try to
+--! extract reminder text (the caller already has a separate, clean task
+--! description, see grm.tool_aufgabe_planen — a self-scheduled REAL
+--! action, not a passive text reminder). repeat: "" | "hourly" | "daily"
+--! | "weekly".
+export fn parse_zeitpunkt text now_sec offset_sec
+    out: {due: now_sec + 3600, repeat: ""}
+    try
+        local_now: now_sec + offset_sec
+        j: ai_chat_json ("Extract from a time/schedule description: 'due_in_seconds' (integer, how many seconds from now the FIRST occurrence should fire) and 'repeat' (one of: once, hourly, daily, weekly). If no clear time is recognizable, use 3600 and 'once'. Right now it is " ++ (format_time local_now "2006-01-02 15:04:05") ++ " (the user's local time — times mentioned like 'at 8pm' or 'daily at 9am' refer to this local time).") text
+        d: get j "due_in_seconds"
+        r: get j "repeat"
+        if d != nil
+            set out "due" (now_sec + d)
+        if r == "hourly" || r == "daily" || r == "weekly"
+            set out "repeat" r
+    catch e2
+        rule: parse_reminder_rule text now_sec offset_sec
+        set out "due" (get rule "due")
+    out
+
 --! Builds the daily briefing text deterministically from the soul (top
 --! memories + open goals + recent events). No AI call needed — the raw
 --! data speaks for itself; Muninn can refine it later.

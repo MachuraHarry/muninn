@@ -111,6 +111,14 @@ fn setup_sandbox servers
     --! directly via exec() — same pattern as tts_synth.sh, only file paths
     --! passed in, no AI-controllable flags.
     push wl "html_to_pdf.sh"
+    --! "archiv_erstellen.sh"/"archiv_entpacken.sh" added to the whitelist:
+    --! swarm.pipe (tool_archiv_erstellen/tool_archiv_entpacken) call the
+    --! fixed zip/tar pipelines directly via exec() — same pattern as
+    --! tts_synth.sh/html_to_pdf.sh, only paths (already validated against
+    --! mcp_data/, see resolve_mcp_data_path) and a strict format enum are
+    --! passed in, no free-form flags.
+    push wl "archiv_erstellen.sh"
+    push wl "archiv_entpacken.sh"
     --! "systemd-notify" added to the whitelist: the main loop (see below)
     --! uses it to periodically check in with the systemd watchdog
     --! (WatchdogSec in muninn.service) — a purely trusted system command with
@@ -258,6 +266,72 @@ fn resolve_mcp_proposal token dbh cid approved
         tel.tel_send_message token cid ("✅ '" ++ alias ++ "' hinzugefuegt und verbunden.")
     else
         tel.tel_send_message token cid ("❌ Hinzugefuegt, aber Verbindung fehlgeschlagen: " ++ (get r "error"))
+    nil
+
+--! Resolves the single pending PLAN proposal (mem meta key "pending_plan",
+--! see tool_plan_vorschlagen in swarm.pipe) — same shape as
+--! resolve_mcp_proposal above, shared by handle_callback's "plan_yes"/
+--! "plan_no" button taps AND handle_message's/make_round_check's
+--! deterministic pending-plan gates, so a typed "ja"/"nein" behaves
+--! identically to tapping the button. On approval, converts the proposed
+--! step TEXTS into a tracked checklist ("active_plan:<cid>", status
+--! "offen"/"arbeitet"/"fertig" per step — see render_plan/
+--! tool_plan_schritt_markieren/make_swarm_updater) and immediately starts
+--! a real gremium run to carry the plan out, exactly like sched_tick's
+--! job_check/task_check (run_gremium_stream + round_check/on_update, so
+--! /stop and the live tree both work normally during execution).
+fn resolve_plan_proposal token dbh cid approved allowed
+    raw: mem.meta_get dbh "pending_plan"
+    if raw == nil || raw == ""
+        tel.tel_send_message token cid "Dieser Plan ist nicht mehr gueltig."
+        return nil
+    mem.meta_set dbh "pending_plan" ""
+    if !approved
+        tel.tel_send_message token cid "Verstanden, Plan verworfen."
+        return nil
+    prop: nil
+    try
+        prop: parse_json raw
+    catch
+        prop: nil
+    steps: nil
+    if prop != nil
+        steps: get prop "steps"
+    if steps == nil || (len steps) == 0
+        tel.tel_send_message token cid "Plan konnte nicht gelesen werden — nicht umgesetzt."
+        return nil
+    items: []
+    for s in steps
+        push items {text: s, status: "offen"}
+    mem.meta_set dbh ("active_plan:" ++ (to_str cid)) (to_json {items: items})
+    ph: tel.tel_send_message token cid "✅ Plan bestaetigt — ich lege los..."
+    message_id: nil
+    if (get ph "ok") == true
+        message_id: get (get ph "result") "message_id"
+    setup_sandbox all_mcp_servers
+    numbered: ""
+    i: 0
+    while i < (len steps)
+        numbered: numbered ++ (to_str (i + 1)) ++ ". " ++ (at steps i) ++ "\n"
+        i: i + 1
+    continuation: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "The user just APPROVED this plan — carry it out now, step by step, in order, calling whichever tools each step actually needs. Right when you START a step, call 'plan_schritt_markieren' with that step's 1-based index and status 'arbeitet'; right when you FINISH it, call it again with status 'fertig', before moving to the next step. Plan:\n" ++ numbered
+    on_update_plan: make_swarm_updater token cid message_id dbh
+    round_check_plan: make_round_check token cid allowed dbh nil
+    --! MUST be caught — same reason as job_check/task_check/proaktiv in
+    --! sched_tick: an uncaught exception here would skip the
+    --! active_plan cleanup below and leave a stale checklist behind
+    --! (harmless but confusing on the NEXT unrelated run).
+    try
+        res: grm.run_gremium_stream dbh cid continuation on_update_plan round_check_plan
+        if (get res "aborted") == true
+            tel.tel_send_message token cid ("🛑 " ++ (get res "abort_reason"))
+        else
+            tel.tel_send_rich_message token cid (get res "content") nil
+    catch e18
+        print ("plan execution failed: " ++ (to_str e18))
+        mem.log_error dbh "plan_execution" (to_str e18)
+        tel.tel_send_message token cid "Bei der Plan-Umsetzung ist technisch etwas schiefgelaufen — bitte nochmal anstossen."
+    mem.meta_set dbh ("active_plan:" ++ (to_str cid)) ""
     nil
 
 --! Checks whether a chat ID is allowed to be served (empty whitelist = allow all).
@@ -889,6 +963,20 @@ fn handle_message token cid text dbh allowed uid
             prop_name: "?"
         tel.tel_send_message token cid ("Du hast noch einen offenen MCP-Server-Vorschlag zur Bestaetigung ('" ++ prop_name ++ "') — antworte erst mit Ja/Nein oder tippe den Button an, dann kuemmere ich mich um deine naechste Anfrage.")
         return nil
+    --! Deterministic pending-PLAN-proposal gate (see tool_plan_vorschlagen/
+    --! resolve_plan_proposal) — identical rationale/shape as the MCP gate
+    --! right above it: while a plan awaits Ja/Nein, every message is
+    --! intercepted here rather than trusting the gremium to notice.
+    pending_plan: mem.meta_get dbh "pending_plan"
+    if pending_plan != nil && pending_plan != ""
+        if low == "ja" || low == "yes" || low == "y" || low == "✅"
+            resolve_plan_proposal token dbh cid true allowed
+            return nil
+        if low == "nein" || low == "no" || low == "n" || low == "❌"
+            resolve_plan_proposal token dbh cid false allowed
+            return nil
+        tel.tel_send_message token cid "Du hast noch einen offenen Plan zur Bestaetigung — antworte erst mit Ja/Nein oder tippe den Button an, dann kuemmere ich mich um deine naechste Anfrage."
+        return nil
     if is_mcp_server_question low
         names: list_configured_mcp_aliases 0
         if (len names) == 0
@@ -1202,12 +1290,29 @@ fn make_swarm_updater token cid message_id dbh
     --! the "📜 Verlauf" button always shows the complete run regardless of
     --! this setting.
     verlauf_mode: mem.setting_get dbh (to_str cid) "live_verlauf" "voll"
-    stream_state: {groups: [], current: "", last_text: "", last_ms: 0, last_typing_ms: 0}
-    fn on_update agent event detail args_json
+    stream_state: {groups: [], current: "", last_text: "", last_ms: 0, last_typing_ms: 0, plan: [], plan_loaded: false}
+    fn on_update agent event detail args_json round max_rounds
         ms: time_ms
         if (ms - (get stream_state "last_typing_ms")) >= 4000
             set stream_state "last_typing_ms" ms
             tel.tel_send_chat_action token cid "typing"
+        --! Lazily seed the plan checklist (see resolve_plan_proposal/
+        --! tool_plan_schritt_markieren) from "active_plan:<cid>" the FIRST
+        --! time this updater fires for a run — ONCE, not per event, so a
+        --! plan-execution run's checklist renders from round 1 even before
+        --! the model calls plan_schritt_markieren for step 1. A normal
+        --! (non-plan) run simply finds nothing there and stays empty.
+        if (get stream_state "plan_loaded") == false
+            set stream_state "plan_loaded" true
+            araw: mem.meta_get dbh ("active_plan:" ++ (to_str cid))
+            if araw != nil && araw != ""
+                try
+                    aparsed: parse_json araw
+                    aitems: get aparsed "items"
+                    if aitems != nil
+                        set stream_state "plan" aitems
+                catch e_plan_seed
+                    nil
         groups: get stream_state "groups"
         if event == "final"
             if (len groups) > 0
@@ -1217,15 +1322,20 @@ fn make_swarm_updater token cid message_id dbh
             --! agent = the agent handing off (Go's onProgress passes
             --! "current"); detail = the target agent's name.
             if (len groups) > 0
-                text: "hands off to " ++ (ls.agent_icon_name detail)
+                --! No extra "-->" prefix here — render_group's own "└─> "
+                --! tree connector already conveys the handoff arrow
+                --! visually; adding another one duplicated it (live-caught
+                --! in testing: "└─> --> 🔍[MIMIR]").
+                text: ls.agent_icon_name detail
                 reason: ls.handoff_reason args_json
                 if reason != ""
-                    --! Italic, not quoted — reason is model-written free
-                    --! text and often already contains its own "quoted
-                    --! terms", which visually collided with a literal
-                    --! wrapping quote (looked like a stray doubled mark
-                    --! right at the start).
-                    text: text ++ ": *" ++ reason ++ "*"
+                    --! "// reason", not italic/quoted — the whole tree now
+                    --! renders inside a ``` code block (see render_groups),
+                    --! where Telegram doesn't apply nested markdown at all;
+                    --! "//" reads as a terminal/code comment instead, and
+                    --! sidesteps reason text that already contains its own
+                    --! "quoted terms" colliding with a wrapping quote.
+                    text: text ++ " // " ++ reason
                 push (get (at groups ((len groups) - 1)) "lines") {text: text, handoff: true}
         if event == "start"
             --! Per-agent model/timeout routing (deepseek-v4-pro for
@@ -1242,7 +1352,27 @@ fn make_swarm_updater token cid message_id dbh
             if last_group == nil || (get last_group "agent") != agent
                 push groups {agent: agent, lines: []}
                 set stream_state "current" ""
-        if event == "tool" || event == "reasoning" || event == "inject"
+        if event == "tool" && detail == "plan_schritt_markieren"
+            --! Special-cased, NOT added as a normal tree line — the plan
+            --! checklist (rendered below) already shows this transition
+            --! clearly (○/◌/●), a redundant ">> plan_schritt_markieren(...)"
+            --! line would only add noise. Persisted back to
+            --! "active_plan:<cid>" so a LATER re-created updater (e.g. a
+            --! sched_tick "task_check" continuation, see
+            --! resolve_plan_proposal) picks up where this one left off.
+            plan: get stream_state "plan"
+            if plan != nil && (len plan) > 0
+                try
+                    pargs: parse_json args_json
+                    idx: to_num (get pargs "index")
+                    pstatus: to_str (get pargs "status")
+                    if idx >= 1 && idx <= (len plan) && (pstatus == "arbeitet" || pstatus == "fertig")
+                        item: at plan (idx - 1)
+                        set item "status" pstatus
+                        mem.meta_set dbh ("active_plan:" ++ (to_str cid)) (to_json {items: plan})
+                catch e_plan_mark
+                    nil
+        else if event == "tool" || event == "reasoning" || event == "inject"
             bare: ls.swarm_transcript_line event detail args_json
             if bare != ""
                 if (len groups) == 0
@@ -1251,21 +1381,36 @@ fn make_swarm_updater token cid message_id dbh
                 set stream_state "current" bare
         if (len groups) == 0
             return nil
+        plan_now: get stream_state "plan"
+        plan_prefix: ""
+        if plan_now != nil && (len plan_now) > 0
+            plan_prefix: (ls.render_plan plan_now) ++ "\n\n"
         text: ""
         if verlauf_mode == "knapp"
-            text: (ls.agent_icon_name agent) ++ " " ++ (ls.agent_verb_phrase agent)
+            bar: ls.render_progress_bar round max_rounds
+            head: (ls.agent_icon_name agent) ++ " :: " ++ (ls.agent_verb_phrase agent)
+            if bar != ""
+                head: head ++ " " ++ bar
+            text: plan_prefix ++ head
             if (get stream_state "current") != ""
                 text: text ++ "\n" ++ (get stream_state "current")
         else
-            text: ls.render_groups groups
+            text: plan_prefix ++ (ls.render_groups groups round max_rounds)
         if text == (get stream_state "last_text")
             return nil
         if (ms - (get stream_state "last_ms")) < 1000
             return nil
         set stream_state "last_text" text
         set stream_state "last_ms" ms
+        --! Stylized right before send, not baked into render_groups/
+        --! render_plan themselves — "text" above stays plain for the
+        --! dedup check and for last_run_log's persisted JSON (see
+        --! ls.to_math_mono: live-tested and explicitly requested by Harry
+        --! after seeing a one-off simulation of the whole tree in this
+        --! style, unlike the earlier ANSI-color attempt which he asked to
+        --! revert).
         if message_id != nil
-            tel.tel_edit_message_text token cid message_id text
+            tel.tel_edit_message_text token cid message_id (ls.to_math_mono text)
     on_update
 
 --! Builds the round_check closure for run_gremium_stream (see its doc
@@ -1378,6 +1523,20 @@ fn make_round_check token cid allowed dbh uid
                                 resolve_mcp_proposal token dbh cid false
                             else
                                 tel.tel_send_message token cid "Du hast noch einen offenen MCP-Server-Vorschlag zur Bestaetigung — antworte erst mit Ja/Nein oder tippe den Button an, dann kuemmere ich mich um deine naechste Anfrage."
+                            continue
+                        --! Identical rationale as the pending-MCP check right
+                        --! above — see tool_plan_vorschlagen/
+                        --! resolve_plan_proposal.
+                        pending_plan: mem.meta_get dbh "pending_plan"
+                        if pending_plan != nil && pending_plan != ""
+                            push (get state "injected_ids") this_uid
+                            mem.mark_injected dbh this_uid
+                            if low == "ja" || low == "yes" || low == "y" || low == "✅"
+                                resolve_plan_proposal token dbh cid true allowed
+                            else if low == "nein" || low == "no" || low == "n" || low == "❌"
+                                resolve_plan_proposal token dbh cid false allowed
+                            else
+                                tel.tel_send_message token cid "Du hast noch einen offenen Plan zur Bestaetigung — antworte erst mit Ja/Nein oder tippe den Button an, dann kuemmere ich mich um deine naechste Anfrage."
                             continue
                         push (get state "injected_ids") this_uid
                         mem.mark_injected dbh this_uid
@@ -1529,7 +1688,7 @@ fn handle_callback token dbh cbq allowed uid
         if groups == nil || (len groups) == 0
             tel.tel_send_message token cid "No detailed log available for the last run."
         else
-            tel.tel_send_message token cid ("📜 **Full run log:**\n\n" ++ (ls.render_groups groups))
+            tel.tel_send_message token cid ("📜 **Full run log:**\n\n" ++ (ls.to_math_mono (ls.render_groups groups nil nil)))
         return nil
     if data == "more"
         if txt != nil
@@ -1626,6 +1785,17 @@ fn handle_callback token dbh cbq allowed uid
         return nil
     if data == "mcp_add_no"
         resolve_mcp_proposal token dbh cid false
+        return nil
+    --! Plan proposal (see tool_plan_vorschlagen in swarm.pipe): same shape
+    --! as the MCP buttons right above — the only code paths that actually
+    --! start plan execution are this button tap and handle_message's/
+    --! make_round_check's deterministic "ja"/"nein" gates, all three
+    --! calling the same shared resolve_plan_proposal.
+    if data == "plan_yes"
+        resolve_plan_proposal token dbh cid true allowed
+        return nil
+    if data == "plan_no"
+        resolve_plan_proposal token dbh cid false allowed
         return nil
     --! /settings menu (see settings_menu_text/settings_kb above): each
     --! button rotates its OWN setting to the next value (setting_cycle in
@@ -1812,6 +1982,37 @@ fn sched_tick token allowed
             catch e14
                 print ("task_check failed: " ++ (to_str e14))
                 mem.log_error dbh "task_check" (to_str e14)
+            continue
+        if kind == "eigene_aufgabe"
+            --! Self-scheduled task (see grm.tool_aufgabe_planen): unlike
+            --! "reminder" below (a passive text-only nudge), this is a REAL
+            --! action the user asked Muninn to plan for itself — note holds
+            --! the full task description. Runs a real gremium round exactly
+            --! like job_check/task_check/proaktiv above (full tool access),
+            --! autonomously, then reports the concrete result to the user.
+            --! Live-observed why this had to be a real, separately-dispatched
+            --! kind (not just text): Muninn once claimed to have "set a
+            --! timer" for exactly this kind of request without actually
+            --! scheduling anything at all — this closes that gap for real.
+            setup_sandbox all_mcp_servers
+            continuation3: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "This is a SELF-SCHEDULED task you (or the user, via 'aufgabe_planen') set up earlier for exactly this moment. Task: " ++ msg ++ ". Carry it out now for real (call whatever tools are actually needed) and report the concrete result to the user — never claim it's done without having actually called the necessary tools."
+            --! MUST be caught — see the identical comment in job_check above
+            --! (an uncaught exception here would leak sched_tick's DB lock
+            --! forever). Left un-cancelled/un-rescheduled on failure for a
+            --! one-off entry, so it's naturally retried next tick instead of
+            --! silently lost — mark_fired below only runs on success.
+            try
+                on_update_bg5: make_swarm_updater token cid nil dbh
+                round_check_bg5: make_round_check token cid allowed dbh nil
+                res3: grm.run_gremium_stream dbh cid continuation3 on_update_bg5 round_check_bg5
+                if (get res3 "aborted") == true
+                    tel.tel_send_message token (to_num cid) ("🛑 " ++ (get res3 "abort_reason"))
+                else
+                    tel.tel_send_rich_message token (to_num cid) (get res3 "content") nil
+                sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
+            catch e17
+                print ("eigene_aufgabe failed: " ++ (to_str e17))
+                mem.log_error dbh "eigene_aufgabe" (to_str e17)
             continue
         if kind == "proaktiv"
             --! Proactive self-initiative (P4): Muninn was NOT addressed —

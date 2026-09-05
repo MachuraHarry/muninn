@@ -10,6 +10,41 @@
 --! split off first.
 import "modules/memory.pipe" as mem
 
+--! Mathematical Monospace A-Z / a-z (Unicode U+1D670-89 / U+1D68A-A3) —
+--! built once via hex_decode+from_bytes of their raw UTF-8 bytes rather
+--! than typing the astral characters directly into this source file (pipe
+--! string literals have no \uNNNN escape, and typing 4-byte-UTF-8 glyphs by
+--! hand in an edit risks a mistranscribed byte going in unnoticed — same
+--! class of risk as the stray literal ESC byte caught earlier this
+--! session). Used by to_math_mono for the "𝙷𝚎𝚒𝚖𝚍𝚊𝚕𝚕"-style styled agent
+--! names in agent_icon_name.
+MONO_UPPER: from_bytes (hex_decode "f09d99b0f09d99b1f09d99b2f09d99b3f09d99b4f09d99b5f09d99b6f09d99b7f09d99b8f09d99b9f09d99baf09d99bbf09d99bcf09d99bdf09d99bef09d99bff09d9a80f09d9a81f09d9a82f09d9a83f09d9a84f09d9a85f09d9a86f09d9a87f09d9a88f09d9a89")
+MONO_LOWER: from_bytes (hex_decode "f09d9a8af09d9a8bf09d9a8cf09d9a8df09d9a8ef09d9a8ff09d9a90f09d9a91f09d9a92f09d9a93f09d9a94f09d9a95f09d9a96f09d9a97f09d9a98f09d9a99f09d9a9af09d9a9bf09d9a9cf09d9a9df09d9a9ef09d9a9ff09d9aa0f09d9aa1f09d9aa2f09d9aa3")
+MONO_ALPHA_UPPER: "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+MONO_ALPHA_LOWER: "abcdefghijklmnopqrstuvwxyz"
+
+--! Converts plain ASCII letters in s to their Mathematical Monospace
+--! Unicode look-alikes (each is 4 UTF-8 bytes, hence the *4 offsets below —
+--! substring is byte-indexed, see MONO_UPPER/MONO_LOWER); anything that
+--! isn't A-Z/a-z (spaces, digits, punctuation) passes through unchanged.
+export fn to_math_mono s
+    out: ""
+    i: 0
+    n: len s
+    while i < n
+        ch: substring s i (i + 1)
+        idx: index_of MONO_ALPHA_UPPER ch
+        if idx >= 0
+            out: out ++ (substring MONO_UPPER (idx * 4) (idx * 4 + 4))
+        else
+            idx2: index_of MONO_ALPHA_LOWER ch
+            if idx2 >= 0
+                out: out ++ (substring MONO_LOWER (idx2 * 4) (idx2 * 4 + 4))
+            else
+                out: out ++ ch
+        i: i + 1
+    out
+
 --! Truncates a status snippet to n characters (for the live status line —
 --! unlike shorten (4000 characters, for Telegram messages) deliberately
 --! short here, so a single tool line doesn't blow up the whole status message.
@@ -155,33 +190,41 @@ fn agent_display_name agent
 
 --! Bare verb phrase for an agent's role, no icon/name (e.g. "is checking
 --! facts and memory...") — composed into agent_group_header below.
+--! Terse, lowercase terminal-status word per agent — no "is ...ing the
+--! answer..." prose, this reads as a process/daemon status readout (see
+--! agent_group_header/render_groups: the whole live tree is rendered
+--! inside a Telegram code block for a hacker-terminal look, see the
+--! comment on render_groups for why plain ASCII/no nested bold-italic).
 export fn agent_verb_phrase agent
     if agent == "planer"
-        return "is planning the answer..."
+        return "planning"
     if agent == "faktenwaechter"
-        return "is checking facts and memory..."
+        return "fact-checking"
     if agent == "kritiker"
-        return "is reviewing the answer..."
+        return "reviewing"
     if agent == "registrator"
-        return "is writing the answer..."
+        return "finalizing"
     if agent == "werkzeug_browser"
-        return "is scurrying across the web..."
+        return "crawling"
     if (len agent) > 9 && (substring agent 0 9) == "werkzeug_"
-        return "is working (" ++ (substring agent 9 (len agent)) ++ ")..."
-    "is thinking..."
+        return "working[" ++ (substring agent 9 (len agent)) ++ "]"
+    "thinking"
 
---! Icon + bold name for an agent, e.g. "🔍 **Mimir**" — the shared
---! identity fragment for the tree's group header and a handoff line's
---! target reference.
+--! Icon + bracketed styled name for an agent, e.g. "🔍[𝙼𝚒𝚖𝚒𝚛]" (see
+--! to_math_mono) — the shared identity fragment for the tree's group
+--! header and a handoff line's target reference. No markdown bold (**)
+--! here on purpose: the whole tree renders inside a ``` code block
+--! (render_groups), where Telegram doesn't apply nested bold/italic at
+--! all — plain brackets + the Mathematical Monospace styling read as the
+--! emphasis instead, terminal-log style.
 export fn agent_icon_name agent
     d: agent_display_name agent
-    (get d "icon") ++ " **" ++ (get d "name") ++ "**"
+    (get d "icon") ++ "[" ++ (to_math_mono (get d "name")) ++ "]"
 
---! Full-log group header: icon + bold name + em-dash + verb phrase (e.g.
---! "🔍 **Mimir** — is checking facts and memory...") — the dash reads
---! better as a standalone tree-branch header than run into the phrase.
+--! Full-log group header: icon+name tag + "::" + status word (e.g.
+--! "🔍[MIMIR] :: fact-checking") — a process-log line, not a sentence.
 fn agent_group_header agent
-    (agent_icon_name agent) ++ " — " ++ (agent_verb_phrase agent)
+    (agent_icon_name agent) ++ " :: " ++ (agent_verb_phrase agent)
 
 --! Icon for a tool call, by tool name — keeps the tree scannable at a
 --! glance instead of uniform text for everything. Falls back to a
@@ -259,10 +302,12 @@ fn tool_icon tool_name
 fn tool_call_detail_line detail args_json
     if detail == nil || detail == ""
         return ""
-    line: (tool_icon detail) ++ " " ++ detail
+    line: (tool_icon detail) ++ " >> " ++ detail
     arg_hint: tool_arg_summary detail args_json
     if arg_hint != ""
-        line: line ++ " \"" ++ arg_hint ++ "\""
+        line: line ++ "(\"" ++ arg_hint ++ "\")"
+    else
+        line: line ++ "()"
     line
 
 --! Bare content for a single "tool"/"reasoning"/"inject" progress event —
@@ -278,9 +323,9 @@ export fn swarm_transcript_line event detail args_json
     if event == "tool"
         return (tool_call_detail_line detail args_json)
     if event == "reasoning"
-        return "💭 *" ++ (truncate_status detail 150) ++ "*"
+        return "// " ++ (truncate_status detail 150)
     if event == "inject"
-        return "💬 **You**: " ++ (truncate_status detail 150)
+        return "[USER] >> " ++ (truncate_status detail 150)
     ""
 
 --! Extracts the optional "reason" note from a handoff tool call's raw
@@ -305,10 +350,18 @@ export fn handoff_reason args_json
 --! Renders one agent group as a tree branch: its header
 --! (agent_group_header) plus its collected entries, each a map
 --! {text, handoff} (see make_swarm_updater) — "├─ " for every entry but
---! the last, "└─▶ " for a trailing handoff (points at the target it's
---! handing off to), plain "└─ " for any other trailing entry.
-fn render_group g
+--! the last, "└─> " for a trailing handoff (points at the target it's
+--! handing off to, ASCII arrow to match the terminal-log look), plain
+--! "└─ " for any other trailing entry. is_current: only the LAST group in
+--! the whole run (the agent currently working) gets the progress bar
+--! appended to its header — round/max_rounds meaningless for a finished,
+--! earlier group.
+fn render_group g is_current round max_rounds
     header: agent_group_header (get g "agent")
+    if is_current
+        bar: render_progress_bar round max_rounds
+        if bar != ""
+            header: header ++ " " ++ bar
     lines: get g "lines"
     n: len lines
     if n == 0
@@ -320,7 +373,7 @@ fn render_group g
         connector: "├─ "
         if i == (n - 1)
             if (get entry "handoff") == true
-                connector: "└─▶ "
+                connector: "└─> "
             else
                 connector: "└─ "
         push rendered (connector ++ (get entry "text"))
@@ -330,23 +383,68 @@ fn render_group g
 --! Joins accumulated agent groups (see make_swarm_updater) into the full
 --! run tree — used both for the LIVE edited message while the gremium is
 --! working, and again afterward for the standalone "📜 Verlauf" button
---! message. Kept under a safe character budget (a bit below shorten's
---! 4000, since many separate bold/icon runs each carry their own HTML-tag
---! overhead once tg_html converts the markdown here), dropping the OLDEST
---! groups first with a leading marker when over it.
-export fn render_groups groups
+--! message. Plain text (no code-block wrapper — tried, felt too heavy/
+--! boxed in Telegram, see live_status discussion) but keeps the terminal-
+--! log VOCABULARY ([NAME]/::/>>///└─>). Kept under a safe character
+--! budget (a bit below shorten's 4000), dropping the OLDEST groups first
+--! with a leading marker when over it.
+export fn render_groups groups round max_rounds
     budget: 3800
     kept: groups
     fn render_all gs
         rendered: []
-        for g in gs
-            push rendered (render_group g)
+        n: len gs
+        i: 0
+        while i < n
+            push rendered (render_group (at gs i) (i == (n - 1)) round max_rounds)
+            i: i + 1
         join rendered "\n\n"
     text: render_all kept
     while (len text) > budget && (len kept) > 1
         kept: slice kept 1 (len kept)
         text: render_all kept
     if (len kept) < (len groups)
-        text: "… (earlier steps hidden)\n\n" ++ text
+        text: "... (earlier steps hidden)\n\n" ++ text
     text
+
+--! Renders a plan checklist (see tool_plan_vorschlagen/
+--! tool_plan_schritt_markieren in swarm.pipe, resolve_plan_proposal/
+--! make_swarm_updater in muninn.pipe): "○" not started yet, "◌" the step
+--! currently being worked on, "●" a finished step — plain plan: [{text,
+--! status}], status one of "offen"|"arbeitet"|"fertig".
+export fn render_plan plan
+    lines: []
+    for p in plan
+        sym: "○"
+        if (get p "status") == "arbeitet"
+            sym: "◍"
+        else if (get p "status") == "fertig"
+            sym: "●"
+        push lines (sym ++ " " ++ (get p "text"))
+    join lines "\n"
+
+--! Progress bar for the round SAFETY BUDGET consumed so far (see
+--! ai.SwarmProgressFunc in the pipe repo) — a REAL, honest number (not a
+--! fabricated "task completion %"): max_rounds (150) is a generous ceiling
+--! most runs never get close to, so this reads as "how much of the safety
+--! budget is used", not "how done is the task". 10-block bar, e.g.
+--! "███▒▒▒▒▒▒▒[20%]".
+export fn render_progress_bar round max_rounds
+    if round == nil || max_rounds == nil || max_rounds <= 0
+        return ""
+    pct: (round * 100) / max_rounds
+    if pct > 100
+        pct: 100
+    filled: (round * 10) / max_rounds
+    if filled > 10
+        filled: 10
+    bar: ""
+    i: 0
+    while i < 10
+        if i < filled
+            bar: bar ++ "█"
+        else
+            bar: bar ++ "▒"
+        i: i + 1
+    bar ++ "[" ++ (to_str pct) ++ "%]"
 
