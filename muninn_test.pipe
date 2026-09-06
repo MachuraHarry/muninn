@@ -309,16 +309,16 @@ test "close_thread beendet den aktiven Thread; naechster Aufruf legt frischen an
     expect_eq (len hist) 0 "frischer Thread ist leer"
     mem.close h
 
---! open_locked/close_locked (P3): Wrapper um init_db/close mit echter
---! OS-Sperre (file_lock/file_unlock, in Pipe selbst getestet). Nutzt eine
---! echte Datei statt ":memory:", da eine Sperre nur fuer Dateien Sinn ergibt.
+--! open_locked/close_locked (P3): Short-phase wrapper around init_db/close.
+--! The sqlite module owns file-backed write serialization; this test uses a
+--! real file to cover persistence rather than the in-memory test shortcut.
 test "open_locked/close_locked liefern eine funktionsfaehige, persistente DB"
-    path: "/tmp/muninn_test_open_locked.db"
+    path: "muninn_test_open_locked.db"
     if file_exists path
         file_delete path
     hl: mem.open_locked path
     expect_eq ((get hl "h") != nil) true "h vorhanden"
-    expect_eq ((get hl "lock") != nil) true "lock vorhanden"
+    expect_eq ((get hl "lock") == nil) true "kein aeusserer Langzeit-Lock"
     mem.add_memory (get hl "h") "Gesperrt gespeichert" "fact" 3 "test" "x"
     mem.close_locked hl
     hl2: mem.open_locked path
@@ -819,6 +819,19 @@ test "schedule/due/mark_fired: einmalige Aufgabe wird erledigt"
     expect_eq (get (at due 0) "kind") "reminder" "kind korrekt"
     sched.mark_fired h id "" 1000 1000
     expect_eq (len (sched.due h 2000)) 0 "nach mark_fired nicht mehr fällig"
+    mem.close h
+
+test "scheduler claim verhindert doppelte Ausfuehrung und release gibt zurueck"
+    h: mem.init_db ":memory:"
+    id: sched.schedule h "reminder" "42" "Test" 1000 ""
+    expect_eq (sched.claim h id) true "erster Claim erfolgreich"
+    expect_eq (sched.claim h id) false "zweiter Claim wird abgewiesen"
+    expect_eq (len (sched.due h 1000)) 0 "laufender Eintrag ist nicht erneut faellig"
+    sched.release h id
+    expect_eq (len (sched.due h 1000)) 1 "release stellt den Eintrag wieder bereit"
+    sched.claim h id
+    sched.recover h
+    expect_eq (len (sched.due h 1000)) 1 "recover stellt liegengebliebene Claims wieder bereit"
     mem.close h
 
 test "schedule/due: erst nach Fälligkeit erscheint die Aufgabe"

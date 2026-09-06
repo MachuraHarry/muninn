@@ -108,6 +108,29 @@ export fn due h now_sec
     init_scheduler h
     db_query h ("SELECT id, kind, chat_id, note, due_ts, repeat FROM scheduled WHERE state = 'pending' AND due_ts <= " ++ (to_str now_sec) ++ " ORDER BY due_ts ASC")
 
+--! Claims one due entry before external work starts. The conditional UPDATE
+--! keeps two scheduler workers from firing the same row concurrently; the
+--! caller must either mark/cancel it or release it after the external phase.
+export fn claim h id
+    init_scheduler h
+    changed: db_exec h ("UPDATE scheduled SET state = 'running' WHERE id = " ++ (to_str id) ++ " AND state = 'pending'")
+    changed > 0
+
+--! Returns a failed claim to the pending queue so transient network/AI/
+--! external-tool errors retain the old retry behavior.
+export fn release h id
+    init_scheduler h
+    db_exec h ("UPDATE scheduled SET state = 'pending' WHERE id = " ++ (to_str id) ++ " AND state = 'running'")
+    "ok"
+
+--! A process crash can leave a claimed row in `running`. The bot owns the
+--! scheduler loop exclusively, so recovering those transient claims once at
+--! the beginning of the next tick restores the pre-claim retry behavior.
+export fn recover h
+    init_scheduler h
+    db_exec h "UPDATE scheduled SET state = 'pending' WHERE state = 'running'"
+    "ok"
+
 --! Marks an entry as done — or, for daily/weekly/hourly/15min/5min, pushes
 --! it to the next occurrence (+86400/+604800/+3600/+900/+300) instead of
 --! closing it. now_sec anchors that catch-up: rescheduling purely off the

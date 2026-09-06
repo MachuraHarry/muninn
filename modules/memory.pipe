@@ -4,7 +4,6 @@
 import "sqlite"
 
 DB_PATH: "muninn.db"
-LOCK_PATH: "muninn.db.lock"
 
 --! Only log ONCE per module INSTANCE whether embed() fundamentally fails
 --! (e.g. because embed() strictly needs OPENAI_API_KEY, which Muninn
@@ -54,28 +53,24 @@ export fn init_db path
 export fn close h
     db_close h
 
---! Opens the (file) database with an exclusive lock against other Muninn
---! processes (Telegram loop, dashboard, consolidation — all of which can
---! run concurrently). Needed because the pure-Pipe sqlite module loads a
---! snapshot into memory on open and atomically writes back the ENTIRE file
---! on close, with no cross-process lock of its own: two processes that open/
---! write/close "concurrently" (even just seconds apart) can otherwise
---! silently overwrite each other's committed writes (reproduced live). For
---! ":memory:" databases (tests) this is irrelevant — use without a lock
---! there. Returns {h, lock}; ALWAYS use together with close_locked.
+--! Opens a database for a short-lived Muninn access phase.
+--!
+--! The sqlite module is responsible for serializing file-backed writes in
+--! the runtime used by this repository. Keeping a second lock around a whole
+--! request would only turn AI/network/file work into a cross-process
+--! bottleneck, and the older file_lock builtin is not available here.
+--! Keep the wrapper name for existing callers; `lock` remains nil.
 export fn open_locked path
-    lock: file_lock LOCK_PATH
     out: {}
     set out "h" (init_db path)
-    set out "lock" lock
+    set out "lock" nil
     out
 
---! Closes a database opened with open_locked and releases the lock again
---! (order matters: close/commit the db first, then unlock — otherwise a
---! waiting process could read before the commit).
+--! Closes a database opened with open_locked. File-backed writes are committed
+--! by sqlite's own write protocol.
 export fn close_locked handle
     close (get handle "h")
-    file_unlock (get handle "lock")
+    nil
 
 --! Sets a meta key (INSERT or UPDATE).
 export fn meta_set h key value

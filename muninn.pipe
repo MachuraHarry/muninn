@@ -1423,13 +1423,10 @@ fn make_swarm_updater token cid message_id dbh
 --! (ai_swarm_stream calls this at the START of every round — cheap, but
 --! no reason to hit Telegram's API more often than that).
 --!
---! dbh MUST be the handle poll_once already has open — this function must
---! NEVER call mem.open_locked itself. poll_once holds its cross-process
---! file lock for the ENTIRE handle_update/handle_callback call chain
---! (which is where this runs, several calls deep inside
---! ai_swarm_stream's own round loop, bridged back into Pipe exactly like
---! on_update above); a second open_locked from in here would try to
---! re-acquire a lock this same process already holds and block forever.
+--! dbh is the ordinary sqlite handle for the current request. This function
+--! must NEVER call mem.open_locked itself: the polling path deliberately
+--! keeps the request handle free of any outer cross-process lock while the
+--! round check performs Telegram/network work.
 --!
 --! uid is the update_id of the message that triggered THIS gremium run.
 --! poll_once only persists its advanced telegram_offset AFTER this whole
@@ -1841,27 +1838,60 @@ fn handle_callback token dbh cbq allowed uid
 
 --! Scheduler tick (P4): proactively fires due reminders/briefings — runs
 --! in the bot loop after every poll, single-threaded (no goroutine/DB
---! conflict, see Plan.md). Briefings are only assembled from the soul at
---! fire time (always current, never a stale snapshot).
+--! conflict, see Plan.md). Due rows are read and claimed in a short phase;
+--! sqlite's per-statement writer lock is never held across gremium,
+--! calendar/email, Docker, Telegram, or other external work.
+fn sched_finalize item action now_sec
+    h: mem.open_locked nil
+    fh: get h "h"
+    if action == "fire"
+        sched.mark_fired fh (get item "id") (get item "repeat") (get item "due_ts") now_sec
+    else
+        if action == "cancel"
+            sched.cancel fh (get item "id")
+        else
+            sched.release fh (get item "id")
+    mem.close_locked h
+    nil
+
 fn sched_tick token allowed
-    hl: mem.open_locked nil
-    dbh: get hl "h"
     now_sec: now
-    due: sched.due dbh now_sec
+    read_h: mem.open_locked nil
+    sched.recover (get read_h "h")
+    due: sched.due (get read_h "h") now_sec
+    mem.close_locked read_h
     for item in due
+        claim_h: mem.open_locked nil
+        claimed: sched.claim (get claim_h "h") (get item "id")
+        mem.close_locked claim_h
+        if !claimed
+            continue
+        dbh: mem.init_db nil
         kind: get item "kind"
         cid: get item "chat_id"
         msg: get item "note"
         if kind == "briefing"
             msg: sched.compose_briefing dbh
             if mcp.is_connected "google" && user_google_email != nil && user_google_email != ""
-                evt: ce.calendar_events_text user_google_email now_sec (ce.day_end_sec now_sec tz_offset)
-                if (len (ce.parse_calendar_events evt)) > 0
-                    msg: msg ++ "\n\n📅 Today's appointments:\n" ++ evt
+                try
+                    evt: ce.calendar_events_text user_google_email now_sec (ce.day_end_sec now_sec tz_offset)
+                    if (len (ce.parse_calendar_events evt)) > 0
+                        msg: msg ++ "\n\n📅 Today's appointments:\n" ++ evt
+                catch e_briefing
+                    print ("briefing calendar enrichment failed: " ++ (to_str e_briefing))
+                    mem.log_error dbh "briefing_calendar" (to_str e_briefing)
         if kind == "calendar_check"
             if mem.setting_proaktiv_enabled dbh (to_str cid)
-                ce.calendar_notify_new token dbh cid user_google_email calendar_reminder_minutes
-            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
+                try
+                    ce.calendar_notify_new token dbh cid user_google_email calendar_reminder_minutes
+                catch e11
+                    print ("calendar_check failed: " ++ (to_str e11))
+                    mem.log_error dbh "calendar_check" (to_str e11)
+                    mem.close dbh
+                    sched_finalize item "release" now_sec
+                    continue
+            mem.close dbh
+            sched_finalize item "fire" now_sec
             continue
         if kind == "email_check"
             if mem.setting_proaktiv_enabled dbh (to_str cid)
@@ -1870,13 +1900,15 @@ fn sched_tick token allowed
                 catch e12
                     print ("email_check failed: " ++ (to_str e12))
                     mem.log_error dbh "email_check" (to_str e12)
-            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
+            mem.close dbh
+            sched_finalize item "fire" now_sec
             continue
         if kind == "goal_tick"
             resumed: exe.resume_running_plans dbh
             if resumed > 0
                 tel.tel_send_message token (to_num cid) ("Progress: " ++ (to_str resumed) ++ " interrupted plans resumed.")
-            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
+            mem.close dbh
+            sched_finalize item "fire" now_sec
             continue
         if kind == "job_check"
             --! The note field carries the docker_jobs row ID (see
@@ -1896,7 +1928,8 @@ fn sched_tick token allowed
             job: dt.refresh_job_status dbh (to_num (get item "note"))
             still_running: job != nil && (get job "status") == "running"
             if still_running
-                sched.mark_fired dbh (get item "id") "5min" (get item "due_ts") now_sec
+                mem.close dbh
+                sched_finalize item "fire" now_sec
                 continue
             --! Explicitly cancelled by the user (/stop or
             --! 'docker_jobs_abbrechen', see docker_tools.pipe cancel_job) —
@@ -1907,7 +1940,8 @@ fn sched_tick token allowed
             --! suggestion to retry — despite the user's explicit
             --! cancellation.
             if job != nil && (get job "status") == "cancelled"
-                sched.cancel dbh (get item "id")
+                mem.close dbh
+                sched_finalize item "cancel" now_sec
                 continue
             beschreibung: "unknown"
             ergebnis: "Job not found."
@@ -1917,9 +1951,7 @@ fn sched_tick token allowed
             continuation: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "A previously background-started Docker setup has finished. Description: " ++ beschreibung ++ ". Result (incl. container logs/test output, if available): " ++ ergebnis ++ ". Report to the user briefly and cleanly formatted what happened — for test runs: how many tests ran, passed/failed, the most important error message if failed, and explicitly confirm this was a REAL execution with real output (quote the concrete exit status/result), not a claim — a clear, confident report here avoids the user having to ask again whether it actually ran. If the original task still needs a next step, initiate it directly (e.g. calling 'docker_hintergrund_setup' again) — but repeating the SAME task again shortly after will be blocked by its own cooldown and return the existing result instead of starting a new container."
             --! MUST be caught: an uncaught exception here (e.g. a transient
             --! AI-provider timeout) would unwind straight out of sched_tick,
-            --! skipping mem.close_locked at the end and leaking the
-            --! cross-process DB lock forever (every future open_locked call
-            --! — next poll cycle, dashboard — would then block for good).
+            --! skipping the claim release and leaving this entry stuck.
             --! The item's due_ts is left untouched on failure, so it's
             --! naturally retried on the next tick instead of being lost.
             --!
@@ -1941,10 +1973,14 @@ fn sched_tick token allowed
                     tel.tel_send_message token (to_num cid) ("🛑 " ++ (get res "abort_reason"))
                 else
                     tel.tel_send_rich_message token (to_num cid) (get res "content") nil
-                sched.cancel dbh (get item "id")
+                mem.close dbh
+                sched_finalize item "cancel" now_sec
             catch e13
                 print ("job_check failed: " ++ (to_str e13))
                 mem.log_error dbh "job_check" (to_str e13)
+                mem.close dbh
+                sched_finalize item "release" now_sec
+                continue
             continue
         if kind == "task_check"
             --! Generic continuation (see grm.tool_hintergrund_fortsetzen) —
@@ -1957,13 +1993,13 @@ fn sched_tick token allowed
             --! closed out in any case, the chain continues via the new entry.
             t: sched.get_background_task dbh (to_num (get item "note"))
             if t == nil
-                sched.cancel dbh (get item "id")
+                mem.close dbh
+                sched_finalize item "cancel" now_sec
                 continue
             setup_sandbox all_mcp_servers
             continuation2: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "You're continuing work on a previously deferred task. Original task: " ++ (get t "task") ++ ". Progress so far: " ++ (get t "progress") ++ ". Continue the work. If you're done NOW, clearly communicate the final result to the user. If you're NOT done yet, call 'hintergrund_fortsetzen' again with the updated progress."
-            --! MUST be caught — see the identical comment in job_check above
-            --! (an uncaught exception here would leak sched_tick's DB lock
-            --! forever). Left un-cancelled on failure, so it's retried next
+            --! MUST be caught — see the identical comment in job_check above.
+            --! Left pending on failure, so it's retried next
             --! tick using the same saved progress instead of being lost.
             --! run_gremium_stream + round_check/on_update — see the
             --! identical comment in job_check above; this is the branch
@@ -1978,10 +2014,14 @@ fn sched_tick token allowed
                     tel.tel_send_message token (to_num cid) ("🛑 " ++ (get res2 "abort_reason"))
                 else
                     tel.tel_send_rich_message token (to_num cid) (get res2 "content") nil
-                sched.cancel dbh (get item "id")
+                mem.close dbh
+                sched_finalize item "cancel" now_sec
             catch e14
                 print ("task_check failed: " ++ (to_str e14))
                 mem.log_error dbh "task_check" (to_str e14)
+                mem.close dbh
+                sched_finalize item "release" now_sec
+                continue
             continue
         if kind == "eigene_aufgabe"
             --! Self-scheduled task (see grm.tool_aufgabe_planen): unlike
@@ -1996,9 +2036,8 @@ fn sched_tick token allowed
             --! scheduling anything at all — this closes that gap for real.
             setup_sandbox all_mcp_servers
             continuation3: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "This is a SELF-SCHEDULED task you (or the user, via 'aufgabe_planen') set up earlier for exactly this moment. Task: " ++ msg ++ ". Carry it out now for real (call whatever tools are actually needed) and report the concrete result to the user — never claim it's done without having actually called the necessary tools."
-            --! MUST be caught — see the identical comment in job_check above
-            --! (an uncaught exception here would leak sched_tick's DB lock
-            --! forever). Left un-cancelled/un-rescheduled on failure for a
+            --! MUST be caught — see the identical comment in job_check above.
+            --! Left pending on failure for a
             --! one-off entry, so it's naturally retried next tick instead of
             --! silently lost — mark_fired below only runs on success.
             try
@@ -2009,10 +2048,14 @@ fn sched_tick token allowed
                     tel.tel_send_message token (to_num cid) ("🛑 " ++ (get res3 "abort_reason"))
                 else
                     tel.tel_send_rich_message token (to_num cid) (get res3 "content") nil
-                sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
+                mem.close dbh
+                sched_finalize item "fire" now_sec
             catch e17
                 print ("eigene_aufgabe failed: " ++ (to_str e17))
                 mem.log_error dbh "eigene_aufgabe" (to_str e17)
+                mem.close dbh
+                sched_finalize item "release" now_sec
+                continue
             continue
         if kind == "proaktiv"
             --! Proactive self-initiative (P4): Muninn was NOT addressed —
@@ -2028,7 +2071,7 @@ fn sched_tick token allowed
                 prompt_proaktiv: "PROACTIVE IMPULSE (you were NOT addressed — decide for yourself whether a message to the user is worthwhile): use 'erinnerungen_suchen' to look into your memory: are there open/started tasks, interrupted work, upcoming appointments, or important developments on topics that matter to the user — something the user themselves would bring up? If there's something IMPORTANT: write the short, concrete message to the user; if you find a task you should revisit at a specific time, plan that yourself with 'erinnerung_planen' or 'hintergrund_fortsetzen'. If there's NOTHING worth mentioning: reply ONLY with the single word NOTHING, with no other characters."
                 --! MUST be caught — see the identical comment in job_check
                 --! above. Without this, a failure here would skip the
-                --! mark_fired/continue below and leak sched_tick's DB lock.
+                --! mark_fired/continue below.
                 --! run_gremium_stream + round_check/on_update — see the
                 --! identical comment in job_check above. An /stop-aborted
                 --! run naturally falls through to "nothing to send" below
@@ -2044,7 +2087,8 @@ fn sched_tick token allowed
                 catch e15
                     print ("proaktiv failed: " ++ (to_str e15))
                     mem.log_error dbh "proaktiv" (to_str e15)
-            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
+            mem.close dbh
+            sched_finalize item "fire" now_sec
             continue
         if kind == "selbstdiagnose"
             --! Self-diagnosis: once a day, Muninn evaluates its own
@@ -2065,7 +2109,8 @@ fn sched_tick token allowed
                     for row in auffaellig
                         diag_msg: diag_msg ++ "• " ++ (get row "tag") ++ " (" ++ (to_str (get row "cnt")) ++ "x, last at " ++ (get row "last_ts") ++ ")\n"
                     tel.tel_send_message token (to_num cid) (cmd.shorten diag_msg)
-            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
+            mem.close dbh
+            sched_finalize item "fire" now_sec
             continue
         if kind == "workspace_aufraeumen"
             --! Sorts loose top-level files in mcp_data into thematic
@@ -2075,15 +2120,15 @@ fn sched_tick token allowed
             --! selbstdiagnose's "only speak up if actually noteworthy"
             --! philosophy) — a failure still surfaces via mem.log_error.
             --! MUST be caught, same reason as job_check/task_check/
-            --! proaktiv above: an uncaught exception here would leak
-            --! sched_tick's DB lock.
+            --! proaktiv above: the claim must still be finalized.
             try
                 result: grm.organize_mcp_data dbh cid
                 print ("workspace_aufraeumen: " ++ (to_str result))
             catch e16
                 print ("workspace_aufraeumen failed: " ++ (to_str e16))
                 mem.log_error dbh "workspace_aufraeumen" (to_str e16)
-            sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
+            mem.close dbh
+            sched_finalize item "fire" now_sec
             continue
         if cid != nil && cid != ""
             try
@@ -2094,19 +2139,15 @@ fn sched_tick token allowed
                 --! losing it silently.
                 print ("Failed to send scheduler message (" ++ kind ++ "): " ++ (to_str e7))
                 mem.log_error dbh ("scheduler_message_send:" ++ kind) (to_str e7)
-        sched.mark_fired dbh (get item "id") (get item "repeat") (get item "due_ts") now_sec
-    mem.close_locked hl
+        mem.close dbh
+        sched_finalize item "fire" now_sec
     nil
 
---! One polling cycle. Returns the last processed update_id. The DB lock
---! (mem.open_locked/close_locked) is deliberately NOT held around the
---! entire cycle, only around the actual DB accesses: tel_get_updates
---! waits via long-polling for up to `timeout` seconds for new messages —
---! if the lock were held the whole time, the web dashboard could almost
---! never reach the DB in the meantime. This way every channel only holds
---! the lock while it's actually processing something (see Plan.md on
---! concurrency). timeout (seconds) is dynamically capped by the P4
---! scheduler to "time until the next due task".
+--! One polling cycle. Returns the last processed update_id. The offset read,
+--! update claim, and final offset write are short database phases; Telegram
+--! long-polling and the complete handle_update/handle_callback chains run
+--! with an ordinary sqlite handle, never with mem.open_locked held around
+--! AI, network, or file work.
 fn poll_once token offset allowed timeout
     hl: mem.open_locked nil
     dbh: get hl "h"
@@ -2124,8 +2165,6 @@ fn poll_once token offset allowed timeout
         --! stop receiving ANY messages with no clue why.
         print ("tel_get_updates failed: " ++ (to_str e8))
         updates: []
-    hl2: mem.open_locked nil
-    dbh2: get hl2 "h"
     for upd in updates
         uid: get upd "update_id"
         if uid != nil
@@ -2135,7 +2174,12 @@ fn poll_once token offset allowed timeout
             chat: get msg "chat"
             if chat != nil
                 cid: get chat "id"
-                if (is_allowed cid allowed) && !(mem.was_injected dbh2 uid)
+                claim_h: mem.open_locked nil
+                claim_dbh: get claim_h "h"
+                skip_update: !(is_allowed cid allowed) || (mem.was_injected claim_dbh uid)
+                mem.close_locked claim_h
+                if !skip_update
+                    dbh2: mem.init_db nil
                     --! was_injected: a message a round_check already fed into
                     --! a swarm run as a steering interjection (see
                     --! make_round_check) must never ALSO be dispatched here as
@@ -2154,20 +2198,24 @@ fn poll_once token offset allowed timeout
                         --! with no clue where.
                         print ("handle_update failed: " ++ (to_str e9))
                         mem.log_error dbh2 "handle_update" (to_str e9)
+                    mem.close dbh2
         cq: get upd "callback_query"
         if cq != nil
             chat2: get (get cq "message") "chat"
             if chat2 != nil
                 cid2: get chat2 "id"
                 if is_allowed cid2 allowed
+                    dbh3: mem.init_db nil
                     try
-                        handle_callback token dbh2 cq allowed uid
+                        handle_callback token dbh3 cq allowed uid
                     catch e10
                         print ("handle_callback failed: " ++ (to_str e10))
-                        mem.log_error dbh2 "handle_callback" (to_str e10)
+                        mem.log_error dbh3 "handle_callback" (to_str e10)
+                    mem.close dbh3
     if offset != nil
-        mem.meta_set dbh2 "telegram_offset" (to_str offset)
-    mem.close_locked hl2
+        hl3: mem.open_locked nil
+        mem.meta_set (get hl3 "h") "telegram_offset" (to_str offset)
+        mem.close_locked hl3
     offset
 
 --! Shared, mutable cost state for maybe_log_cost (see the comment there
