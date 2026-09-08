@@ -354,12 +354,11 @@ export fn handoff_reason args_json
 --! handing off to, ASCII arrow to match the terminal-log look), plain
 --! "└─ " for any other trailing entry. is_current: only the LAST group in
 --! the whole run (the agent currently working) gets the progress bar
---! appended to its header — round/max_rounds meaningless for a finished,
---! earlier group.
-fn render_group g is_current round max_rounds
+--! appended to its header — pct meaningless for a finished, earlier group.
+fn render_group g is_current pct
     header: agent_group_header (get g "agent")
     if is_current
-        bar: render_progress_bar round max_rounds
+        bar: render_progress_bar pct
         if bar != ""
             header: header ++ " " ++ bar
     lines: get g "lines"
@@ -388,7 +387,7 @@ fn render_group g is_current round max_rounds
 --! log VOCABULARY ([NAME]/::/>>///└─>). Kept under a safe character
 --! budget (a bit below shorten's 4000), dropping the OLDEST groups first
 --! with a leading marker when over it.
-export fn render_groups groups round max_rounds
+export fn render_groups groups pct
     budget: 3800
     kept: groups
     fn render_all gs
@@ -396,7 +395,7 @@ export fn render_groups groups round max_rounds
         n: len gs
         i: 0
         while i < n
-            push rendered (render_group (at gs i) (i == (n - 1)) round max_rounds)
+            push rendered (render_group (at gs i) (i == (n - 1)) pct)
             i: i + 1
         join rendered "\n\n"
     text: render_all kept
@@ -423,21 +422,26 @@ export fn render_plan plan
         push lines (sym ++ " " ++ (get p "text"))
     join lines "\n"
 
---! Progress bar for the round SAFETY BUDGET consumed so far (see
---! ai.SwarmProgressFunc in the pipe repo) — a REAL, honest number (not a
---! fabricated "task completion %"): max_rounds (150) is a generous ceiling
---! most runs never get close to, so this reads as "how much of the safety
---! budget is used", not "how done is the task". 10-block bar, e.g.
---! "███▒▒▒▒▒▒▒[20%]".
-export fn render_progress_bar round max_rounds
-    if round == nil || max_rounds == nil || max_rounds <= 0
+--! Progress bar for an already-computed percentage (0-100) — the caller
+--! (make_swarm_updater) decides what the percentage MEANS: real step
+--! completion when a plan is active (plan_progress_pct), or a coarse
+--! pipeline-position checkpoint otherwise (stage_checkpoint/
+--! stage_checkpoint_max). This used to compute round/max_rounds itself —
+--! reverted, because max_rounds (150) is a pure safety ceiling almost no
+--! real task gets remotely close to, so "how much of the safety budget is
+--! used" read as near-zero for the vast majority of runs regardless of how
+--! close to done they actually were. nil -> no bar at all (a finished
+--! earlier group in the live tree, or a historical /trace-button replay
+--! with no live pct to show). 10-block bar, e.g. "███▒▒▒▒▒▒▒[20%]".
+export fn render_progress_bar pct
+    if pct == nil
         return ""
-    pct: (round * 100) / max_rounds
-    if pct > 100
-        pct: 100
-    filled: (round * 10) / max_rounds
-    if filled > 10
-        filled: 10
+    p: pct
+    if p > 100
+        p: 100
+    if p < 0
+        p: 0
+    filled: p / 10
     bar: ""
     i: 0
     while i < 10
@@ -446,5 +450,59 @@ export fn render_progress_bar round max_rounds
         else
             bar: bar ++ "▒"
         i: i + 1
-    bar ++ "[" ++ (to_str pct) ++ "%]"
+    bar ++ "[" ++ (to_str p) ++ "%]"
+
+--! Coarse pipeline "checkpoint" percentage for a non-plan run, based on
+--! which agent is currently active. planer/kritiker/registrator are exact
+--! matches — each only ever means itself in the fixed pipeline (see
+--! swarm.pipe's planer_handoff/kritiker_handoff/faktenwaechter_handoff).
+--! Everything else — faktenwaechter, or a dynamically-registered
+--! werkzeug_<alias> tool specialist (name depends on which MCP servers are
+--! connected, not worth enumerating) — shares one middle checkpoint.
+--! registrator caps at 95, not 100: the live status message is DELETED and
+--! replaced the instant the run finishes (see tel_finalize_after_tree in
+--! muninn.pipe), so a live "100%" would flash for at most one edit cycle
+--! right before the message vanishes — reads as a glitch, not a
+--! completion. See stage_checkpoint_max for tracking the highest value
+--! reached so far across a run (this function alone is NOT monotonic —
+--! faktenwaechter/kritiker can be revisited, see swarm.go's isOscillating
+--! guard).
+export fn stage_checkpoint agent
+    if agent == "planer"
+        return 10
+    if agent == "kritiker"
+        return 75
+    if agent == "registrator"
+        return 95
+    45
+
+--! Combines stage_checkpoint with the highest checkpoint already reached
+--! this run (previous, or nil for a fresh run) so the displayed percentage
+--! never regresses if agents backtrack/oscillate (faktenwaechter<->kritiker
+--! is possible and already round-limited on the Go side, see swarm.go's
+--! isOscillating — but a naive per-event stage lookup alone isn't
+--! monotonic).
+export fn stage_checkpoint_max agent previous
+    c: stage_checkpoint agent
+    if previous != nil && previous > c
+        previous
+    else
+        c
+
+--! Percentage of an active plan's steps marked "fertig" (done) — same
+--! plan: [{text, status}] shape as render_plan (status one of
+--! "offen"|"arbeitet"|"fertig", see resolve_plan_proposal/
+--! tool_plan_schritt_markieren in muninn.pipe/swarm.pipe). 100% is reached
+--! exactly when the LAST item flips to "fertig", unlike round/max_rounds
+--! which almost never got there. Empty/nil plan -> 0 (make_swarm_updater
+--! only calls this when the plan is non-empty, but stay well-defined
+--! rather than dividing by zero).
+export fn plan_progress_pct plan
+    if plan == nil || (len plan) == 0
+        return 0
+    done: 0
+    for p in plan
+        if (get p "status") == "fertig"
+            done: done + 1
+    (done * 100) / (len plan)
 

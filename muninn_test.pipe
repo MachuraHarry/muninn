@@ -1147,16 +1147,61 @@ test "truncate_status: kuerzer als n bleibt unveraendert"
 test "truncate_status: laenger als n wird mit Ellipse gekuerzt"
     expect_eq (ls.truncate_status "abcdefghij" 5) "abcde…" "gekuerzt auf 5 + Ellipse"
 
-test "render_progress_bar: nil-Parameter ergeben leeren String"
-    expect_eq (ls.render_progress_bar nil 150) "" "round nil -> leer"
-    expect_eq (ls.render_progress_bar 10 nil) "" "max_rounds nil -> leer"
-    expect_eq (ls.render_progress_bar 5 0) "" "max_rounds 0 -> leer"
+test "render_progress_bar: nil-Parameter ergibt leeren String"
+    expect_eq (ls.render_progress_bar nil) "" "pct nil -> leer"
 
-test "render_progress_bar: 0 von 150 ist leer gefuellt"
-    expect_eq (ls.render_progress_bar 0 150) "▒▒▒▒▒▒▒▒▒▒[0%]" "0% gefuellt"
+test "render_progress_bar: 0% ist leer gefuellt"
+    expect_eq (ls.render_progress_bar 0) "▒▒▒▒▒▒▒▒▒▒[0%]" "0% gefuellt"
 
-test "render_progress_bar: 150 von 150 ist voll gefuellt bei 100%"
-    expect_eq (ls.render_progress_bar 150 150) "██████████[100%]" "100% gefuellt"
+test "render_progress_bar: 100% ist voll gefuellt"
+    expect_eq (ls.render_progress_bar 100) "██████████[100%]" "100% gefuellt"
 
-test "render_progress_bar: ueber max_rounds wird auf 100% gekappt"
-    expect_eq (ls.render_progress_bar 200 150) "██████████[100%]" "auf 100% gekappt"
+test "render_progress_bar: ueber 100 wird gekappt"
+    expect_eq (ls.render_progress_bar 200) "██████████[100%]" "auf 100% gekappt"
+
+test "render_progress_bar: 45% ergibt 4 gefuellte Bloecke"
+    expect_eq (ls.render_progress_bar 45) "████▒▒▒▒▒▒[45%]" "abgerundet auf 4 von 10 Bloecken"
+
+--! stage_checkpoint (Verbesserung): ersetzt den bedeutungslosen
+--! round/max_rounds-Balken fuer normale (nicht Plan-basierte) Anfragen mit
+--! einem groben, aber ehrlichen Phasen-Indikator entlang der festen
+--! Agenten-Kette.
+test "stage_checkpoint: planer/kritiker/registrator treffen exakte Checkpoints"
+    expect_eq (ls.stage_checkpoint "planer") 10 "planer -> frueher Checkpoint"
+    expect_eq (ls.stage_checkpoint "kritiker") 75 "kritiker -> spaeter Checkpoint"
+    expect_eq (ls.stage_checkpoint "registrator") 95 "registrator -> knapp unter 100"
+
+test "stage_checkpoint: faktenwaechter und werkzeug_* teilen den mittleren Checkpoint"
+    expect_eq (ls.stage_checkpoint "faktenwaechter") 45 "faktenwaechter -> mittlerer Checkpoint"
+    expect_eq (ls.stage_checkpoint "werkzeug_browser") 45 "werkzeug_* -> selber Checkpoint"
+
+test "stage_checkpoint_max: nil previous nimmt den aktuellen Checkpoint"
+    expect_eq (ls.stage_checkpoint_max "planer" nil) 10 "erster Aufruf im Lauf"
+
+test "stage_checkpoint_max: Rueckschritt (Oszillation) faellt nicht zurueck"
+    hoch: ls.stage_checkpoint_max "kritiker" nil
+    zurueck: ls.stage_checkpoint_max "faktenwaechter" hoch
+    expect_eq zurueck 75 "kritiker->faktenwaechter Rueckschritt bleibt bei 75"
+
+test "stage_checkpoint_max: Fortschritt uebernimmt den neuen, hoeheren Checkpoint"
+    hoch: ls.stage_checkpoint_max "planer" nil
+    weiter: ls.stage_checkpoint_max "registrator" hoch
+    expect_eq weiter 95 "planer->registrator steigt auf 95"
+
+--! plan_progress_pct (Verbesserung): fuer Plan-Modus-Laeufe gibt es einen
+--! ECHTEN Gesamt-Nenner (Anzahl Schritte) — 100% wird real erreicht, wenn
+--! der letzte Schritt "fertig" markiert wird.
+test "plan_progress_pct: leerer Plan ist 0%"
+    expect_eq (ls.plan_progress_pct []) 0 "kein Schritt -> 0%"
+
+test "plan_progress_pct: kein Schritt fertig ist 0%"
+    plan: [{text: "a", status: "offen"}, {text: "b", status: "arbeitet"}]
+    expect_eq (ls.plan_progress_pct plan) 0 "0 von 2 fertig -> 0%"
+
+test "plan_progress_pct: teilweise fertig rundet ab"
+    plan: [{text: "a", status: "fertig"}, {text: "b", status: "offen"}, {text: "c", status: "offen"}]
+    expect_eq (ls.plan_progress_pct plan) 33 "1 von 3 fertig -> 33% (abgerundet)"
+
+test "plan_progress_pct: letzter Schritt fertig ist 100%"
+    plan: [{text: "a", status: "fertig"}, {text: "b", status: "fertig"}]
+    expect_eq (ls.plan_progress_pct plan) 100 "2 von 2 fertig -> 100%"
