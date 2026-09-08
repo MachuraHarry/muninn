@@ -51,12 +51,40 @@ import "modules/web.pipe" as web
 --! erinnerungen_suchen, regardless of what was actually stored. Calling
 --! the injected function value instead reuses the SAME closure (and thus
 --! the SAME STATE) muninn.pipe's own init_gremium set up.
-DASH_STATE: {token: nil, run_gremium: nil}
+DASH_STATE: {token: nil, run_gremium: nil, set_full_rights: nil}
 DASH_CHAT_ID: "dashboard"
 
---! Checks the optional token (query param or header). Without a configured
---! token, the check is disabled (trusting the localhost bind).
+--! CSRF hardening: an empty DASHBOARD_TOKEN used to mean "no check at all"
+--! (see the git history) — but the token was never the only thing that
+--! mattered even with one configured: pipe-web's json_body parses the
+--! request body as JSON regardless of Content-Type, and there was no
+--! Origin/fetch-metadata check at all. That meant ANY webpage open in the
+--! same browser as the dashboard could POST to it cross-origin with
+--! Content-Type: text/plain (no CORS preflight triggered for that content
+--! type) and drive the full gremium/tool set with no user interaction —
+--! live-verified against a standalone pipe-web instance with curl before
+--! landing this. Two independent checks close this, both BEFORE the token
+--! check (so they apply even to the token-less local-dev case too):
+--! Sec-Fetch-Site is sent by every modern browser on every request, no
+--! opt-in needed (absent only for non-browser clients like curl/scripts,
+--! which fall through to the token check as before); Content-Type
+--! strictness alone already defeats the specific no-preflight vector
+--! described above.
 fn auth_mw req
+    hdrs: get req "headers"
+    sfs: nil
+    if hdrs != nil
+        sfs: get hdrs "Sec-Fetch-Site"
+    if sfs == "cross-site"
+        return (text 403 "Cross-site request rejected.")
+    if (get req "method") == "POST"
+        ctype: ""
+        if hdrs != nil
+            ctv: get hdrs "Content-Type"
+            if ctv != nil
+                ctype: ctv
+        if !(contains (lower ctype) "application/json")
+            return (text 415 "Content-Type must be application/json.")
     tok: get DASH_STATE "token"
     if tok == nil || tok == ""
         return nil
@@ -65,7 +93,6 @@ fn auth_mw req
     if q != nil
         supplied: get q "token"
     if supplied == nil
-        hdrs: get req "headers"
         if hdrs != nil
             supplied: get hdrs "X-Dashboard-Token"
     if supplied == tok
@@ -560,6 +587,15 @@ fn status_handler req
 fn chat_handler req
     body: json_body req
     msg: get body "message"
+    --! The Telegram path sets full_rights per-message from the sender's
+    --! actual chat context (owner vs. group member) — the dashboard has no
+    --! such distinction (see the file header: it's documented owner-only),
+    --! so without this it inherited whatever the LAST-processed Telegram
+    --! message happened to set, unpredictably over- or under-granting tool
+    --! rights to dashboard chat.
+    sfr: get DASH_STATE "set_full_rights"
+    if sfr != nil
+        sfr true
     hl: mem.open_locked nil
     reply: dashboard_reply (get hl "h") msg
     mem.close_locked hl
@@ -768,9 +804,10 @@ fn dashboard_reply h text
 --! dashboard chat runs the gremium through the SAME swarm.pipe module
 --! instance (and thus the same STATE) as the Telegram path -- see the
 --! comment on DASH_STATE above.
-export fn start bind token run_gremium_fn
+export fn start bind token run_gremium_fn set_full_rights_fn
     set DASH_STATE "token" token
     set DASH_STATE "run_gremium" run_gremium_fn
+    set DASH_STATE "set_full_rights" set_full_rights_fn
     a: app "Muninn Dashboard"
     use a auth_mw
     route_get a "/" page_handler

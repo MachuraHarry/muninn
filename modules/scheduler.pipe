@@ -186,6 +186,28 @@ export fn cancel h id
     db_exec h ("UPDATE scheduled SET state = 'cancelled' WHERE id = " ++ (to_str id))
     "ok"
 
+--! Retention window for cleanup_old below — the "auditability" tradeoff
+--! (see cancel's comment) doesn't mean "forever": a done/cancelled row
+--! older than this is deleted, not just marked. 30 days.
+SCHED_RETENTION_SEC: 2592000
+
+--! Deletes done/cancelled rows older than SCHED_RETENTION_SEC — without
+--! this, scheduled grows without bound (one row per reminder/docker job/
+--! background-task continuation ever created, see the doc comment at
+--! schedule above), which matters because opening/closing the DB file
+--! costs O(total size) (see muninn.pipe's poll_once comment). "created" is
+--! a formatted string, same lexicographic-cutoff pattern as
+--! dt.recent_job_for_chat.
+export fn cleanup_old h now_sec
+    init_scheduler h
+    cutoff: format_time (now_sec - SCHED_RETENTION_SEC) "2006-01-02 15:04:05"
+    --! "state IN ('done', 'cancelled')" would look more natural, but the
+    --! pure-Pipe sqlite module's IN operator is broken (confirmed live: it
+    --! matches ZERO rows even for a single-value IN, both in SELECT and
+    --! DELETE) — this OR form is verified to work correctly against that
+    --! module and is the only reliable way to express this today.
+    db_exec h ("DELETE FROM scheduled WHERE (state = 'done' OR state = 'cancelled') AND created < '" ++ (mem.sql_escape cutoff) ++ "'")
+
 --! Pure fallback parser (no AI) for reminder instructions. Recognizes:
 --!   "in N minutes/hours/days" -> now + N*60/3600/86400
 --!   "at HH:MM"                -> next occurrence of HH:MM

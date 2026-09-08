@@ -95,6 +95,8 @@ export fn parse_ddg body
         set item "snippet" sn
         push out item
         k: k + 1
+    if (len out) == 0
+        print "parse_ddg: DDG response body was non-empty but 0 results parsed — markup likely changed"
     out
 
 --! Full-text search via the DDG HTML endpoint (best effort, no key).

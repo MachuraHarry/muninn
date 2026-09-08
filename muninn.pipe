@@ -186,7 +186,7 @@ fn ensure_mcp_for_task task dbh
         for s in mcp_auto_servers
             if !(mcp.is_owner_only_alias (get s "alias"))
                 push servers_for_task s
-    results: mcp.ensure_for_task servers_for_task task
+    results: mcp.ensure_for_task servers_for_task task now
     for r in results
         if get r "ok"
             print ("MCP auto-connected: " ++ (get r "alias"))
@@ -2172,6 +2172,32 @@ fn sched_tick token allowed
             mem.close dbh
             sched_finalize item "fire" now_sec
             continue
+        if kind == "gedaechtnis_konsolidieren"
+            --! Weekly: memory consolidation (mem.consolidate, the "dream"
+            --! mode) previously only ran via a manual /consolidate command
+            --! or the standalone CLI mode — no cron/timer existed, so it
+            --! never happened unless Harry remembered to trigger it. Also
+            --! sweeps old done/cancelled/finished rows out of scheduled/
+            --! docker_jobs/plans (kept forever otherwise, "auditability" —
+            --! see sched.cancel's comment — was never meant to mean
+            --! literally forever). Uses the same per-chat settings the
+            --! manual /consolidate command uses, not the CLI mode's fixed
+            --! 14/30. Silent on success like workspace_aufraeumen above;
+            --! MUST be caught for the same reason (claim must still be
+            --! finalized).
+            try
+                cdays: mem.setting_consolidate_days dbh (to_str cid)
+                res: mem.consolidate dbh (get cdays "decay") (get cdays "forget")
+                sched.cleanup_old dbh now_sec
+                dt.cleanup_old_jobs dbh now_sec
+                exe.cleanup_old_plans dbh now_sec
+                print ("gedaechtnis_konsolidieren: " ++ (to_str res))
+            catch e18
+                print ("gedaechtnis_konsolidieren failed: " ++ (to_str e18))
+                mem.log_error dbh "gedaechtnis_konsolidieren" (to_str e18)
+            mem.close dbh
+            sched_finalize item "fire" now_sec
+            continue
         if cid != nil && cid != ""
             try
                 tel.tel_send_message token (to_num cid) msg
@@ -2436,7 +2462,15 @@ else
         bind: dash_bind
         if bind == nil || bind == ""
             bind: "127.0.0.1:8787"
-        dash.start bind dash_token grm.run_gremium
+        --! Refuse a genuinely dangerous config outright rather than just
+        --! documenting it in .env.example: binding to the network with NO
+        --! token means literally anyone who can reach that address gets the
+        --! full gremium/tool set, no auth at all.
+        is_loopback: (contains bind "127.0.0.1") || (contains bind "localhost")
+        if !is_loopback && (dash_token == nil || dash_token == "")
+            print ("REFUSING TO START: DASHBOARD_BIND is non-loopback (" ++ bind ++ ") but DASHBOARD_TOKEN is empty — this would expose the dashboard to the network with NO authentication. Set DASHBOARD_TOKEN in .env or bind to 127.0.0.1. Aborting.")
+        else
+            dash.start bind dash_token grm.run_gremium grm.set_full_rights
     else
         tok: cfg_get cfg "TELEGRAM_BOT_TOKEN"
         allowed: cfg_get cfg "TELEGRAM_ALLOWED_CHAT_ID"
@@ -2565,6 +2599,23 @@ else
                     sched.schedule dbhw "workspace_aufraeumen" owner_cid "" cleanup_due "daily"
                     print "Daily workspace cleanup activated."
                 mem.close_locked hlw
+            --! Weekly memory consolidation + old-row cleanup (see sched_tick,
+            --! kind "gedaechtnis_konsolidieren") — weekly, not daily, since
+            --! consolidation is heavier than the other daily checks. 04:30 is
+            --! a distinct off-hours slot, 90 min after the 03:00 workspace
+            --! cleanup. Idempotent like the entries above.
+            if owner_cid != nil
+                hlk: mem.open_locked nil
+                dbhk: get hlk "h"
+                has_consolidate: false
+                for e in (sched.list dbhk owner_cid)
+                    if (get e "kind") == "gedaechtnis_konsolidieren"
+                        has_consolidate: true
+                if !has_consolidate
+                    consolidate_due: sched.next_hhmm 4 30 now tz_offset
+                    sched.schedule dbhk "gedaechtnis_konsolidieren" owner_cid "" consolidate_due "weekly"
+                    print "Weekly memory consolidation activated."
+                mem.close_locked hlk
             try
                 cmds: []
                 push cmds {command: "start", description: "Greeting"}

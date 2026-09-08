@@ -1654,6 +1654,11 @@ fn tool_pdf_erstellen titel inhalt ist_html
 --! minutes later isn't blocked.
 DOCKER_JOB_COOLDOWN_SEC: 300
 
+--! Global ceiling across ALL chats/groups — running_job_for_chat below only
+--! throttles per chat, nothing previously capped the total. Checked BEFORE
+--! the per-chat guard so a global refusal always takes priority.
+MAX_CONCURRENT_DOCKER_JOBS: 5
+
 --! Tool: starts a Docker setup that's allowed to take longer (e.g. package
 --! installation), WITHOUT blocking the reply. 'docker run -d' returns as
 --! soon as the container has STARTED — the actual setup then continues on
@@ -1671,6 +1676,12 @@ fn tool_docker_hintergrund_setup image name setup_command beschreibung workspace
     dbh: get STATE "dbh"
     if tok == nil || cid == nil || dbh == nil
         return "Kein Chat-/Datenbank-Kontext verfuegbar, kann kein Hintergrund-Setup starten."
+    --! Global ceiling first — unlike the per-chat guard below, this refusal
+    --! is unconditional (no erneut_versuchen override) since it's about
+    --! total host resource usage across every chat/group, not this one
+    --! conversation's own duplicate-job risk.
+    if (dt.running_job_count dbh) >= MAX_CONCURRENT_DOCKER_JOBS
+        return "Es laufen bereits " ++ (to_str MAX_CONCURRENT_DOCKER_JOBS) ++ " Hintergrund-Jobs insgesamt — kein neuer Job gestartet, bis einer davon fertig ist."
     --! Deterministic duplicate-job guard — the prompt-only "check
     --! docker_job_status first" rule below was NOT reliably followed (see
     --! dt.running_job_for_chat's doc comment), so this refuses a second

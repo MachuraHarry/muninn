@@ -12,7 +12,35 @@ import "modules/mcp.pipe" as mcp
 --! Creates the plans table (idempotent).
 export fn init_executor h
     db_exec h "CREATE TABLE IF NOT EXISTS plans (id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT, steps TEXT, state TEXT, step_idx INTEGER, result TEXT, created TEXT, updated TEXT)"
+    --! Idempotent migration (see MAX_PLAN_REVISIONS/execute_from below): the
+    --! module raises "duplicate column name" if this already ran, so
+    --! try/catch is the correct idempotency guard here (verified live
+    --! against the sqlite module — ALTER TABLE ADD COLUMN has no
+    --! "IF NOT EXISTS").
+    try
+        db_exec h "ALTER TABLE plans ADD COLUMN revisions INTEGER DEFAULT 0"
+    catch e_mig
+        nil
     nil
+
+--! Hard cap on total AI-driven step revisions per plan (see execute_from)
+--! — without this, a plan whose steps keep failing in a new way each time
+--! could revise indefinitely across repeated goal_tick scheduler runs,
+--! with unbounded AI cost and no forced termination.
+MAX_PLAN_REVISIONS: 5
+
+--! Retention window for cleanup_old_plans below. 30 days.
+PLAN_RETENTION_SEC: 2592000
+
+--! Deletes finished plans (done/failed) older than PLAN_RETENTION_SEC —
+--! this table otherwise keeps every plan ever run forever.
+export fn cleanup_old_plans h now_sec
+    init_executor h
+    cutoff: format_time (now_sec - PLAN_RETENTION_SEC) "2006-01-02 15:04:05"
+    --! OR, not IN — see the identical comment in scheduler.pipe's
+    --! cleanup_old: the pure-Pipe sqlite module's IN operator is broken
+    --! (matches zero rows), confirmed live.
+    db_exec h ("DELETE FROM plans WHERE (state = 'done' OR state = 'failed') AND created < '" ++ (mem.sql_escape cutoff) ++ "'")
 
 --! Builds an empty step with the given action.
 fn step action
@@ -160,12 +188,13 @@ export fn exec_step h s
 --! Creates a plan and returns the id.
 fn create_plan h goal steps
     ts: mem.sql_escape (mem.now_ts 0)
-    db_exec h ("INSERT INTO plans (goal, steps, state, step_idx, result, created, updated) VALUES ('" ++ (mem.sql_escape goal) ++ "', '" ++ (mem.sql_escape (to_json steps)) ++ "', 'running', 0, '', '" ++ ts ++ "', '" ++ ts ++ "')")
+    db_exec h ("INSERT INTO plans (goal, steps, state, step_idx, result, created, updated, revisions) VALUES ('" ++ (mem.sql_escape goal) ++ "', '" ++ (mem.sql_escape (to_json steps)) ++ "', 'running', 0, '', '" ++ ts ++ "', '" ++ ts ++ "', 0)")
     get (at (db_query h "SELECT max(id) AS mid FROM plans") 0) "mid"
 
---! Updates the plan state (checkpoint).
-fn update_plan h pid state idx result
-    db_exec h ("UPDATE plans SET state = '" ++ (mem.sql_escape state) ++ "', step_idx = " ++ (to_str idx) ++ ", result = '" ++ (mem.sql_escape result) ++ "', updated = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str pid))
+--! Updates the plan state (checkpoint), including the running revision
+--! count (see MAX_PLAN_REVISIONS/execute_from).
+fn update_plan h pid state idx result revisions
+    db_exec h ("UPDATE plans SET state = '" ++ (mem.sql_escape state) ++ "', step_idx = " ++ (to_str idx) ++ ", result = '" ++ (mem.sql_escape result) ++ "', revisions = " ++ (to_str revisions) ++ ", updated = '" ++ (mem.sql_escape (mem.now_ts 0)) ++ "' WHERE id = " ++ (to_str pid))
 
 --! Describes the 'mcp_call' action including currently available tools
 --! (local + MCP) for the AI plan prompts. Empty if no tools are registered
@@ -212,14 +241,14 @@ fn drop_step steps fail_idx
 export fn run_plan h goal steps
     init_executor h
     pid: create_plan h goal steps
-    execute_from h pid goal steps 0
+    execute_from h pid goal steps 0 0
 
 --! Continues an already-created, running plan from its checkpoint (P4:
 --! long-running goals with resume — the scheduler ticks open plans).
 --! step_idx counts completed steps; that makes a resume idempotent.
 export fn resume_plan h pid
     init_executor h
-    rows: db_query h ("SELECT goal, steps, state, step_idx FROM plans WHERE id = " ++ (to_str pid))
+    rows: db_query h ("SELECT goal, steps, state, step_idx, revisions FROM plans WHERE id = " ++ (to_str pid))
     if (len rows) == 0
         f: {}
         set f "ok" false
@@ -236,27 +265,44 @@ export fn resume_plan h pid
         steps: parse_json (get p "steps")
     catch
         steps: []
-    execute_from h pid (get p "goal") steps (get p "step_idx")
+    start_revisions: get p "revisions"
+    if start_revisions == nil
+        start_revisions: 0
+    execute_from h pid (get p "goal") steps (get p "step_idx") start_revisions
 
 --! Shared step loop (run_plan/resume_plan): from step `start` to the end,
 --! with a checkpoint after every success and a feedback loop on errors.
-fn execute_from h pid goal steps start
+--! start_revisions: total AI-driven revisions this plan has already used
+--! (0 for a fresh plan, carried over from the DB on a resume) — capped at
+--! MAX_PLAN_REVISIONS regardless of how many separate execute_from calls
+--! (goal_tick resumes) it took to get there.
+fn execute_from h pid goal steps start start_revisions
     i: start
     errs: 0
-    update_plan h pid "running" i ""
+    total_revisions: start_revisions
+    update_plan h pid "running" i "" total_revisions
     while i < (len steps)
         s: at steps i
         r: exec_step h s
         if get r "ok"
             i: i + 1
             errs: 0
-            update_plan h pid "running" i ""
+            update_plan h pid "running" i "" total_revisions
         else
             errs: errs + 1
             if errs > 2
+                if total_revisions >= MAX_PLAN_REVISIONS
+                    msg_cap: "Plan cancelled: exceeded max revision limit (" ++ (to_str MAX_PLAN_REVISIONS) ++ "). Last error: " ++ (get r "error")
+                    update_plan h pid "failed" i msg_cap total_revisions
+                    mem.log_error h "executor_revision_cap" msg_cap
+                    f: {}
+                    set f "ok" false
+                    set f "plan_id" pid
+                    set f "error" msg_cap
+                    return f
                 revised: revise_steps h goal steps i (get r "error")
                 if (len revised) <= i
-                    update_plan h pid "failed" i (get r "error")
+                    update_plan h pid "failed" i (get r "error") total_revisions
                     f: {}
                     set f "ok" false
                     set f "plan_id" pid
@@ -264,8 +310,9 @@ fn execute_from h pid goal steps start
                     return f
                 steps: revised
                 errs: 0
-                update_plan h pid "running" i ""
-    update_plan h pid "done" i ""
+                total_revisions: total_revisions + 1
+                update_plan h pid "running" i "" total_revisions
+    update_plan h pid "done" i "" total_revisions
     out: {}
     set out "ok" true
     set out "plan_id" pid

@@ -10,6 +10,8 @@ import "modules/mcp.pipe" as mcp
 import "modules/scheduler.pipe" as sched
 import "modules/docker_tools.pipe" as dt
 import "modules/telegram.pipe" as tel
+import "modules/commands.pipe" as cmd
+import "modules/live_status.pipe" as ls
 
 --! Regelklassifikation: Kategorien ohne KI.
 test "rule_classify erkennt 'merke/erinnere' als permanent"
@@ -717,6 +719,24 @@ test "run_plan Feedback-Loop streicht fehlgeschlagenen Schritt"
     expect_eq (mem.memory_count h) 1 "guter Schritt ausgeführt"
     mem.close h
 
+--! Kostenschutz: ohne Obergrenze koennte ein Plan, dessen Schritte immer
+--! auf neue Art scheitern, unbegrenzt oft per KI-Aufruf revidiert werden.
+test "run_plan bricht nach MAX_PLAN_REVISIONS Revisionen ab, statt endlos zu laufen"
+    h: mem.init_db ":memory:"
+    steps: []
+    i: 0
+    while i < 10
+        bad: {}
+        set bad "action" "boom"
+        push steps bad
+        i: i + 1
+    r: exe.run_plan h "Immer kaputt" steps
+    expect_eq (get r "ok") false "bricht ab statt endlos zu revidieren"
+    expect_contains (get r "error") "exceeded max revision limit" "Grund ist das Revisions-Limit"
+    st: exe.plan_state h (get r "plan_id")
+    expect_eq (get st "state") "failed" "Plan-Status failed"
+    mem.close h
+
 --! Web: HTML-Strippen und Entities.
 test "strip_html entfernt Tags und Entities"
     t: web.strip_html "<p>Hallo <b>Welt</b> &amp; alle</p>"
@@ -764,6 +784,33 @@ test "exec_whitelist_for: SSE-Server tragen nichts zur exec-Whitelist bei"
     raw: "[{\"type\":\"sse\",\"url\":\"http://localhost:9090/mcp\"}]"
     servers: mcp.parse_mcp_config raw
     expect_eq (len (mcp.exec_whitelist_for servers)) 0 "sse braucht kein exec"
+
+test "is_in_cooldown ist false ohne vorherigen Fehlschlag"
+    expect_eq (mcp.is_in_cooldown "nie_zuvor_verwendeter_alias" 1000) false "kein Eintrag -> kein Cooldown"
+
+--! Backoff (Verbesserung): ein dauerhaft kaputter Auto-Server wurde vor
+--! diesem Fix bei JEDER passenden Nachricht erneut verbunden (bis zu 120s
+--! MCP-Handshake-Timeout, wiederholt, ohne Cooldown). connect_one setzt bei
+--! einem echten Fehlschlag (nicht 'already in use') jetzt FAILED_UNTIL.
+test "connect_one setzt bei echtem Fehlschlag einen Cooldown, der spaeterablaeuft"
+    alias: "cooldown_test_connect_one"
+    bad_server: {alias: alias, type: "stdio", command: "/pfad/existiert/nicht/xyz789", args: []}
+    r: mcp.connect_servers [bad_server]
+    res: at r 0
+    expect_eq (get res "ok") false "Verbindung schlaegt erwartungsgemaess fehl"
+    t0: now
+    expect_eq (mcp.is_in_cooldown alias (t0 + 1)) true "Cooldown ist unmittelbar danach aktiv"
+    expect_eq (mcp.is_in_cooldown alias (t0 + 1200 + 5)) false "Cooldown ist nach Ablauf beendet"
+
+test "auto_servers_for_task waehlt einen Server in Cooldown NICHT aus, nach Ablauf wieder"
+    alias: "cooldown_test_auto_select"
+    bad_server: {alias: alias, type: "stdio", command: "/pfad/existiert/nicht/xyz987", args: [], keywords: ["cooldowntriggerwort"]}
+    mcp.connect_servers [bad_server]
+    t0: now
+    selected: mcp.auto_servers_for_task [bad_server] "bitte cooldowntriggerwort aktivieren" t0
+    expect_eq (len selected) 0 "Server in Cooldown wird nicht ausgewaehlt"
+    selected2: mcp.auto_servers_for_task [bad_server] "bitte cooldowntriggerwort aktivieren" (t0 + 1200 + 5)
+    expect_eq (len selected2) 1 "nach Ablauf des Cooldowns wieder ausgewaehlt"
 
 --! Web: DDG-Ergebnis-Parsing (deterministisches Fixture).
 test "parse_ddg extrahiert Titel und URLs"
@@ -1050,3 +1097,66 @@ test "condense_fact kürzt ohne KI auf 300 Zeichen"
     expect_eq (len long) 320 "Ausgangstext 320 Zeichen"
     out: mem.condense_fact long
     expect_eq (len out) 300 "gekürzt auf 300"
+
+--! question_needs_research: nil/leere Antwort gilt als gescheitert.
+test "question_needs_research: nil/leer -> true"
+    expect_eq (cmd.question_needs_research nil) true "nil -> true"
+    expect_eq (cmd.question_needs_research "") true "leer -> true"
+
+--! Live beobachtet: eine mit '?' endende Antwort ist eine legitime
+--! Rueckfrage, keine gescheiterte Antwort — der Bypass muss vor allen
+--! anderen Pruefungen greifen.
+test "question_needs_research: Antwort mit '?' am Ende ist KEINE gescheiterte Antwort"
+    expect_eq (cmd.question_needs_research "Was meinst du damit?") false "endet mit '?' -> false"
+
+test "question_needs_research: lange Antwort (>300 Zeichen) wird nicht erneut recherchiert"
+    long: "keine informationen "
+    i: 0
+    while (len long) <= 300
+        long: long ++ "weiteres Fuellwort "
+        i: i + 1
+    expect_eq ((len long) > 300) true "Testtext ist laenger als 300 Zeichen"
+    expect_eq (cmd.question_needs_research long) false "laenger als 300 -> false trotz Ausweich-Phrase"
+
+test "question_needs_research: kurze deutsche Ausweich-Antwort triggert Recherche"
+    expect_eq (cmd.question_needs_research "Ich weiß es nicht.") true "'Ich weiß es nicht' -> true"
+    expect_eq (cmd.question_needs_research "Als Sprachmodell habe ich keinen Internetzugriff.") true "'als sprachmodell' -> true"
+
+test "question_needs_research: normale kurze Sachantwort triggert KEINE Recherche"
+    expect_eq (cmd.question_needs_research "Der Eiffelturm steht in Paris.") false "normale Antwort -> false"
+
+--! to_math_mono: jedes ersetzte Zeichen wird zu einem 4-Byte-UTF-8-Glyph
+--! (Mathematical Monospace) — Laenge ist der einfachste, verlaessliche
+--! Nachweis, dass die Ersetzung wirklich stattfindet.
+test "to_math_mono: Grossbuchstaben werden zu 4-Byte-Glyphen (laengentreu pruefbar)"
+    expect_eq (len (ls.to_math_mono "AZ")) 8 "2 Zeichen x 4 Bytes"
+
+test "to_math_mono: Kleinbuchstaben werden ebenfalls ersetzt"
+    expect_eq (len (ls.to_math_mono "az")) 8 "2 Zeichen x 4 Bytes"
+
+test "to_math_mono: Ziffern/Satzzeichen/Leerzeichen bleiben unveraendert"
+    out: ls.to_math_mono "Mimir 123!"
+    expect_eq (contains out " 123!") true "unveraenderter Teil bleibt als Teilstring erhalten"
+
+test "truncate_status: nil -> leer"
+    expect_eq (ls.truncate_status nil 10) "" "nil -> leer"
+
+test "truncate_status: kuerzer als n bleibt unveraendert"
+    expect_eq (ls.truncate_status "hi" 10) "hi" "kuerzer als n -> unveraendert"
+
+test "truncate_status: laenger als n wird mit Ellipse gekuerzt"
+    expect_eq (ls.truncate_status "abcdefghij" 5) "abcde…" "gekuerzt auf 5 + Ellipse"
+
+test "render_progress_bar: nil-Parameter ergeben leeren String"
+    expect_eq (ls.render_progress_bar nil 150) "" "round nil -> leer"
+    expect_eq (ls.render_progress_bar 10 nil) "" "max_rounds nil -> leer"
+    expect_eq (ls.render_progress_bar 5 0) "" "max_rounds 0 -> leer"
+
+test "render_progress_bar: 0 von 150 ist leer gefuellt"
+    expect_eq (ls.render_progress_bar 0 150) "▒▒▒▒▒▒▒▒▒▒[0%]" "0% gefuellt"
+
+test "render_progress_bar: 150 von 150 ist voll gefuellt bei 100%"
+    expect_eq (ls.render_progress_bar 150 150) "██████████[100%]" "100% gefuellt"
+
+test "render_progress_bar: ueber max_rounds wird auf 100% gekappt"
+    expect_eq (ls.render_progress_bar 200 150) "██████████[100%]" "auf 100% gekappt"

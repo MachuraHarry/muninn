@@ -8,6 +8,16 @@
 --!     "env":{"GITHUB_TOKEN":"env:GITHUB_TOKEN"}}]
 CONNECTED: {}
 
+--! Cooldown state for auto-reconnect attempts (see connect_one/
+--! auto_servers_for_task below): a permanently-broken auto-configured
+--! server would otherwise be retried on EVERY single keyword-matching
+--! message, forever — and the MCP handshake has a 120s timeout (pkg/mcp/
+--! client.go), so that could block a reply for up to 120s, repeatedly,
+--! with no backoff. FAILED_UNTIL maps alias -> unix-seconds until which
+--! auto_servers_for_task should skip re-selecting it.
+FAILED_UNTIL: {}
+MCP_RECONNECT_COOLDOWN_SEC: 1200
+
 --! Aliases whose tools should only ever run for the owner, even in a group
 --! that has "gruppenrechte" set to "alle" (see compute_full_rights in
 --! muninn.pipe/has_full_rights in swarm.pipe — that gate covers Muninn's
@@ -172,6 +182,7 @@ fn connect_one idx s
             connect_stdio (get s "command") cargs (resolve_env (get s "env")) alias
         set r "ok" true
         set CONNECTED alias true
+        set FAILED_UNTIL alias nil
     catch e
         msg: to_str e
         if contains msg "already in use"
@@ -187,10 +198,22 @@ fn connect_one idx s
             --! worked.
             set r "ok" true
             set CONNECTED alias true
+            set FAILED_UNTIL alias nil
         else
             set r "ok" false
             set r "error" msg
+            --! Start (or refresh) a cooldown so this alias isn't
+            --! re-attempted on every subsequent matching message — see
+            --! FAILED_UNTIL's doc comment above.
+            set FAILED_UNTIL alias (now + MCP_RECONNECT_COOLDOWN_SEC)
     r
+
+--! Whether alias is still within its reconnect cooldown (see FAILED_UNTIL
+--! above) — pure/testable, takes now_sec explicitly rather than calling
+--! `now` itself.
+export fn is_in_cooldown alias now_sec
+    u: get FAILED_UNTIL alias
+    u != nil && now_sec < u
 
 --! Connects all configured servers. One failing server doesn't block the
 --! others (best effort, every error is reported back).
@@ -208,7 +231,7 @@ export fn is_connected alias
 
 --! Selects MCP servers from a trusted auto-registry. An entry needs
 --! `keywords` and the normal server configuration.
-export fn auto_servers_for_task servers task
+export fn auto_servers_for_task servers task now_sec
     out: []
     low: lower task
     for s in servers
@@ -219,14 +242,14 @@ export fn auto_servers_for_task servers task
             for word in words
                 if contains low (lower word)
                     matched: true
-        if matched && alias != nil && (get CONNECTED alias) == nil
+        if matched && alias != nil && (get CONNECTED alias) == nil && !(is_in_cooldown alias now_sec)
             push out s
     out
 
 --! Connects matching registry servers once (CONNECTED is already maintained
 --! by connect_one/connect_servers themselves, see comment there).
-export fn ensure_for_task servers task
-    selected: auto_servers_for_task servers task
+export fn ensure_for_task servers task now_sec
+    selected: auto_servers_for_task servers task now_sec
     connect_servers selected
 
 --! Names of all discovered MCP tools (local + remote), excluding the passed-in

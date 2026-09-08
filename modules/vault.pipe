@@ -141,7 +141,20 @@ fn encrypt_value v
     out_path: in_path ++ ".out"
     write_file in_path v
     cmd: "openssl enc -aes-256-cbc -pbkdf2 -salt -pass pass:" ++ (sh_single_quote key) ++ " -base64 -A -in " ++ (sh_single_quote in_path) ++ " -out " ++ (sh_single_quote out_path)
-    r: exec cmd
+    --! r: exec cmd wrapped in try/catch (rather than just the status check
+    --! below) — a genuine exception from exec() itself (as opposed to a
+    --! plain non-zero exit status, already handled below) previously
+    --! skipped BOTH vault_tmp_cleanup calls entirely, leaking the plaintext
+    --! password file under .vault_tmp/ indefinitely. Pipe has no `finally`,
+    --! so cleanup-then-reraise in the catch is the only way to guarantee it
+    --! runs on every path.
+    r: {}
+    try
+        r: exec cmd
+    catch e_exec
+        vault_tmp_cleanup in_path
+        vault_tmp_cleanup out_path
+        raise ("Verschluesselung fehlgeschlagen (exec): " ++ (to_str e_exec))
     vault_tmp_cleanup in_path
     if (get r "status") != 0
         vault_tmp_cleanup out_path
@@ -158,7 +171,15 @@ fn decrypt_value v
     out_path: in_path ++ ".out"
     write_file in_path v
     cmd: "openssl enc -aes-256-cbc -pbkdf2 -salt -pass pass:" ++ (sh_single_quote key) ++ " -base64 -A -d -in " ++ (sh_single_quote in_path) ++ " -out " ++ (sh_single_quote out_path)
-    r: exec cmd
+    --! See the identical comment in encrypt_value above — guarantees
+    --! cleanup even if exec() itself raises, not just on a non-zero status.
+    r: {}
+    try
+        r: exec cmd
+    catch e_exec
+        vault_tmp_cleanup in_path
+        vault_tmp_cleanup out_path
+        raise ("Entschluesselung fehlgeschlagen (exec): " ++ (to_str e_exec))
     vault_tmp_cleanup in_path
     if (get r "status") != 0
         vault_tmp_cleanup out_path
