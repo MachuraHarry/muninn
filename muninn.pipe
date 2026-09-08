@@ -1854,11 +1854,25 @@ fn sched_finalize item action now_sec
     mem.close_locked h
     nil
 
+--! Returns milliseconds-until-next-due (see sched.next_due_ms), computed on
+--! the SAME already-open read_h as recover/due below, so the main loop's
+--! poll-timeout calculation no longer needs its own dedicated open_locked
+--! (see the while-true loop) — one more full open/close cycle avoided per
+--! idle iteration (see the offset comment in poll_once for why that
+--! matters with the pure-Pipe sqlite module). Computed BEFORE the for-loop
+--! below claims/fires anything this tick, so if something WAS due this
+--! tick, the returned value can be stale-short (e.g. 0) by the time this
+--! function returns — harmless, it only makes the NEXT iteration's poll
+--! timeout shorter than strictly necessary for one iteration, never
+--! delays anything actually due; the following tick's fresh call
+--! self-corrects. Do not "fix" this by moving the computation after the
+--! loop — that would need a second open just for it.
 fn sched_tick token allowed
     now_sec: now
     read_h: mem.open_locked nil
     sched.recover (get read_h "h")
     due: sched.due (get read_h "h") now_sec
+    next_ms: sched.next_due_ms (get read_h "h") now_sec
     mem.close_locked read_h
     for item in due
         claim_h: mem.open_locked nil
@@ -2068,7 +2082,19 @@ fn sched_tick token allowed
             --! actual gremium run + send is skipped while the setting is off.
             if mem.setting_proaktiv_enabled dbh (to_str cid)
                 setup_sandbox all_mcp_servers
-                prompt_proaktiv: "PROACTIVE IMPULSE (you were NOT addressed — decide for yourself whether a message to the user is worthwhile): use 'erinnerungen_suchen' to look into your memory: are there open/started tasks, interrupted work, upcoming appointments, or important developments on topics that matter to the user — something the user themselves would bring up? If there's something IMPORTANT: write the short, concrete message to the user; if you find a task you should revisit at a specific time, plan that yourself with 'erinnerung_planen' or 'hintergrund_fortsetzen'. If there's NOTHING worth mentioning: reply ONLY with the single word NOTHING, with no other characters."
+                --! "planer: hand off to faktenwaechter first" + "never explain
+                --! internal tool/agent limitations" were added live after
+                --! observing a misroute straight to 'registrator' (which
+                --! doesn't have 'erinnerungen_suchen') — it then explained
+                --! its own missing tool access to the user instead of
+                --! searching or replying NOTHING, leaking implementation
+                --! detail ("I'm the registrator...") as if it were a real
+                --! proactive message. The tool-call check right below this
+                --! prompt is the actual guarantee against that leak (works
+                --! regardless of what the model decides to route/say); this
+                --! wording is only the first line of defense to make the
+                --! correct routing the likely path in the first place.
+                prompt_proaktiv: "PROACTIVE IMPULSE (system-internal check — you were NOT addressed by the user; planer: this is a memory question, hand off to 'faktenwaechter' FIRST, never straight to 'registrator'): use 'erinnerungen_suchen' to look into your memory: are there open/started tasks, interrupted work, upcoming appointments, or important developments on topics that matter to the user — something the user themselves would bring up? If there's something IMPORTANT: write the short, concrete message to the user; if you find a task you should revisit at a specific time, plan that yourself with 'erinnerung_planen' or 'hintergrund_fortsetzen'. If there's NOTHING worth mentioning, OR you personally have no access to 'erinnerungen_suchen' and no other agent in this run already searched memory for you: reply ONLY with the single word NOTHING, with no other characters — NEVER explain internal tool/agent limitations to the user, that's an implementation detail, not a message worth sending."
                 --! MUST be caught — see the identical comment in job_check
                 --! above. Without this, a failure here would skip the
                 --! mark_fired/continue below.
@@ -2080,8 +2106,24 @@ fn sched_tick token allowed
                 try
                     on_update_bg3: make_swarm_updater token cid nil dbh
                     round_check_bg3: make_round_check token cid allowed dbh nil
-                    res_proaktiv: grm.run_gremium_stream dbh cid prompt_proaktiv on_update_bg3 round_check_bg3
+                    --! Deterministic backstop for the misroute above: rather
+                    --! than trust whatever text comes back, verify memory was
+                    --! ACTUALLY searched this run (mirrors this codebase's
+                    --! general "verified, not claimed" philosophy — see
+                    --! VERIFY_CLAIM_RULE/RESULT_HONESTY_RULE). If no agent
+                    --! called 'erinnerungen_suchen' at all, there is no real
+                    --! basis for an "important" claim regardless of what text
+                    --! the model produced — force silence instead of risking
+                    --! a leaked meta-explanation reaching the user.
+                    proaktiv_search_state: {searched: false}
+                    fn on_update_bg3_tracked agent event detail args_json round max_rounds
+                        if event == "tool" && detail == "erinnerungen_suchen"
+                            set proaktiv_search_state "searched" true
+                        on_update_bg3 agent event detail args_json round max_rounds
+                    res_proaktiv: grm.run_gremium_stream dbh cid prompt_proaktiv on_update_bg3_tracked round_check_bg3
                     content_proaktiv: get res_proaktiv "content"
+                    if !(get proaktiv_search_state "searched")
+                        content_proaktiv: nil
                     if content_proaktiv != nil && (lower (trim content_proaktiv)) != "nothing" && (trim content_proaktiv) != ""
                         tel.tel_send_rich_message token (to_num cid) (cmd.shorten (trim content_proaktiv)) nil
                 catch e15
@@ -2141,21 +2183,34 @@ fn sched_tick token allowed
                 mem.log_error dbh ("scheduler_message_send:" ++ kind) (to_str e7)
         mem.close dbh
         sched_finalize item "fire" now_sec
-    nil
+    next_ms
 
---! One polling cycle. Returns the last processed update_id. The offset read,
---! update claim, and final offset write are short database phases; Telegram
---! long-polling and the complete handle_update/handle_callback chains run
---! with an ordinary sqlite handle, never with mem.open_locked held around
---! AI, network, or file work.
+--! One polling cycle. Returns the last processed update_id. The offset read
+--! and write are short database phases (each SKIPPED entirely when there's
+--! nothing new to persist — see the comments inside), and each update/
+--! callback gets its own short-lived handle closed right after that one
+--! update's handle_update/handle_callback chain finishes; Telegram
+--! long-polling and all AI/network/file work never run with a
+--! mem.open_locked handle held open around them.
 fn poll_once token offset allowed timeout
-    hl: mem.open_locked nil
-    dbh: get hl "h"
+    --! Reading/writing telegram_offset used to be two UNCONDITIONAL
+    --! open_locked/close_locked pairs on every single call — cheap when this
+    --! was a real sqlite handle, but the pure-Pipe "sqlite" module (see
+    --! SQLite.md) reads/decodes the ENTIRE db file on open and re-encodes/
+    --! rewrites the ENTIRE file on close (live-benchmarked: ~2.8s open +
+    --! ~1.4s close against the real muninn.db). offset is nil only on the
+    --! very first call after process start (every later call gets it back
+    --! from this function's own return value via the caller's `off`
+    --! variable), so gate the read behind that — same for the write below,
+    --! gated on whether offset actually changed this cycle.
     if offset == nil
+        hl: mem.open_locked nil
+        dbh: get hl "h"
         saved: mem.meta_get dbh "telegram_offset"
         if saved != ""
             offset: to_num saved
-    mem.close_locked hl
+        mem.close_locked hl
+    offset_before: offset
     updates: []
     try
         updates: tel.tel_get_updates token offset timeout
@@ -2174,11 +2229,15 @@ fn poll_once token offset allowed timeout
             chat: get msg "chat"
             if chat != nil
                 cid: get chat "id"
-                claim_h: mem.open_locked nil
-                claim_dbh: get claim_h "h"
-                skip_update: !(is_allowed cid allowed) || (mem.was_injected claim_dbh uid)
-                mem.close_locked claim_h
-                if !skip_update
+                --! is_allowed first (pure, no DB) — a disallowed chat now
+                --! costs zero DB opens instead of one. was_injected reuses
+                --! dbh2 itself (was a separate claim_h open before this same
+                --! db file would be opened AGAIN for dbh2 right below it —
+                --! two full open/close cycles for one update; see the
+                --! offset comment above on why that's expensive here) since
+                --! it's a plain read with no ordering constraint relative to
+                --! handle_update.
+                if is_allowed cid allowed
                     dbh2: mem.init_db nil
                     --! was_injected: a message a round_check already fed into
                     --! a swarm run as a steering interjection (see
@@ -2188,16 +2247,17 @@ fn poll_once token offset allowed timeout
                     --! non-destructive), so without this check it would
                     --! surface again right here and start a second,
                     --! unintended gremium run for the same text.
-                    try
-                        handle_update token cid msg dbh2 allowed uid
-                    catch e9
-                        --! Catches ANY unexpected error from the ENTIRE message
-                        --! processing (photo/voice/document/gremium/...) —
-                        --! without this log, a real crash somewhere in there
-                        --! looked identical to "Muninn just isn't responding",
-                        --! with no clue where.
-                        print ("handle_update failed: " ++ (to_str e9))
-                        mem.log_error dbh2 "handle_update" (to_str e9)
+                    if !(mem.was_injected dbh2 uid)
+                        try
+                            handle_update token cid msg dbh2 allowed uid
+                        catch e9
+                            --! Catches ANY unexpected error from the ENTIRE message
+                            --! processing (photo/voice/document/gremium/...) —
+                            --! without this log, a real crash somewhere in there
+                            --! looked identical to "Muninn just isn't responding",
+                            --! with no clue where.
+                            print ("handle_update failed: " ++ (to_str e9))
+                            mem.log_error dbh2 "handle_update" (to_str e9)
                     mem.close dbh2
         cq: get upd "callback_query"
         if cq != nil
@@ -2212,7 +2272,7 @@ fn poll_once token offset allowed timeout
                         print ("handle_callback failed: " ++ (to_str e10))
                         mem.log_error dbh3 "handle_callback" (to_str e10)
                     mem.close dbh3
-    if offset != nil
+    if offset != nil && offset != offset_before
         hl3: mem.open_locked nil
         mem.meta_set (get hl3 "h") "telegram_offset" (to_str offset)
         mem.close_locked hl3
@@ -2533,19 +2593,31 @@ else
                 off: poll_once tok off allowed 25
                 print "once cycle done."
             else
+                --! nxt: carried across iterations (nil only before the very
+                --! first one) instead of a dedicated open_locked here just to
+                --! peek at sched.next_due_ms — sched_tick already opens a
+                --! handle every tick for recover/due and now returns
+                --! next_due_ms computed on that SAME handle (see its doc
+                --! comment), so this loop reuses last iteration's value to
+                --! size THIS iteration's poll timeout instead of paying for
+                --! its own full open/close (see poll_once's offset comment
+                --! for why that cost matters here). One accepted trade-off:
+                --! on the very first iteration after a restart, nxt is still
+                --! nil, so that one iteration always long-polls the full
+                --! 25s even if something was already overdue — it still
+                --! fires within that same ≤25s once sched_tick's own
+                --! recover/due runs right after, so nothing is lost, just
+                --! possibly delayed by a few seconds, once, per restart.
+                nxt: nil
                 while true
                     try
                         timeout: 25
-                        hl0: mem.open_locked nil
-                        dbh0: get hl0 "h"
-                        nxt: sched.next_due_ms dbh0 (now)
-                        mem.close_locked hl0
                         if nxt != nil && nxt < 25000
                             timeout: nxt / 1000
                             if timeout < 1
                                 timeout: 1
                         off: poll_once tok off allowed timeout
-                        sched_tick tok allowed
+                        nxt: sched_tick tok allowed
                         maybe_log_cost 0
                     catch e
                         print ("Cycle error — retrying: " ++ (to_str e))
