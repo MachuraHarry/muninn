@@ -1138,32 +1138,6 @@ test "to_math_mono: Ziffern/Satzzeichen/Leerzeichen bleiben unveraendert"
     out: ls.to_math_mono "Mimir 123!"
     expect_eq (contains out " 123!") true "unveraenderter Teil bleibt als Teilstring erhalten"
 
---! spinner_frame: 8-Frame rotierender Punkt (Braille) fuer die Live-Status-
---! Nachricht — advanct einmal pro tatsaechlichem Telegram-Edit, siehe
---! make_swarm_updater.
-test "spinner_frame: 8 Frames sind alle verschieden"
-    frames: []
-    i: 0
-    while i < 8
-        push frames (ls.spinner_frame i)
-        i: i + 1
-    j: 0
-    all_distinct: true
-    while j < 8
-        k: j + 1
-        while k < 8
-            if (at frames j) == (at frames k)
-                all_distinct: false
-            k: k + 1
-        j: j + 1
-    expect_eq all_distinct true "alle 8 Frames sind paarweise unterschiedlich"
-
-test "spinner_frame: wiederholt sich nach 8 Frames (Modulo)"
-    expect_eq (ls.spinner_frame 8) (ls.spinner_frame 0) "Frame 8 == Frame 0"
-    expect_eq (ls.spinner_frame 9) (ls.spinner_frame 1) "Frame 9 == Frame 1"
-
-test "spinner_frame: jedes Frame ist genau 1 Braille-Zeichen (3 UTF-8 Bytes)"
-    expect_eq (len (ls.spinner_frame 3)) 3 "Braille-Zeichen sind 3 Bytes in UTF-8"
 
 test "truncate_status: nil -> leer"
     expect_eq (ls.truncate_status nil 10) "" "nil -> leer"
@@ -1188,6 +1162,17 @@ test "render_progress_bar: ueber 100 wird gekappt"
 
 test "render_progress_bar: 45% ergibt 4 gefuellte Bloecke"
     expect_eq (ls.render_progress_bar 45) "████▒▒▒▒▒▒[45%]" "abgerundet auf 4 von 10 Bloecken"
+
+--! render_bottom_bar: der Balken sitzt jetzt an EINER festen Stelle ganz
+--! unten in der Nachricht (Trennlinie + Balken), statt an der jeweils
+--! aktuellen Gruppe zu haengen.
+test "render_bottom_bar: nil-pct ergibt leeren String (keine Trennlinie ohne Balken)"
+    expect_eq (ls.render_bottom_bar nil) "" "kein Balken -> auch keine Trennlinie"
+
+test "render_bottom_bar: enthaelt Trennlinie und Balken"
+    out: ls.render_bottom_bar 45
+    expect_eq (contains out "____________________") true "Trennlinie vorhanden"
+    expect_eq (contains out "████▒▒▒▒▒▒[45%]") true "Balken vorhanden"
 
 --! stage_checkpoint (Verbesserung): ersetzt den bedeutungslosen
 --! round/max_rounds-Balken fuer normale (nicht Plan-basierte) Anfragen mit

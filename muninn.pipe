@@ -1290,7 +1290,7 @@ fn make_swarm_updater token cid message_id dbh
     --! the "📜 Verlauf" button always shows the complete run regardless of
     --! this setting.
     verlauf_mode: mem.setting_get dbh (to_str cid) "live_verlauf" "voll"
-    stream_state: {groups: [], current: "", last_text: "", last_ms: 0, last_typing_ms: 0, plan: [], plan_loaded: false, stage_pct: nil, spin: 0}
+    stream_state: {groups: [], current: "", last_text: "", last_ms: 0, last_typing_ms: 0, plan: [], plan_loaded: false, stage_pct: nil}
     fn on_update agent event detail args_json round max_rounds
         ms: time_ms
         if (ms - (get stream_state "last_typing_ms")) >= 4000
@@ -1400,15 +1400,12 @@ fn make_swarm_updater token cid message_id dbh
             pct: get stream_state "stage_pct"
         text: ""
         if verlauf_mode == "knapp"
-            bar: ls.render_progress_bar pct
             head: (ls.agent_icon_name agent) ++ " :: " ++ (ls.agent_verb_phrase agent)
-            if bar != ""
-                head: head ++ " " ++ bar
             text: plan_prefix ++ head
             if (get stream_state "current") != ""
                 text: text ++ "\n" ++ (get stream_state "current")
         else
-            text: plan_prefix ++ (ls.render_groups groups pct)
+            text: plan_prefix ++ (ls.render_groups groups)
         if text == (get stream_state "last_text")
             return nil
         if (ms - (get stream_state "last_ms")) < 1000
@@ -1422,18 +1419,15 @@ fn make_swarm_updater token cid message_id dbh
         --! than Harry wanted on reflection. Agent names like "HEIMDALL"
         --! stay stylized via agent_icon_name; the rest of the message is
         --! now plain text again.
-        --! Small rotating spinner appended right before send, same pattern
-        --! to_math_mono used to follow — kept OUT of "text" itself (the
-        --! dedup check above and last_run_log's persisted groups don't see
-        --! it), so a spinning glyph alone never re-triggers an edit or
-        --! pollutes the saved trace; it only rides along on edits that were
-        --! going to happen anyway. Advances once per actual edit (not on a
-        --! timer), so it never spins faster than the message visibly
-        --! updates.
-        spin_idx: get stream_state "spin"
-        set stream_state "spin" (spin_idx + 1)
+        --! render_bottom_bar: one persistent bar at the very bottom of the
+        --! message (separator + bar), appended fresh right before send —
+        --! kept OUT of "text" itself (the dedup check above and
+        --! last_run_log's persisted groups don't see it), same reasoning
+        --! to_math_mono used to follow, so a pct-only change never
+        --! re-triggers an edit on its own and never pollutes the saved
+        --! trace.
         if message_id != nil
-            tel.tel_edit_message_text token cid message_id (text ++ "  " ++ (ls.spinner_frame spin_idx))
+            tel.tel_edit_message_text token cid message_id (text ++ (ls.render_bottom_bar pct))
     on_update
 
 --! Builds the round_check closure for run_gremium_stream (see its doc
@@ -1708,7 +1702,7 @@ fn handle_callback token dbh cbq allowed uid
         if groups == nil || (len groups) == 0
             tel.tel_send_message token cid "No detailed log available for the last run."
         else
-            tel.tel_send_message token cid ("📜 **Full run log:**\n\n" ++ (ls.render_groups groups nil))
+            tel.tel_send_message token cid ("📜 **Full run log:**\n\n" ++ (ls.render_groups groups))
         return nil
     if data == "more"
         if txt != nil

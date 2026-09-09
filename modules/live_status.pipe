@@ -45,26 +45,6 @@ export fn to_math_mono s
         i: i + 1
     out
 
---! 8-frame rotating single-dot spinner, Braille Patterns block (U+2800 base
---! + one dot bit each: 0x01/0x08/0x10/0x20/0x80/0x40/0x04/0x02, traversing
---! the 2x4 cell's perimeter clockwise — top-left, top-right, right-upper,
---! right-lower, bottom-right, bottom-left, left-lower, left-upper). Built
---! via hex_decode+from_bytes of the raw 3-byte-UTF-8 sequences (verified
---! with a standalone script before landing this), same reasoning as
---! MONO_UPPER/MONO_LOWER above — no literal Braille glyphs typed by hand
---! into this file. See spinner_frame below for how an index maps to one.
-SPINNER_FRAMES: from_bytes (hex_decode "e2a081e2a088e2a090e2a0a0e2a280e2a180e2a084e2a082")
-
---! Picks frame `idx mod 8` (each frame is 3 UTF-8 bytes, hence the *3
---! offsets — substring is byte-indexed, see SPINNER_FRAMES above). idx is
---! a monotonically increasing per-run counter (see make_swarm_updater's
---! stream_state["spin"]) — advances once per actual Telegram edit, so a
---! long silent stretch between edits doesn't make it spin faster than the
---! visible updates themselves.
-export fn spinner_frame idx
-    i: idx % 8
-    substring SPINNER_FRAMES (i * 3) (i * 3 + 3)
-
 --! Truncates a status snippet to n characters (for the live status line —
 --! unlike shorten (4000 characters, for Telegram messages) deliberately
 --! short here, so a single tool line doesn't blow up the whole status message.
@@ -372,15 +352,12 @@ export fn handoff_reason args_json
 --! {text, handoff} (see make_swarm_updater) — "├─ " for every entry but
 --! the last, "└─> " for a trailing handoff (points at the target it's
 --! handing off to, ASCII arrow to match the terminal-log look), plain
---! "└─ " for any other trailing entry. is_current: only the LAST group in
---! the whole run (the agent currently working) gets the progress bar
---! appended to its header — pct meaningless for a finished, earlier group.
-fn render_group g is_current pct
+--! "└─ " for any other trailing entry. No progress bar in here anymore —
+--! it now lives in ONE persistent spot at the very bottom of the whole
+--! message (see render_bottom_bar), not appended to whichever group
+--! happens to be current.
+fn render_group g
     header: agent_group_header (get g "agent")
-    if is_current
-        bar: render_progress_bar pct
-        if bar != ""
-            header: header ++ " " ++ bar
     lines: get g "lines"
     n: len lines
     if n == 0
@@ -407,7 +384,7 @@ fn render_group g is_current pct
 --! log VOCABULARY ([NAME]/::/>>///└─>). Kept under a safe character
 --! budget (a bit below shorten's 4000), dropping the OLDEST groups first
 --! with a leading marker when over it.
-export fn render_groups groups pct
+export fn render_groups groups
     budget: 3800
     kept: groups
     fn render_all gs
@@ -415,7 +392,7 @@ export fn render_groups groups pct
         n: len gs
         i: 0
         while i < n
-            push rendered (render_group (at gs i) (i == (n - 1)) pct)
+            push rendered (render_group (at gs i))
             i: i + 1
         join rendered "\n\n"
     text: render_all kept
@@ -471,6 +448,23 @@ export fn render_progress_bar pct
             bar: bar ++ "▒"
         i: i + 1
     bar ++ "[" ++ (to_str p) ++ "%]"
+
+--! Persistent bottom status bar: a horizontal rule followed by the
+--! progress bar — always appended after the tree/checklist content (see
+--! make_swarm_updater), in ONE fixed spot at the very end of the message,
+--! instead of tacked onto whichever group/line happens to be current (the
+--! previous approach — moved it here after Harry asked for a stable
+--! bottom-anchored bar instead). Kept OUT of the text make_swarm_updater
+--! compares for the dedup check / persists to last_run_log (append it only
+--! right before sending, same reasoning as to_math_mono used to follow) —
+--! callers that don't want a bar at all (the finished-run "📜 Verlauf"
+--! replay) simply never call this. pct nil -> "" (render_progress_bar's
+--! own nil-safety), so this is nil-safe too.
+export fn render_bottom_bar pct
+    bar: render_progress_bar pct
+    if bar == ""
+        return ""
+    "\n____________________\n" ++ bar
 
 --! Coarse pipeline "checkpoint" percentage for a non-plan run, based on
 --! which agent is currently active. planer/kritiker/registrator are exact
