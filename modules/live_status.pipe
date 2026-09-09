@@ -45,6 +45,26 @@ export fn to_math_mono s
         i: i + 1
     out
 
+--! 8-frame rotating single-dot spinner, Braille Patterns block (U+2800 base
+--! + one dot bit each: 0x01/0x08/0x10/0x20/0x80/0x40/0x04/0x02, traversing
+--! the 2x4 cell's perimeter clockwise — top-left, top-right, right-upper,
+--! right-lower, bottom-right, bottom-left, left-lower, left-upper). Built
+--! via hex_decode+from_bytes of the raw 3-byte-UTF-8 sequences (verified
+--! with a standalone script before landing this), same reasoning as
+--! MONO_UPPER/MONO_LOWER above — no literal Braille glyphs typed by hand
+--! into this file. See spinner_frame below for how an index maps to one.
+SPINNER_FRAMES: from_bytes (hex_decode "e2a081e2a088e2a090e2a0a0e2a280e2a180e2a084e2a082")
+
+--! Picks frame `idx mod 8` (each frame is 3 UTF-8 bytes, hence the *3
+--! offsets — substring is byte-indexed, see SPINNER_FRAMES above). idx is
+--! a monotonically increasing per-run counter (see make_swarm_updater's
+--! stream_state["spin"]) — advances once per actual Telegram edit, so a
+--! long silent stretch between edits doesn't make it spin faster than the
+--! visible updates themselves.
+export fn spinner_frame idx
+    i: idx % 8
+    substring SPINNER_FRAMES (i * 3) (i * 3 + 3)
+
 --! Truncates a status snippet to n characters (for the live status line —
 --! unlike shorten (4000 characters, for Telegram messages) deliberately
 --! short here, so a single tool line doesn't blow up the whole status message.
