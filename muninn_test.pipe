@@ -1152,16 +1152,23 @@ test "render_progress_bar: nil-Parameter ergibt leeren String"
     expect_eq (ls.render_progress_bar nil) "" "pct nil -> leer"
 
 test "render_progress_bar: 0% ist leer gefuellt"
-    expect_eq (ls.render_progress_bar 0) "▒▒▒▒▒▒▒▒▒▒[0%]" "0% gefuellt"
+    expect_eq (ls.render_progress_bar 0) "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ [0%]" "0% gefuellt, 30 Zellen"
 
 test "render_progress_bar: 100% ist voll gefuellt"
-    expect_eq (ls.render_progress_bar 100) "██████████[100%]" "100% gefuellt"
+    expect_eq (ls.render_progress_bar 100) "██████████████████████████████ [100%]" "100% gefuellt, 30 Zellen"
 
 test "render_progress_bar: ueber 100 wird gekappt"
-    expect_eq (ls.render_progress_bar 200) "██████████[100%]" "auf 100% gekappt"
+    expect_eq (ls.render_progress_bar 200) "██████████████████████████████ [100%]" "auf 100% gekappt"
 
-test "render_progress_bar: 45% ergibt 4 gefuellte Bloecke"
-    expect_eq (ls.render_progress_bar 45) "████▒▒▒▒▒▒[45%]" "abgerundet auf 4 von 10 Bloecken"
+--! Achtel-Block-Feinabstufung (Verbesserung): 45% von 30 Zellen sind 13.5
+--! Zellen — statt grob auf 4 von 10 Bloecken abzurunden (alte Version),
+--! zeigt der Balken jetzt den halben Uebergang exakt an.
+test "render_progress_bar: 45% zeigt einen halb gefuellten Uebergangs-Block"
+    expect_eq (ls.render_progress_bar 45) "█████████████▌░░░░░░░░░░░░░░░░ [45%]" "13 volle + 1 halbe Zelle von 30"
+
+test "render_progress_bar: 1% zeigt bereits einen sichtbaren Teil-Block"
+    out: ls.render_progress_bar 1
+    expect_eq (contains out "▎") true "kleinster sichtbarer Fortschritt ist nicht einfach 0"
 
 --! render_bottom_bar: der Balken sitzt jetzt an EINER festen Stelle ganz
 --! unten in der Nachricht (Trennlinie + Balken), statt an der jeweils
@@ -1171,8 +1178,8 @@ test "render_bottom_bar: nil-pct ergibt leeren String (keine Trennlinie ohne Bal
 
 test "render_bottom_bar: enthaelt Trennlinie und Balken"
     out: ls.render_bottom_bar 45
-    expect_eq (contains out "________________________________") true "32 Zeichen breite Trennlinie vorhanden"
-    expect_eq (contains out "████▒▒▒▒▒▒[45%]") true "Balken vorhanden"
+    expect_eq (contains out "________________________________________") true "40 Zeichen breite Trennlinie vorhanden"
+    expect_eq (contains out "█████████████▌░░░░░░░░░░░░░░░░ [45%]") true "Balken vorhanden"
 
 --! stage_checkpoint (Verbesserung): ersetzt den bedeutungslosen
 --! round/max_rounds-Balken fuer normale (nicht Plan-basierte) Anfragen mit

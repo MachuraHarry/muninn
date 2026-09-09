@@ -419,6 +419,34 @@ export fn render_plan plan
         push lines (sym ++ " " ++ (get p "text"))
     join lines "\n"
 
+--! Bar width in cells for render_progress_bar below. 30 (up from the
+--! original 10) roughly lines up under BOTTOM_BAR_SEPARATOR's 40
+--! characters once the " [100%]" suffix is added, so the whole footer
+--! reads as one deliberately-sized block instead of a short bar floating
+--! under a much longer line.
+PROGRESS_BAR_WIDTH: 30
+
+--! Maps an eighths-remainder (1-7, see render_progress_bar) to its
+--! left-aligned partial-fill glyph (Unicode Block Elements U+2589-258F —
+--! "LEFT N EIGHTHS BLOCK", designed exactly for smooth left-to-right
+--! progress bars: the left N/8 of the cell is filled, the rest empty).
+--! rem 0 is handled by the caller (no partial cell needed at a clean
+--! block boundary), so this is only ever called with 1-7.
+fn partial_block_char rem
+    if rem == 1
+        return "▏"
+    if rem == 2
+        return "▎"
+    if rem == 3
+        return "▍"
+    if rem == 4
+        return "▌"
+    if rem == 5
+        return "▋"
+    if rem == 6
+        return "▊"
+    "▉"
+
 --! Progress bar for an already-computed percentage (0-100) — the caller
 --! (make_swarm_updater) decides what the percentage MEANS: real step
 --! completion when a plan is active (plan_progress_pct), or a coarse
@@ -429,7 +457,16 @@ export fn render_plan plan
 --! used" read as near-zero for the vast majority of runs regardless of how
 --! close to done they actually were. nil -> no bar at all (a finished
 --! earlier group in the live tree, or a historical /trace-button replay
---! with no live pct to show). 10-block bar, e.g. "███▒▒▒▒▒▒▒[20%]".
+--! with no live pct to show).
+--!
+--! Smooth eighth-block fill (not just PROGRESS_BAR_WIDTH on/off cells):
+--! computes the fill in eighths-of-a-cell, renders full cells as "█", one
+--! partial cell via partial_block_char for whatever fraction is left over,
+--! and "░" for the remaining empty cells — the same technique modern CLI
+--! progress bars (e.g. Python's `rich`) use so the bar's leading edge
+--! moves smoothly instead of jumping in coarse steps. E.g. 45% at width 30
+--! -> "█████████████▌░░░░░░░░░░░░░░░░ [45%]" (13 full + one half-filled
+--! cell + 16 empty, vs. the old 10-cell bar's blunt "████▒▒▒▒▒▒[45%]").
 export fn render_progress_bar pct
     if pct == nil
         return ""
@@ -438,32 +475,36 @@ export fn render_progress_bar pct
         p: 100
     if p < 0
         p: 0
-    filled: p / 10
+    width: PROGRESS_BAR_WIDTH
+    eighths: (p * width * 8) / 100
+    full: eighths / 8
+    rem: eighths % 8
+    if full >= width
+        full: width
+        rem: 0
     bar: ""
     i: 0
-    while i < 10
-        if i < filled
-            bar: bar ++ "█"
-        else
-            bar: bar ++ "▒"
+    while i < full
+        bar: bar ++ "█"
         i: i + 1
-    bar ++ "[" ++ (to_str p) ++ "%]"
+    cells: full
+    if rem > 0
+        bar: bar ++ (partial_block_char rem)
+        cells: cells + 1
+    while cells < width
+        bar: bar ++ "░"
+        cells: cells + 1
+    bar ++ " [" ++ (to_str p) ++ "%]"
 
 --! Separator width for render_bottom_bar below. Telegram's live status
 --! message is plain text (proportional font, no code-block/monospace
 --! wrapping — see the file-level comment on render_groups), so this can't
---! be measured exactly without rendering on a real device; picked as a
---! conservative estimate from two data points: (1) Telegram's own
---! community convention for ASCII tables caps at 48 MONOSPACE characters
---! for mobile/portrait before wrapping (code-block font, smaller than the
---! regular message font); (2) general mobile chat-bubble readability
---! guidance puts ~35-45 average-width characters per line on a ~360dp
---! portrait screen at normal font size. 32 sits safely under both,
---! erring narrow rather than risking the line wrapping (a wrapped
---! separator looks broken; a slightly short one just looks a bit short).
---! Single named constant so Harry can tune it after actually looking at
---! it on his phone.
-BOTTOM_BAR_SEPARATOR: "________________________________"
+--! be measured exactly without rendering on a real device; 40 requested
+--! after 32 (itself picked from Telegram's ~48-monospace-char mobile-table
+--! convention and general ~35-45-char chat-bubble readability guidance)
+--! read as still a bit short on a real phone. Single named constant so
+--! Harry can tune it again after looking at it.
+BOTTOM_BAR_SEPARATOR: "________________________________________"
 
 --! Persistent bottom status bar: a horizontal rule followed by the
 --! progress bar — always appended after the tree/checklist content (see
