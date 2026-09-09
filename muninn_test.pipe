@@ -1171,7 +1171,7 @@ test "render_bottom_bar: nil-pct ergibt leeren String (keine Trennlinie ohne Bal
 
 test "render_bottom_bar: enthaelt Trennlinie und Balken"
     out: ls.render_bottom_bar 45
-    expect_eq (contains out "____________________") true "Trennlinie vorhanden"
+    expect_eq (contains out "________________________________") true "32 Zeichen breite Trennlinie vorhanden"
     expect_eq (contains out "████▒▒▒▒▒▒[45%]") true "Balken vorhanden"
 
 --! stage_checkpoint (Verbesserung): ersetzt den bedeutungslosen

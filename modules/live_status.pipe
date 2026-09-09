@@ -449,6 +449,22 @@ export fn render_progress_bar pct
         i: i + 1
     bar ++ "[" ++ (to_str p) ++ "%]"
 
+--! Separator width for render_bottom_bar below. Telegram's live status
+--! message is plain text (proportional font, no code-block/monospace
+--! wrapping — see the file-level comment on render_groups), so this can't
+--! be measured exactly without rendering on a real device; picked as a
+--! conservative estimate from two data points: (1) Telegram's own
+--! community convention for ASCII tables caps at 48 MONOSPACE characters
+--! for mobile/portrait before wrapping (code-block font, smaller than the
+--! regular message font); (2) general mobile chat-bubble readability
+--! guidance puts ~35-45 average-width characters per line on a ~360dp
+--! portrait screen at normal font size. 32 sits safely under both,
+--! erring narrow rather than risking the line wrapping (a wrapped
+--! separator looks broken; a slightly short one just looks a bit short).
+--! Single named constant so Harry can tune it after actually looking at
+--! it on his phone.
+BOTTOM_BAR_SEPARATOR: "________________________________"
+
 --! Persistent bottom status bar: a horizontal rule followed by the
 --! progress bar — always appended after the tree/checklist content (see
 --! make_swarm_updater), in ONE fixed spot at the very end of the message,
@@ -464,7 +480,7 @@ export fn render_bottom_bar pct
     bar: render_progress_bar pct
     if bar == ""
         return ""
-    "\n____________________\n" ++ bar
+    "\n" ++ BOTTOM_BAR_SEPARATOR ++ "\n" ++ bar
 
 --! Coarse pipeline "checkpoint" percentage for a non-plan run, based on
 --! which agent is currently active. planer/kritiker/registrator are exact
