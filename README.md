@@ -438,15 +438,26 @@ Schließen den committeten Schreibvorgang eines anderen, gleichzeitig laufenden
 Prozesses stillschweigend überschreiben (live reproduziert: eine über das Dashboard
 gespeicherte Erinnerung ging beim parallel laufenden Telegram-Bot verloren).
 
-**Fix**: `mem.open_locked`/`close_locked` umschließen jeden Datei-DB-Zugriff mit
-einer echten OS-Sperre (`file_lock`/`file_unlock`, ein neuer Pipe-Builtin —
-`flock` unter Unix, `LockFileEx` unter Windows). Die Sperre wird bewusst **nicht**
-um Telegrams 25-Sekunden-Long-Polling-Wartezeit gelegt, sondern nur um die
-tatsächlichen Lese-/Schreibzugriffe — sonst wäre das Dashboard während des Wartens
-praktisch blockiert. Nachteil: solange ein Kanal eine Nachricht aktiv verarbeitet
-(z.B. ein Gremium-Aufruf, der einige Sekunden dauert), wartet der jeweils andere
-Kanal kurz auf die Sperre — für ein persönliches Ein-Nutzer-Tool ein akzeptabler
-Kompromiss gegenüber stillem Datenverlust.
+**Ursprünglicher Fix (inzwischen wieder entfernt)**: `mem.open_locked`/`close_locked`
+umschlossen jeden Datei-DB-Zugriff mit einer echten OS-Sperre (`file_lock`/
+`file_unlock`, ein Pipe-Builtin — `flock` unter Unix, `LockFileEx` unter Windows).
+
+**Aktueller Stand**: diese Sperre wurde beim Scheduler-Umbau (Commit `a132de8`)
+wieder entfernt — sie hätte lange KI-/Netzwerk-Arbeit über einen gesamten
+Request hinweg blockiert, und ein Absturz vor dem `close_locked`-Unlock hätte
+sie dauerhaft hängen lassen (derselbe Grund, aus dem der Scheduler seither
+über `claim`/`release`/`recover` statt einer gehaltenen Sperre gegen doppelte
+Ausführung abgesichert ist). `open_locked`/`close_locked` sind seitdem reine
+Kurz-Zugriffs-Wrapper ohne echte prozessübergreifende Sperre — das reine-Pipe-
+`sqlite`-Modul selbst serialisiert nichts zwischen Prozessen. **Der oben
+beschriebene Datenverlust-Bug ist damit strukturell wieder offen**, sobald
+Telegram-Bot und Dashboard tatsächlich gleichzeitig laufen — aktuell ohne
+Live-Risiko, weil der `systemd`-Dienst ausschließlich den Telegram-Modus
+startet (`pipe muninn.pipe`, kein `web`) und das Dashboard nur ad hoc manuell
+gestartet wird. Wer beide Kanäle bewusst dauerhaft parallel betreiben will,
+braucht dafür wieder eine echte Sperre — diesmal nur um die tatsächlichen
+kurzen Lese-/Schreib-Phasen gelegt (die inzwischen ohnehin kurz sind, siehe
+`poll_once`), nicht mehr um einen ganzen Request.
 
 ### Seele (`memory.pipe`)
 
@@ -510,9 +521,12 @@ Ein **Thread pro Chat** (`threads`-Tabelle) sammelt den Gesprächsverlauf
 
 ### Konsolidierung („Traum", `memory.pipe`, P2)
 
-Ein periodischer Aufräum-/Verdichtungsjob, ausführbar per `pipe muninn.pipe consolidate`
-(z.B. via Cron — Pipe hat vor P4 keinen eigenen Scheduler) oder per Telegram-Befehl
-`/consolidate`:
+Ein periodischer Aufräum-/Verdichtungsjob — läuft **automatisch wöchentlich**
+über einen eigenen Scheduler-Tick (`gedaechtnis_konsolidieren`, siehe
+[Proaktivität](#proaktivität-schedulerpipe-p4)), zusätzlich weiterhin manuell
+per Telegram-Befehl `/consolidate` oder extern per `pipe muninn.pipe
+consolidate` (z.B. via Cron). Vorher lief das NIE automatisch — nur bei
+manuellem Anstoß:
 
 - **`consolidate_threads`** verdichtet fällige Threads (geschlossen, oder aktiv seit
   3 Tagen ohne neue Nachricht) zu je einer Zusammenfassungs-Erinnerung und löscht
@@ -526,6 +540,13 @@ Ein periodischer Aufräum-/Verdichtungsjob, ausführbar per `pipe muninn.pipe co
   ohne Chat-Kontext nutzt weiterhin fest 14/30.
 - **`prune_error_log`** räumt zusätzlich `error_log`-Einträge älter als 30 Tage
   auf (siehe [Selbst-Diagnose](#selbst-diagnose-error_log-selbstdiagnose-scheduler-tick)).
+- Derselbe wöchentliche Tick räumt außerdem erledigte/abgebrochene Zeilen
+  auf, die vorher unbegrenzt wuchsen: `sched.cleanup_old` (`scheduled`,
+  30 Tage), `dt.cleanup_old_jobs` (`docker_jobs`, 30 Tage — Status dort ist
+  KEIN sauberes Enum, `refresh_job_status` schreibt bei einem Fehlschlag den
+  dynamischen String `"failed (exit code N)"`, daher `status != 'running'`
+  statt einer `IN`-Liste, siehe Sicherheit → `sqlite`-Modul) und
+  `exe.cleanup_old_plans` (`plans`, 30 Tage).
 - **Bug gefixt**: das externe, reine-Pipe-`sqlite`-Modul wertet `datetime('now')`
   nicht aus (speichert wörtlich `"now"`) — `mem.now_ts` baut Zeitstempel seither
   selbst aus Pipes `now`/`format_time`.
@@ -685,7 +706,11 @@ oben):
   keine rohen Shell-/Datei-Builtins.
 - **Checkpoints** in SQLite (`plans`-Tabelle), resumefähig.
 - **Feedback-Loop**: bei Fehler wird der Plan revidiert (KI) bzw. der fehlgeschlagene
-  Schritt gestrichen (deterministischer Fallback) und erneut versucht.
+  Schritt gestrichen (deterministischer Fallback) und erneut versucht — begrenzt
+  auf `MAX_PLAN_REVISIONS` (5) Revisionen **insgesamt pro Plan**, über beliebig
+  viele `resume_plan`-Fortsetzungen hinweg (der Zähler wird in der `plans`-Zeile
+  mitgeführt); danach bricht der Plan sauber mit `state = 'failed'` ab statt
+  unbegrenzt weiter zu revidieren.
 - **`mcp_call`-Aktion** (P1): ruft ein per MCP angebundenes (oder lokales) Werkzeug direkt
   per Name auf — deterministisch, über den Pipe-Builtin `tool_call`, ohne dass dafür eine
   KI-Tool-Call-Schleife nötig wäre.
@@ -712,6 +737,11 @@ DB-Konkurrenz, trotzdem Sekunden-Präzision.
   ruft das periodisch auf.
 - **Feedback-Lernen**: 👍/👎-Buttons auf Antworten rufen `adjust_by_content`
   auf und heben/senken die Importance der (ggf. zuvor gespeicherten) Antwort.
+- **Konsolidierung**: wöchentlicher `gedaechtnis_konsolidieren`-Tick (04:30, 90
+  Minuten nach dem täglichen Workspace-Aufräumen um 03:00) ruft `mem.consolidate`
+  mit den Chat-Einstellungen des Besitzer-Chats auf und räumt nebenbei alte
+  `scheduled`/`docker_jobs`/`plans`-Zeilen auf, siehe
+  [Konsolidierung](#konsolidierung-traum-memorypipe-p2).
 
 Zeitzonen: Pipe hat keinen Timezone-Builtin (`format_time` arbeitet in UTC);
 `MUNINN_TZ_OFFSET` (Sekunden, z.B. `7200` für UTC+2) verschiebt die lokale
@@ -751,6 +781,16 @@ konfigurierten, aber noch inaktiven Server und kann einen davon selbst aktiviere
 erst im nächsten Versuch der gleichen Aufgabe, `handle_message` erkennt das
 (`mcp_activated` im Rückgabewert von `run_gremium_stream`) und wiederholt die Aufgabe
 automatisch genau einmal, sobald der Server wirklich verbunden ist.
+
+**Verbindungs-Cooldown bei Fehlschlag.** Ein dauerhaft kaputter Auto-Server
+(falsch konfiguriert, Prozess startet aber der Handshake schlägt fehl) wurde
+vorher bei JEDER passenden Nachricht erneut verbunden — der MCP-Handshake hat
+ein 120s-Timeout, konnte also jede treffende Nachricht wiederholt bis zu 120s
+blockieren, ohne Rückfall. `connect_one` merkt sich einen Fehlschlag jetzt 20
+Minuten lang (`FAILED_UNTIL`/`MCP_RECONNECT_COOLDOWN_SEC`, `mcp.pipe`) —
+`auto_servers_for_task` wählt einen Server in Cooldown nicht erneut aus, ein
+späterer erfolgreicher Connect (auch über `werkzeug_aktivieren`) löscht den
+Cooldown sofort wieder.
 
 **MCP-Registry-Suche mit deterministischer Genehmigung.** Kennt Muninn kein passendes
 Werkzeug für eine Anfrage, kann der `faktenwaechter` die offizielle MCP-Registry
@@ -832,6 +872,11 @@ Root-Zugriff auf den Host. `docker_tools.pipe` deckt den konkreten Bedarf
   Docker-Flag durchgereicht würde). `exec()` selbst tokenisiert über
   `splitShellWords` und ruft direkt auf (kein `sh -c`), die Regex-Prüfung ist
   trotzdem nötig für die Argument-Ebene.
+- **Globale Obergrenze** (`MAX_CONCURRENT_DOCKER_JOBS`, 5): zusätzlich zur
+  Pro-Chat-Sperre (unten) verhindert `dt.running_job_count` einen neuen
+  `docker_hintergrund_setup`-Job, sobald insgesamt schon 5 Jobs über ALLE Chats
+  hinweg laufen — vorher gab es nur die Pro-Chat-Grenze, kein Limit über
+  mehrere Chats/Gruppen hinweg.
 
 Nur der `werkzeug_docker`-Spezial-Agent bekommt diese beiden zusätzlichen
 lokalen Werkzeuge neben den MCP-Werkzeugen aus `docker`.
@@ -1421,8 +1466,10 @@ ebenfalls abschaltbar (siehe
 begrenzt.
 
 Bewusst NICHT an jeder einzelnen `catch`-Stelle verdrahtet: `tel_get_updates`
-(würde die DB-Sperre über einen Netzwerk-Wartezeitraum hinweg offen halten
-müssen, genau das Muster, das den früheren Total-Hänger verursacht hat) und
+(an dieser Stelle in `poll_once` ist gerade absichtlich kein DB-Handle offen —
+nur dafür eins zu öffnen würde bei einem transienten, sich selbst
+erholenden Netzwerk-Hänger die O(Datenbankgröße)-Open/Close-Kosten des
+reinen-Pipe-`sqlite`-Moduls auslösen, siehe Sicherheit → `sqlite`-Modul) und
 `parse_mcp_config` (läuft vor jeder DB-Initialisierung, kein Handle
 verfügbar) bleiben reine `print()`-Stellen wie zuvor.
 
@@ -1531,16 +1578,45 @@ gitignorierten `.env` gelesen.
   Fehler zu werfen). Betraf u.a. die Dedup-Prüfung in `add_memory` (musste auf
   Pipe-seitige Normalisierung statt SQL umgestellt werden) und ist der Grund, warum
   `mem.cost_summary` bewusst in Pipe selbst aggregiert statt SQL `GROUP BY`/`MAX` zu
-  vertrauen. Bei neuen `db_query`/`db_exec`-Aufrufen mit SQL-Funktionen: erst gegen eine
+  vertrauen. Auch der **`IN (...)`-Operator ist komplett wirkungslos** — liefert
+  live verifiziert IMMER null Treffer, selbst bei einem einzigen Wert, sowohl in
+  `SELECT` als auch `DELETE`/`UPDATE` — `state IN ('done', 'cancelled')` muss als
+  `state = 'done' OR state = 'cancelled'` geschrieben werden. Bei neuen
+  `db_query`/`db_exec`-Aufrufen mit SQL-Funktionen ODER `IN`: erst gegen eine
   Testdatenbank verifizieren, nicht blind vertrauen.
+- **`db_open`/`db_close` sind O(Datenbankgröße), nicht O(Änderung)**: das Modul
+  liest beim Öffnen die GESAMTE Datei in den Speicher und schreibt beim
+  Schließen die GESAMTE Datei neu (live gemessen: ~2,8s Open + ~1,4s Close
+  gegen die reale ~6MB `muninn.db`) — unabhängig davon, wie klein der
+  eigentliche Zugriff war. Der Poll-Loop (`poll_once`/`sched_tick`,
+  `muninn.pipe`) öffnet/schließt deshalb bewusst so selten wie möglich (Offset
+  nur lesen/schreiben, wenn er sich wirklich geändert hat; Scheduler-Timing
+  wird aus einem ohnehin schon offenen Handle mitgelesen statt extra
+  geöffnet) — vorher kostete ein rein untätiger Loop-Durchlauf mehrere volle
+  Open/Close-Zyklen, spürbar in durchgehend hoher CPU-Last und einer
+  spürbaren Verzögerung, bevor eine neue Telegram-Nachricht überhaupt erst
+  bearbeitet wurde.
 - **Web-Dashboard**: standardmäßig nur an `127.0.0.1` gebunden (`DASHBOARD_BIND`),
-  nicht an `0.0.0.0` — es hat keinen echten Auth-Mechanismus, nur ein optionales
-  `DASHBOARD_TOKEN` (Query-Param/Header). Für eine Bereitstellung über localhost
-  hinaus gehört zwingend ein Reverse-Proxy mit TLS + echter Authentifizierung davor.
-- **Datei-Sperre statt stillem Datenverlust**: `file_lock`/`file_unlock` (neuer
-  Pipe-Builtin) sichern jeden `muninn.db`-Zugriff prozessübergreifend ab, damit
-  Telegram-Bot und Dashboard gleichzeitig laufen können, ohne sich gegenseitig
-  Schreibvorgänge zu überschreiben (siehe Architektur → Nebenläufigkeit).
+  nicht an `0.0.0.0` — startet mit einer lauten Fehlermeldung erst gar nicht,
+  wenn `DASHBOARD_BIND` auf eine Nicht-Loopback-Adresse zeigt und
+  `DASHBOARD_TOKEN` leer ist (würde das Dashboard sonst ganz ohne Auth im
+  Netz exponieren). `auth_mw` (`dashboard.pipe`) prüft zusätzlich `Content-Type:
+  application/json` (lehnt alles andere mit 415 ab) und `Sec-Fetch-Site` (lehnt
+  `cross-site` mit 403 ab) — schließt einen Cross-Origin-POST mit
+  `Content-Type: text/plain` (löst kein CORS-Preflight aus) von einer beliebigen
+  im selben Browser offenen Webseite, der sonst trotz `DASHBOARD_TOKEN` den
+  vollen Gremium-Werkzeugkasten hätte fernsteuern können. Für eine
+  Bereitstellung über localhost hinaus gehört trotzdem zwingend ein
+  Reverse-Proxy mit TLS + echter Authentifizierung davor.
+- **Kein prozessübergreifender Schreibschutz mehr** für `muninn.db`: die
+  frühere `file_lock`/`file_unlock`-Sperre wurde beim Scheduler-Umbau entfernt
+  (siehe Architektur → Nebenläufigkeit) — Telegram-Bot und Dashboard dürfen
+  aktuell NICHT gleichzeitig gegen dieselbe Datenbank laufen, ohne Gefahr zu
+  laufen, dass ein Prozess den committeten Schreibvorgang des anderen
+  stillschweigend überschreibt. Kein Live-Risiko im aktuellen Betrieb (der
+  `systemd`-Dienst startet ausschließlich den Telegram-Modus), aber relevant,
+  falls das Dashboard je als dauerhaft laufender, paralleler Dienst betrieben
+  werden soll.
 - **Security-Ehrlichkeits-Regel (`SECURITY_HONESTY_RULE`)**: Sicherheits- und
   Systembefunde (Kernel-Versionen, Sandbox-/Container-Eigenschaften, Exploits,
   Seccomp/UID-Mapping/Egress-Gates …) dürfen von der KI nur als Fakt ausgegeben
