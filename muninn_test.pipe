@@ -221,6 +221,40 @@ test "tool_rezepte_suchen filtert tatsaechlich nach query"
     expect_eq (at rs 0) "REZEPT: BTC-Kurs — btc-echo.de abrufen" "Query grenzt auf das passende Rezept ein"
     mem.close h
 
+test "recipe_by_name findet ein Rezept exakt nach Namen, sonst nil"
+    h: mem.init_db ":memory:"
+    mem.add_memory h "REZEPT: werkzeug:dokument — nutze word_create_document einmal" "rezept" 4 "test" "werkzeug:dokument"
+    mem.add_memory h "REZEPT: werkzeug:praesentation — nutze ppt_create_presentation einmal" "rezept" 4 "test" "werkzeug:praesentation"
+    expect_eq (mem.recipe_by_name h "werkzeug:dokument") "REZEPT: werkzeug:dokument — nutze word_create_document einmal" "exakter Treffer nach Namen"
+    expect_eq (mem.recipe_by_name h "werkzeug:praesentation") "REZEPT: werkzeug:praesentation — nutze ppt_create_presentation einmal" "zwei verschiedene Namen mischen sich nicht"
+    expect_eq (mem.recipe_by_name h "werkzeug:nichtvorhanden") nil "kein Treffer ergibt nil"
+    mem.close h
+
+test "cap_recipe_text kappt Ueberlaenge auf RECIPE_MAX_CHARS"
+    kurz: "Ein kurzes Rezept."
+    expect_eq (mem.cap_recipe_text kurz) kurz "kurzer Text bleibt unveraendert"
+    lang: ""
+    i: 0
+    while i < 2500
+        lang: lang ++ "x"
+        i: i + 1
+    kapped: mem.cap_recipe_text lang
+    --! RECIPE_MAX_CHARS ist ein privates (nicht exportiertes) Modul-Konstant
+    --! in memory.pipe — hier bewusst als literale 2000 gespiegelt statt
+    --! importiert, siehe dessen Definition dort fuer die Begruendung des
+    --! Werts. Das Ellipsis-Zeichen "…" ist 3 Byte lang (UTF-8) — len/
+    --! substring sind in Pipe byte-indiziert, nicht rune-indiziert.
+    expect_eq (len kapped) 2003 "gekappt auf 2000 Byte + 3-Byte-Ellipsis"
+    expect_eq (substring kapped ((len kapped) - 3) (len kapped)) "…" "endet mit Ellipsis"
+
+test "erneutes rezept_speichern unter 'werkzeug:dokument' ersetzt die alte Fassung"
+    h: mem.init_db ":memory:"
+    mem.add_memory h ("REZEPT: werkzeug:dokument — " ++ (mem.cap_recipe_text "alte Fassung: nutzt Template-System, oft nie gespeichert")) "rezept" 4 "gremium" "werkzeug:dokument"
+    mem.add_memory h ("REZEPT: werkzeug:dokument — " ++ (mem.cap_recipe_text "neue Fassung: word_create_document, dann add_heading/add_paragraph, kein separater Speicher-Schritt")) "rezept" 4 "gremium" "werkzeug:dokument"
+    expect_eq (mem.memory_count h) 1 "immer noch nur eine Zeile, kein Duplikat"
+    expect_eq (mem.recipe_by_name h "werkzeug:dokument") "REZEPT: werkzeug:dokument — neue Fassung: word_create_document, dann add_heading/add_paragraph, kein separater Speicher-Schritt" "Fassung wurde ersetzt, nicht angehaengt"
+    mem.close h
+
 test "set_importance aendert die Importance einer Erinnerung"
     h: mem.init_db ":memory:"
     id: mem.add_memory h "Notiz" "fact" 2 "test" "x"

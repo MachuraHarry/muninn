@@ -5,6 +5,32 @@ import "sqlite"
 
 DB_PATH: "muninn.db"
 
+--! Hard ceiling on a stored recipe's length (see cap_recipe_text below).
+--! Recipes are meant to be upserted by name (kind="rezept" dedup branch
+--! above/below) rather than appended to, but that discipline is only a
+--! prompt instruction (see swarm.pipe's "werkzeug:<alias>" self-updating
+--! skill convention) — this caps the stored/injected size regardless of
+--! how well it's followed. Generous enough for a genuinely detailed skill
+--! (Slideshot's hand-written extra_note in swarm.pipe's specialist-
+--! building loop is ~4800 chars) while still bounding worst-case growth
+--! from a self-maintained recipe.
+RECIPE_MAX_CHARS: 2000
+
+--! Truncates recipe text to RECIPE_MAX_CHARS, appending an ellipsis if
+--! cut. Exported (rather than inlined into swarm.pipe's
+--! tool_rezept_speichern, which calls this) specifically so this
+--! guarantee has its own permanent regression test — tool_* fns in
+--! swarm.pipe are not exported and can't be called from muninn_test.pipe.
+--! Same byte-indexed truncation convention as commands.pipe's shorten — a
+--! rare cut mid multi-byte UTF-8 character right at the tail is a
+--! cosmetic risk, not a functional one, at this length.
+export fn cap_recipe_text s
+    if s == nil
+        return s
+    if (len s) > RECIPE_MAX_CHARS
+        return (substring s 0 RECIPE_MAX_CHARS) ++ "…"
+    s
+
 --! Only log ONCE per module INSTANCE whether embed() fundamentally fails
 --! (e.g. because embed() strictly needs OPENAI_API_KEY, which Muninn
 --! deliberately doesn't set — DeepSeek-only policy) — otherwise this would
@@ -1098,6 +1124,18 @@ export fn recipe_search h query k
         return top_k rows
     ordered: sorted_by scored (fn x: (0 - (get x "score")))
     top_k ordered
+
+--! Exact, deterministic lookup of ONE recipe by its exact name (unlike
+--! recipe_search's fuzzy keyword/embedding ranking above) — for code that
+--! needs to reliably find/inject a SPECIFIC named recipe (e.g. a
+--! "werkzeug:<alias>" self-maintained tool skill, see swarm.pipe's
+--! specialist-building loop), not the best-matching one for a free-text
+--! query. nil if no recipe with that exact name exists.
+export fn recipe_by_name h name
+    rows: db_query h ("SELECT content FROM memories WHERE kind = 'rezept' AND tags = '" ++ (sql_escape name) ++ "' LIMIT 1")
+    if (len rows) == 0
+        return nil
+    get (at rows 0) "content"
 
 --! Pure keyword search (deterministic, without embedding).
 export fn keyword_retrieve h query k
