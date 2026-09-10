@@ -187,29 +187,60 @@ export fn web_results query k
                 push results e
     results
 
+--! Worker for research's parallel fetch below — spawned once per URL, runs
+--! concurrently with its siblings. Returns its OWN independent result map
+--! (never mutates a shared Pipe Map/List — the pure-Pipe sqlite module and
+--! Pipe's own Map/List have no internal locking, so sharing one across
+--! goroutines would be unsafe; every function this touches — web_fetch,
+--! summarize — is network/AI-only, verified to never touch the database).
+--! Never raises (web_fetch/summarize's own try/catch already guarantee a
+--! plain "" on failure), so the caller's await never needs its own
+--! try/catch either.
+fn research_fetch_one url idx
+    text: web_fetch url
+    piece: {url: url, idx: idx, ok: false, text: ""}
+    if text != ""
+        s: ""
+        try
+            s: summarize text
+        catch
+            s: substring text 0 800
+        set piece "text" s
+        set piece "ok" true
+    piece
+
 --! Research orchestration: search -> fetch top N -> condense -> sources.
---! Returns {context, sources}.
+--! Returns {context, sources}. Fetches (each web_fetch+summarize) run
+--! CONCURRENTLY via spawn/await — was a strictly sequential loop before
+--! (up to 3 blocking fetch+summarize round-trips back to back); safe here
+--! specifically because this whole path never touches the database (see
+--! research_fetch_one's doc comment) and ai.ActiveProfile is a real
+--! atomic.Pointer (concurrent reads are fine, only concurrent .Store()
+--! would be a hazard, and nothing here calls that). Results are
+--! reassembled in the ORIGINAL result order after awaiting (not
+--! completion order), so numbering/source order is unchanged from before.
 export fn research query
     results: web_results query 5
-    ctx: ""
-    sources: []
+    n: 3
+    if (len results) < n
+        n: len results
+    futures: []
     i: 0
-    while i < 3 && i < (len results)
+    while i < n
         r: at results i
         u: get r "url"
         if u != nil && u != ""
-            text: web_fetch u
-            if text != ""
-                s: ""
-                try
-                    s: summarize text
-                catch
-                    s: substring text 0 800
-                ctx: ctx ++ "[" ++ (to_str (i + 1)) ++ "] " ++ s ++ "\n\n"
-                push sources u
-            else
-                push sources u
+            push futures (spawn research_fetch_one u (i + 1))
         i: i + 1
+    ctx: ""
+    sources: []
+    j: 0
+    while j < (len futures)
+        piece: await (at futures j)
+        if (get piece "ok")
+            ctx: ctx ++ "[" ++ (to_str (get piece "idx")) ++ "] " ++ (get piece "text") ++ "\n\n"
+        push sources (get piece "url")
+        j: j + 1
     out: {}
     set out "context" ctx
     set out "sources" sources
