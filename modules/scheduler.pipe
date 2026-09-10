@@ -43,6 +43,21 @@ export fn get_background_task h id
     else
         nil
 
+--! background_tasks rows are NEVER updated or deleted anywhere else in the
+--! codebase (confirmed live: a single stuck task accumulated 10+ rows over
+--! one hour, each hintergrund_fortsetzen call creating a fresh checkpoint
+--! instead of replacing the old one) — there is no "state" column to filter
+--! on like cleanup_old's scheduled-table rows, since a background_task's
+--! own completion is only ever judged by re-running the gremium, never
+--! recorded back onto this row. Deletes purely by age instead, same
+--! SCHED_RETENTION_SEC/cutoff pattern as cleanup_old above, same OR-based
+--! WHERE (irrelevant here with only one column to filter on, but kept for
+--! consistency — no IN() anywhere either way).
+export fn cleanup_old_background_tasks h now_sec
+    init_background_tasks h
+    cutoff: format_time (now_sec - SCHED_RETENTION_SEC) "2006-01-02 15:04:05"
+    db_exec h ("DELETE FROM background_tasks WHERE created < '" ++ (mem.sql_escape cutoff) ++ "'")
+
 --! Pure helper: first run of digits in a string (0 if none).
 fn leading_int s
     out: ""

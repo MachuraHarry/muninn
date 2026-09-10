@@ -1137,6 +1137,45 @@ export fn recipe_by_name h name
         return nil
     get (at rows 0) "content"
 
+--! Live-diagnosed: the daily "proaktiv" self-initiative job (muninn.pipe)
+--! had NO memory of its own prior messages, so a vague, unactionable
+--! open item (e.g. one born from lossy thread-consolidation, no file
+--! paths/no concrete next step) got re-surfaced verbatim day after day
+--! forever — the user replying "yes go ahead" landed in a fresh thread
+--! with no link back to what "it" even meant. Fixing the underlying
+--! task-loss (thread consolidation, file retention) is a much bigger,
+--! separate concern; this closes the immediate "keeps nagging with no
+--! way to act on it" loop deterministically: every sent proactive message
+--! is logged here (kind="proaktiv_log", tags=chat_id), and the job
+--! deterministically re-reads its own last few messages for the SAME
+--! chat before generating a new one, telling itself not to repeat a
+--! topic without genuine new progress — this doesn't depend on the AI
+--! choosing to search for its own history, unlike erinnerungen_suchen.
+export fn log_proaktiv h cid text
+    add_memory h text "proaktiv_log" 1 "proaktiv" (to_str cid)
+
+--! Most recent proactive messages sent to this chat, newest first,
+--! capped at n — deterministic exact match on tags=chat_id, no fuzzy
+--! scoring (mirrors recipe_by_name's reasoning: this needs a reliable
+--! "what did I already say", not a best-effort search result).
+export fn recent_proaktiv h cid n
+    rows: db_query h ("SELECT content FROM memories WHERE kind = 'proaktiv_log' AND tags = '" ++ (sql_escape (to_str cid)) ++ "' ORDER BY id DESC LIMIT " ++ (to_str n))
+    out: []
+    for r in rows
+        push out (get r "content")
+    out
+
+--! Same age-based retention as scheduler.pipe's cleanup_old/
+--! cleanup_old_background_tasks (SCHED_RETENTION_SEC-equivalent window;
+--! kept as a literal here since memory.pipe doesn't import scheduler.pipe
+--! and this table has nothing to do with the scheduled-jobs table this
+--! constant otherwise governs) — proaktiv_log rows are append-only
+--! (log_proaktiv above never dedups/updates in place), so without this
+--! they would accumulate forever exactly like background_tasks did.
+export fn cleanup_old_proaktiv_log h now_sec
+    cutoff: format_time (now_sec - 2592000) "2006-01-02 15:04:05"
+    db_exec h ("DELETE FROM memories WHERE kind = 'proaktiv_log' AND ts < '" ++ (sql_escape cutoff) ++ "'")
+
 --! Pure keyword search (deterministic, without embedding).
 export fn keyword_retrieve h query k
     terms: tokenize query

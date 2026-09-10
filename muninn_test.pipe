@@ -230,6 +230,35 @@ test "recipe_by_name findet ein Rezept exakt nach Namen, sonst nil"
     expect_eq (mem.recipe_by_name h "werkzeug:nichtvorhanden") nil "kein Treffer ergibt nil"
     mem.close h
 
+test "log_proaktiv/recent_proaktiv: neueste zuerst, Chats mischen sich nicht"
+    h: mem.init_db ":memory:"
+    mem.log_proaktiv h 111 "erste Nachricht"
+    mem.log_proaktiv h 111 "zweite Nachricht"
+    mem.log_proaktiv h 222 "andere Chat-Nachricht"
+    r1: mem.recent_proaktiv h 111 5
+    expect_eq (len r1) 2 "beide Nachrichten fuer Chat 111 gefunden"
+    expect_eq (at r1 0) "zweite Nachricht" "neueste zuerst"
+    expect_eq (at r1 1) "erste Nachricht" "aelteste zuletzt"
+    r2: mem.recent_proaktiv h 222 5
+    expect_eq (len r2) 1 "Chat 222 sieht nur seine eigene Nachricht"
+    r1_capped: mem.recent_proaktiv h 111 1
+    expect_eq (len r1_capped) 1 "n begrenzt die Anzahl"
+    mem.close h
+
+test "cleanup_old_proaktiv_log loescht nur alte Eintraege"
+    h: mem.init_db ":memory:"
+    now_sec: now
+    old_ts: format_time (now_sec - 2592001) "2006-01-02 15:04:05"
+    id_old: mem.add_memory h "alte proaktive Nachricht" "proaktiv_log" 1 "proaktiv" "333"
+    db_exec h ("UPDATE memories SET ts = '" ++ old_ts ++ "' WHERE id = " ++ (to_str id_old))
+    mem.log_proaktiv h 333 "frische proaktive Nachricht"
+    expect_eq (mem.memory_count h) 2 "beide Eintraege zunaechst vorhanden"
+    mem.cleanup_old_proaktiv_log h now_sec
+    remaining: mem.recent_proaktiv h 333 5
+    expect_eq (len remaining) 1 "nur die alte Nachricht wurde geloescht"
+    expect_eq (at remaining 0) "frische proaktive Nachricht" "die frische Nachricht blieb erhalten"
+    mem.close h
+
 test "cap_recipe_text kappt Ueberlaenge auf RECIPE_MAX_CHARS"
     kurz: "Ein kurzes Rezept."
     expect_eq (mem.cap_recipe_text kurz) kurz "kurzer Text bleibt unveraendert"
@@ -1047,6 +1076,21 @@ test "scheduler: create_background_task/get_background_task-Rundlauf"
     expect_eq (get t "task") "Beispielaufgabe" "Aufgabe wird korrekt gespeichert"
     expect_eq (get t "progress") "Schritt 1 erledigt, Schritt 2 fehlt" "Fortschritt wird korrekt gespeichert"
     expect_eq (sched.get_background_task h 99999) nil "unbekannte id liefert nil"
+    mem.close h
+
+test "cleanup_old_background_tasks loescht nur alte Zeilen"
+    h: mem.init_db ":memory:"
+    sched.init_background_tasks h
+    now_sec: now
+    old_ts: format_time (now_sec - 2592001) "2006-01-02 15:04:05"
+    fresh_ts: format_time now_sec "2006-01-02 15:04:05"
+    db_exec h ("INSERT INTO background_tasks (chat_id, task, progress, created, updated) VALUES ('1', 'alt', 'x', '" ++ old_ts ++ "', '" ++ old_ts ++ "')")
+    db_exec h ("INSERT INTO background_tasks (chat_id, task, progress, created, updated) VALUES ('1', 'frisch', 'x', '" ++ fresh_ts ++ "', '" ++ fresh_ts ++ "')")
+    expect_eq (get (at (db_query h "SELECT COUNT(*) AS c FROM background_tasks") 0) "c") 2 "beide Zeilen zunaechst vorhanden"
+    sched.cleanup_old_background_tasks h now_sec
+    remaining: db_query h "SELECT task FROM background_tasks"
+    expect_eq (len remaining) 1 "nur die alte Zeile wurde geloescht"
+    expect_eq (get (at remaining 0) "task") "frisch" "die frische Zeile blieb erhalten"
     mem.close h
 
 test "next_due_ms liefert Millisekunden bis zur nächsten Aufgabe (oder nil)"

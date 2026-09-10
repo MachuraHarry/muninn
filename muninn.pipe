@@ -2238,7 +2238,19 @@ fn sched_tick token allowed
                 --! regardless of what the model decides to route/say); this
                 --! wording is only the first line of defense to make the
                 --! correct routing the likely path in the first place.
-                prompt_proaktiv: "PROACTIVE IMPULSE (system-internal check — you were NOT addressed by the user; planer: this is a memory question, hand off to 'faktenwaechter' FIRST, never straight to 'registrator'): use 'erinnerungen_suchen' to look into your memory: are there open/started tasks, interrupted work, upcoming appointments, or important developments on topics that matter to the user — something the user themselves would bring up? If there's something IMPORTANT: write the short, concrete message to the user; if you find a task you should revisit at a specific time, plan that yourself with 'erinnerung_planen' or 'hintergrund_fortsetzen'. If there's NOTHING worth mentioning, OR you personally have no access to 'erinnerungen_suchen' and no other agent in this run already searched memory for you: reply ONLY with the single word NOTHING, with no other characters — NEVER explain internal tool/agent limitations to the user, that's an implementation detail, not a message worth sending."
+                --! Deterministic anti-repeat: the job used to have NO memory
+                --! of its OWN prior proactive messages, so a vague,
+                --! unactionable open item (e.g. born from lossy thread
+                --! consolidation with no file paths/concrete next step)
+                --! got re-surfaced almost verbatim day after day forever —
+                --! live-observed over several days on a stale Slideshot
+                --! delivery note. Injected here (not left to the AI
+                --! choosing to search for it) so it can't be skipped.
+                recent_proaktiv_msgs: mem.recent_proaktiv dbh cid 5
+                recent_proaktiv_note: ""
+                if (len recent_proaktiv_msgs) > 0
+                    recent_proaktiv_note: " Deine LETZTEN proaktiven Nachrichten an diesen Chat waren (neueste zuerst): " ++ (join recent_proaktiv_msgs " ||| ") ++ " — wiederhole KEIN darin schon genanntes Thema erneut, ausser es gibt seitdem ECHTEN NEUEN, konkreten Fortschritt. Betrifft ein offener Punkt eine frueher versprochene Datei-Lieferung (Bild/Dokument/Slideshot), die du nicht mehr auffinden/verifizieren kannst: sag das EINMAL ehrlich (z.B. 'die alten Dateien dazu existieren nicht mehr, muesste komplett neu erstellt werden') und erwaehne es DANACH nicht mehr von dir aus — warte auf eine Reaktion des Nutzers, biete es nicht wieder von selbst an."
+                prompt_proaktiv: "PROACTIVE IMPULSE (system-internal check — you were NOT addressed by the user; planer: this is a memory question, hand off to 'faktenwaechter' FIRST, never straight to 'registrator'): use 'erinnerungen_suchen' to look into your memory: are there open/started tasks, interrupted work, upcoming appointments, or important developments on topics that matter to the user — something the user themselves would bring up? If there's something IMPORTANT: write the short, concrete message to the user; if you find a task you should revisit at a specific time, plan that yourself with 'erinnerung_planen' or 'hintergrund_fortsetzen'. If there's NOTHING worth mentioning, OR you personally have no access to 'erinnerungen_suchen' and no other agent in this run already searched memory for you: reply ONLY with the single word NOTHING, with no other characters — NEVER explain internal tool/agent limitations to the user, that's an implementation detail, not a message worth sending." ++ recent_proaktiv_note
                 --! MUST be caught — see the identical comment in job_check
                 --! above. Without this, a failure here would skip the
                 --! mark_fired/continue below.
@@ -2270,6 +2282,7 @@ fn sched_tick token allowed
                         content_proaktiv: nil
                     if content_proaktiv != nil && (lower (trim content_proaktiv)) != "nothing" && (trim content_proaktiv) != ""
                         tel.tel_send_rich_message token (to_num cid) (cmd.shorten (trim content_proaktiv)) nil
+                        mem.log_proaktiv dbh cid (trim content_proaktiv)
                 catch e15
                     print ("proaktiv failed: " ++ (to_str e15))
                     mem.log_error dbh "proaktiv" (to_str e15)
@@ -2333,6 +2346,8 @@ fn sched_tick token allowed
                 cdays: mem.setting_consolidate_days dbh (to_str cid)
                 res: mem.consolidate dbh (get cdays "decay") (get cdays "forget")
                 sched.cleanup_old dbh now_sec
+                sched.cleanup_old_background_tasks dbh now_sec
+                mem.cleanup_old_proaktiv_log dbh now_sec
                 dt.cleanup_old_jobs dbh now_sec
                 exe.cleanup_old_plans dbh now_sec
                 print ("gedaechtnis_konsolidieren: " ++ (to_str res))
