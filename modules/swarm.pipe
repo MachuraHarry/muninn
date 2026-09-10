@@ -2319,9 +2319,31 @@ export fn init_gremium _
         --! Exactly one recipe per alias (recipe_by_name, not a fuzzy
         --! search), bounded by RECIPE_MAX_CHARS — this can never grow the
         --! prompt unboundedly the way an appended log would.
-        skill: mem.recipe_by_name (cur_dbh 0) ("werkzeug:" ++ alias)
-        if skill != nil
-            extra_note: extra_note ++ " GELERNTE FAEHIGKEIT (automatisch von dir selbst gepflegt, ersetzt sich bei neuen Erkenntnissen statt zu wachsen): " ++ skill
+        --! init_gremium (which runs this whole loop) is ALSO called from
+        --! setup_core (at boot) and ensure_mcp_for_task (on a task's FIRST
+        --! auto-connect) — both can run BEFORE run_gremium_stream has set
+        --! STATE["dbh"] for the CURRENT request, and STATE["dbh"] is never
+        --! cleared when a request's own dbh is closed at the end of its
+        --! handling — so cur_dbh 0 here can return either nil (nothing set
+        --! yet, e.g. at boot) OR a STALE handle already closed by a
+        --! PREVIOUS request (a plain nil-check does NOT catch this second
+        --! case, since a closed handle is still a non-nil object).
+        --! Live-diagnosed the hard way: this exact call, unguarded, threw
+        --! "Invalid database handle" from inside ensure_mcp_for_task,
+        --! uncaught until poll_once's outer handle_update catch — which
+        --! DOES catch it (so no crash), but that swallows the ENTIRE
+        --! message with no reply to the user, repeatedly, since every
+        --! message re-triggers the same stale handle. try/catch here
+        --! instead of a nil-check: this injection is a pure enhancement,
+        --! never worth failing (or silently eating) a whole message over.
+        try
+            skill_dbh: cur_dbh 0
+            if skill_dbh != nil
+                skill: mem.recipe_by_name skill_dbh ("werkzeug:" ++ alias)
+                if skill != nil
+                    extra_note: extra_note ++ " GELERNTE FAEHIGKEIT (automatisch von dir selbst gepflegt, ersetzt sich bei neuen Erkenntnissen statt zu wachsen): " ++ skill
+        catch e_skill
+            nil
         agent_name: "werkzeug_" ++ alias
         push specialist_names agent_name
         specialist_desc: specialist_desc ++ "- '" ++ agent_name ++ "': Werkzeuge aus '" ++ alias ++ "' (" ++ (join gtools ", ") ++ ")\n"
