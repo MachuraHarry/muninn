@@ -1617,18 +1617,18 @@ fn tel_finalize_after_tree token cid message_id text kb
 --! Appends up to 3 follow-up-suggestion button rows onto an existing
 --! keyboard (kb), reading them off a gremium result map's "suggestions"
 --! field (see STATE/run_gremium_stream in swarm.pipe, mirrors the
---! mcp_activated mechanism exactly). Each suggestion's FULL text is
---! encoded directly into its own button's callback_data ("sugg:" prefix)
---! rather than an index into a stored list — a self-contained button is
---! immune to a real bug the alternative would have: Telegram buttons
---! never expire, so a user could tap an OLDER suggestion button after
---! NEWER ones overwrote a per-chat-keyed store, silently getting the
---! WRONG text back. tool_folgevorschlaege_anzeigen already enforces the
---! 3-suggestion cap and a per-suggestion byte-length cap (Telegram's
---! 64-byte callback_data limit) — this helper trusts that and only
---! re-caps defensively. Safe to call with kb=nil, res=nil, or a res with
---! no/empty "suggestions" field (most gremium runs won't have called the
---! tool at all).
+--! mcp_activated mechanism exactly). Each entry is a {id, text} map (see
+--! tool_folgevorschlaege_anzeigen/SUGGESTION_STORE in swarm.pipe): the
+--! button LABEL is the full suggestion text (no longer squeezed into
+--! Telegram's 64-byte callback_data budget), while callback_data carries
+--! only the short numeric id ("sugg:" ++ id) — handle_callback's "sugg:"
+--! branch resolves it back to the text via grm.suggestion_lookup. Unlike
+--! embedding the text directly, this needs a lookup, but ids are minted
+--! once and never reused/reassigned (see SUGGESTION_STORE's doc comment),
+--! so an old button can never silently resolve to the WRONG text the way
+--! an index into a per-chat "latest suggestions" slot could — at worst, a
+--! very old (pruned) or pre-restart id resolves to nothing, which
+--! handle_callback turns into a clear "not available anymore" reply.
 fn append_suggestion_buttons kb res
     if kb == nil
         kb: []
@@ -1640,9 +1640,11 @@ fn append_suggestion_buttons kb res
     i: 0
     while i < (len suggestions) && i < 3
         s: at suggestions i
-        if s != nil && s != ""
+        id: get s "id"
+        text: get s "text"
+        if id != nil && text != nil && text != ""
             row: []
-            push row (tel.tel_button s ("sugg:" ++ s))
+            push row (tel.tel_button text ("sugg:" ++ (to_str id)))
             push kb row
         i: i + 1
     kb
@@ -1795,23 +1797,39 @@ fn handle_callback token dbh cbq allowed uid
                 else
                     tel_finalize_after_tree token cid message_id "Unfortunately I couldn't dig up anything more." kb
         return nil
-    --! Follow-up suggestion tap (see tool_folgevorschlaege_anzeigen in
-    --! swarm.pipe / append_suggestion_buttons above): callback_data carries
-    --! the full suggestion text directly (no index/lookup needed).
-    --! Deliberately does NOT use "txt" (the tapped-message/last-assistant-
-    --! message fallback used by save/up/down/more) — the embedded
-    --! suggestion text IS the next message. Builds the task EXACTLY like a
-    --! real incoming message (thread history + settings_prompt_prefix, see
-    --! handle_message above) WITHOUT the MSG_CTX-based sys_notes (reply/
-    --! group context) — those describe metadata of the LAST real incoming
-    --! Telegram message and would be irrelevant/potentially stale for a
-    --! synthetic button tap. Logged as a genuine "user" turn (mem.add_message
-    --! + mem.log_event, matching handle_message's own early logging) BEFORE
-    --! running the gremium — unlike "more"'s synthetic "dig deeper" wrapper,
-    --! this text IS meant to represent real user words. No ensure_mcp_for_task
-    --! here, same as "more" above — accepted existing limitation, not a new gap.
+    --! Follow-up suggestion tap (see tool_folgevorschlaege_anzeigen/
+    --! SUGGESTION_STORE in swarm.pipe / append_suggestion_buttons above):
+    --! callback_data carries only the short numeric suggestion id, resolved
+    --! back to its full text via grm.suggestion_lookup. Ids are never
+    --! reused/reassigned, so a resolvable id is always the button's own
+    --! original text (never a stale/unrelated one) — but the id CAN
+    --! legitimately fail to resolve (evicted after SUGGESTION_STORE_MAX
+    --! newer suggestions, or the process restarted since, as this store is
+    --! in-memory only), which the else branch below handles explicitly
+    --! instead of silently doing nothing. Deliberately does NOT use "txt"
+    --! (the tapped-message/last-assistant-message fallback used by
+    --! save/up/down/more) — the resolved suggestion text IS the next
+    --! message. Builds the task EXACTLY like a real incoming message
+    --! (thread history + settings_prompt_prefix, see handle_message above)
+    --! WITHOUT the MSG_CTX-based sys_notes (reply/group context) — those
+    --! describe metadata of the LAST real incoming Telegram message and
+    --! would be irrelevant/potentially stale for a synthetic button tap.
+    --! Logged as a genuine "user" turn (mem.add_message + mem.log_event,
+    --! matching handle_message's own early logging) BEFORE running the
+    --! gremium — unlike "more"'s synthetic "dig deeper" wrapper, this text
+    --! IS meant to represent real user words. No ensure_mcp_for_task here,
+    --! same as "more" above — accepted existing limitation, not a new gap.
     if (len data) > 5 && (substring data 0 5) == "sugg:"
-        suggestion_text: substring data 5 (len data)
+        sugg_id_str: substring data 5 (len data)
+        suggestion_text: nil
+        if sugg_id_str != nil && sugg_id_str != ""
+            try
+                suggestion_text: grm.suggestion_lookup (to_num sugg_id_str)
+            catch e
+                suggestion_text: nil
+        if suggestion_text == nil || suggestion_text == ""
+            tel.tel_send_message token cid "Dieser Vorschlag ist nicht mehr verfuegbar (z.B. nach einem Neustart) — bitte formuliere deine Frage direkt."
+            return nil
         if suggestion_text != nil && suggestion_text != ""
             tel.tel_send_chat_action token cid "typing"
             tid: mem.active_thread dbh cid
