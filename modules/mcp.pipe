@@ -229,18 +229,34 @@ export fn connect_servers servers
 export fn is_connected alias
     (get CONNECTED alias) == true
 
+--! Folds German umlauts to their ae/oe/ue/ss transliteration, matching the
+--! spelling convention used throughout this codebase's own keyword lists
+--! (.env's MCP_AUTO_SERVERS, e.g. "praesentation", "wie spaet",
+--! "entitaet", "oeffne die seite") — live-diagnosed: lower() does NOT
+--! transliterate umlauts, so a naturally-typed message containing real
+--! "Präsentation"/"spät"/"Entität" never matched those keywords at all,
+--! silently starving auto_servers_for_task below of most real-world hits
+--! for any server whose keywords contain an umlaut (the majority of the
+--! 19 currently configured servers).
+fn normalize_de s
+    r: lower s
+    r: replace_all r "ä" "ae"
+    r: replace_all r "ö" "oe"
+    r: replace_all r "ü" "ue"
+    replace_all r "ß" "ss"
+
 --! Selects MCP servers from a trusted auto-registry. An entry needs
 --! `keywords` and the normal server configuration.
 export fn auto_servers_for_task servers task now_sec
     out: []
-    low: lower task
+    low: normalize_de task
     for s in servers
         alias: get s "alias"
         matched: false
         words: get s "keywords"
         if words != nil
             for word in words
-                if contains low (lower word)
+                if contains low (normalize_de word)
                     matched: true
         if matched && alias != nil && (get CONNECTED alias) == nil && !(is_in_cooldown alias now_sec)
             push out s

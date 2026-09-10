@@ -846,6 +846,20 @@ test "auto_servers_for_task waehlt einen Server in Cooldown NICHT aus, nach Abla
     selected2: mcp.auto_servers_for_task [bad_server] "bitte cooldowntriggerwort aktivieren" (t0 + 1200 + 5)
     expect_eq (len selected2) 1 "nach Ablauf des Cooldowns wieder ausgewaehlt"
 
+--! Live-diagnostiziert: .env-Stichwoerter sind (wie der restliche Code-
+--! Kommentarstil) mit ae/oe/ue statt echten Umlauten geschrieben (z.B.
+--! "praesentation", "wie spaet") — lower() transliteriert Umlaute NICHT,
+--! also matchte eine ganz normal getippte Nachricht mit echtem Umlaut
+--! vorher NIE. Regressionstest fuer den normalize_de-Fix.
+test "auto_servers_for_task findet ein Stichwort trotz echtem Umlaut in der Nachricht"
+    praesentation_server: {alias: "umlaut_test_praesentation", type: "stdio", command: "/pfad/existiert/nicht/xyz987", args: [], keywords: ["praesentation"]}
+    zeit_server: {alias: "umlaut_test_zeit", type: "stdio", command: "/pfad/existiert/nicht/xyz987", args: [], keywords: ["wie spaet"]}
+    t0: now
+    sel1: mcp.auto_servers_for_task [praesentation_server] "Kannst du mir eine Präsentation erstellen?" t0
+    expect_eq (len sel1) 1 "echtes 'Präsentation' matcht das transliterierte Stichwort 'praesentation'"
+    sel2: mcp.auto_servers_for_task [zeit_server] "Wie spät ist es in Tokio?" t0
+    expect_eq (len sel2) 1 "echtes 'spät' matcht das transliterierte Stichwort 'wie spaet'"
+
 --! Web: DDG-Ergebnis-Parsing (deterministisches Fixture).
 test "parse_ddg extrahiert Titel und URLs"
     fixture: "x result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com&amp;rut=1\">Erster Titel</a> y result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org&amp;rut=2\">Zweiter Titel</a> z"
