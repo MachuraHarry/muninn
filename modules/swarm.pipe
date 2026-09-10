@@ -2028,8 +2028,12 @@ fn tool_bild_erstellen prompt
 export fn init_gremium _
     ai_tool "erinnerungen_suchen" "Fetch relevant memories from Muninn's long-term memory to support facts." {query: "Search query"} tool_erinnerungen_suchen
     ai_tool "merken" "Store an important, permanent piece of information about the user." {content: "Content", kind: "Category"} tool_merken
-    ai_tool "web_search" "Search the internet; returns titles and URLs of the top results." {query: "Search terms"} tool_web_search
-    ai_tool "web_fetch" "Fetch a web page and return its body text." {url: "Full URL"} tool_web_fetch
+    --! parallel_safe (5th arg): both tools are pure network calls (web.web_results/
+    --! web.web_fetch) that touch no database and no shared Pipe Map/List, so the
+    --! interpreter may run several of them concurrently when the model requests
+    --! multiple web_search/web_fetch calls in one round instead of one after another.
+    ai_tool "web_search" "Search the internet; returns titles and URLs of the top results." {query: "Search terms"} tool_web_search true
+    ai_tool "web_fetch" "Fetch a web page and return its body text." {url: "Full URL"} tool_web_fetch true
     ai_tool "merken_quelle" "Permanently store a piece of information obtained from the web, with its source URL." {content: "Information", source: "Source URL"} tool_merken_quelle
     ai_tool "erinnerung_planen" "Schedule a time-based reminder for the user (e.g. for appointments/obligations with a time reference)." {text: "What should be remembered, including a time reference in natural language"} tool_erinnerung_planen
     ai_tool "aufgabe_planen" "Schedules a REAL, autonomously-executed task for later — unlike 'erinnerung_planen' (which only sends a passive text reminder), this actually re-engages the full gremium (with tool access) at the given time and CARRIES OUT the task for real (e.g. 'post a message in Discord channel X', 'check for new GitHub issues and summarize'), then reports the result. Can be one-off ('in 30 seconds', 'tomorrow at 9am') or recurring ('daily at 8am', 'every hour') depending on how 'zeitpunkt' is phrased." {aufgabe: "What to actually DO when it fires — a complete, self-contained task description (not just a reminder text)", zeitpunkt: "When it should fire, in natural language — e.g. 'in 30 seconds', 'tomorrow at 9am', 'daily at 8am', 'every hour'"} tool_aufgabe_planen
