@@ -1160,6 +1160,13 @@ fn handle_message token cid text dbh allowed uid
                     abort_reason: get res3 "abort_reason"
                 else
                     answer: get res3 "content"
+                    --! res_final must reflect THIS run — folgevorschlaege_
+                    --! anzeigen's suggestions (and any other STATE-copied
+                    --! field, e.g. mcp_activated) live on res3, not the
+                    --! earlier attempt's map; without this, whichever run
+                    --! actually produced the real content (this retry) had
+                    --! its suggestions silently dropped at finalization.
+                    res_final: res3
                     ls.save_trace dbh cid res3
             catch e3
                 --! MUST overwrite `answer`, not just log — live-observed:
@@ -1235,6 +1242,7 @@ fn handle_message token cid text dbh allowed uid
                 push row2 (tel.tel_button "👍" "up")
                 push row2 (tel.tel_button "👎" "down")
                 push kb row2
+                kb: append_suggestion_buttons kb res_final
                 tel_finalize token cid message_id (cmd.shorten full) kb
     else
         mem.add_message dbh tid cid "assistant" answer
@@ -1250,6 +1258,7 @@ fn handle_message token cid text dbh allowed uid
         row3: []
         push row3 (tel.tel_button "📜 Verlauf" "gremium_log")
         push kb row3
+        kb: append_suggestion_buttons kb res_final
         tel_finalize_after_tree token cid message_id (cmd.shorten answer) kb
 
 --! Builds the on_update closure for run_gremium_stream: renders the REAL,
@@ -1605,6 +1614,39 @@ fn tel_finalize_after_tree token cid message_id text kb
         tel.tel_delete_message token cid message_id
     tel.tel_send_rich_message token cid text kb
 
+--! Appends up to 3 follow-up-suggestion button rows onto an existing
+--! keyboard (kb), reading them off a gremium result map's "suggestions"
+--! field (see STATE/run_gremium_stream in swarm.pipe, mirrors the
+--! mcp_activated mechanism exactly). Each suggestion's FULL text is
+--! encoded directly into its own button's callback_data ("sugg:" prefix)
+--! rather than an index into a stored list — a self-contained button is
+--! immune to a real bug the alternative would have: Telegram buttons
+--! never expire, so a user could tap an OLDER suggestion button after
+--! NEWER ones overwrote a per-chat-keyed store, silently getting the
+--! WRONG text back. tool_folgevorschlaege_anzeigen already enforces the
+--! 3-suggestion cap and a per-suggestion byte-length cap (Telegram's
+--! 64-byte callback_data limit) — this helper trusts that and only
+--! re-caps defensively. Safe to call with kb=nil, res=nil, or a res with
+--! no/empty "suggestions" field (most gremium runs won't have called the
+--! tool at all).
+fn append_suggestion_buttons kb res
+    if kb == nil
+        kb: []
+    if res == nil
+        return kb
+    suggestions: get res "suggestions"
+    if suggestions == nil || (len suggestions) == 0
+        return kb
+    i: 0
+    while i < (len suggestions) && i < 3
+        s: at suggestions i
+        if s != nil && s != ""
+            row: []
+            push row (tel.tel_button s ("sugg:" ++ s))
+            push kb row
+        i: i + 1
+    kb
+
 --! /settings menu: display text + inline keyboard, the current values sit
 --! directly on the buttons (tapping rotates to the next value, see
 --! handle_callback below "settings_*"). Both functions read the same four
@@ -1745,12 +1787,79 @@ fn handle_callback token dbh cbq allowed uid
                 row: []
                 push row (tel.tel_button "📜 Verlauf" "gremium_log")
                 push kb row
+                kb: append_suggestion_buttons kb res
                 if a != nil && a != ""
                     tid: mem.active_thread dbh cid
                     mem.add_message dbh tid cid "assistant" a
                     tel_finalize_after_tree token cid message_id (cmd.shorten a) kb
                 else
                     tel_finalize_after_tree token cid message_id "Unfortunately I couldn't dig up anything more." kb
+        return nil
+    --! Follow-up suggestion tap (see tool_folgevorschlaege_anzeigen in
+    --! swarm.pipe / append_suggestion_buttons above): callback_data carries
+    --! the full suggestion text directly (no index/lookup needed).
+    --! Deliberately does NOT use "txt" (the tapped-message/last-assistant-
+    --! message fallback used by save/up/down/more) — the embedded
+    --! suggestion text IS the next message. Builds the task EXACTLY like a
+    --! real incoming message (thread history + settings_prompt_prefix, see
+    --! handle_message above) WITHOUT the MSG_CTX-based sys_notes (reply/
+    --! group context) — those describe metadata of the LAST real incoming
+    --! Telegram message and would be irrelevant/potentially stale for a
+    --! synthetic button tap. Logged as a genuine "user" turn (mem.add_message
+    --! + mem.log_event, matching handle_message's own early logging) BEFORE
+    --! running the gremium — unlike "more"'s synthetic "dig deeper" wrapper,
+    --! this text IS meant to represent real user words. No ensure_mcp_for_task
+    --! here, same as "more" above — accepted existing limitation, not a new gap.
+    if (len data) > 5 && (substring data 0 5) == "sugg:"
+        suggestion_text: substring data 5 (len data)
+        if suggestion_text != nil && suggestion_text != ""
+            tel.tel_send_chat_action token cid "typing"
+            tid: mem.active_thread dbh cid
+            mem.add_message dbh tid cid "user" suggestion_text
+            mem.log_event dbh (to_str cid) suggestion_text "chat"
+            hist: mem.thread_history dbh tid 12
+            task: suggestion_text
+            if (len hist) > 0
+                task: "Bisheriger Gespraechsverlauf (aeltester zuerst, ungekuerzt):\n" ++ (mem.format_history hist) ++ "\nAktuelle Nachricht: " ++ suggestion_text
+            task: (mem.settings_prompt_prefix dbh (to_str cid)) ++ task
+            message_id: nil
+            ph: tel.tel_send_message token cid "🧠 Thinking..."
+            if (get ph "ok") == true
+                message_id: get (get ph "result") "message_id"
+            on_update: make_swarm_updater token cid message_id dbh
+            round_check: make_round_check token cid allowed dbh uid
+            setup_sandbox all_mcp_servers
+            res: nil
+            crashed: false
+            try
+                res: grm.run_gremium_stream dbh cid task on_update round_check
+            catch e
+                print ("run_gremium_stream failed (sugg, attempt 1): " ++ (to_str e))
+                mem.log_error dbh "run_gremium_stream_sugg" (to_str e)
+                setup_sandbox all_mcp_servers
+                try
+                    res: grm.run_gremium_stream dbh cid task on_update round_check
+                catch e2
+                    print ("run_gremium_stream failed (sugg, attempt 2, giving up): " ++ (to_str e2))
+                    mem.log_error dbh "run_gremium_stream_sugg" (to_str e2)
+                    crashed: true
+            if crashed
+                tel_finalize token cid message_id "Something went technically wrong (e.g. a brief connection drop to the AI provider) — please send your request again and I'll retry." nil
+            else if (get res "aborted") == true
+                tel_finalize token cid message_id ("🛑 " ++ (get res "abort_reason")) nil
+            else
+                a: get res "content"
+                ls.save_trace dbh cid res
+                kb: []
+                row: []
+                push row (tel.tel_button "📜 Verlauf" "gremium_log")
+                push kb row
+                kb: append_suggestion_buttons kb res
+                if a != nil && a != ""
+                    mem.add_message dbh tid cid "assistant" a
+                    tel_finalize_after_tree token cid message_id (cmd.shorten a) kb
+                else
+                    tel_finalize_after_tree token cid message_id "Unfortunately I couldn't come up with anything." kb
         return nil
     if data == "up"
         if txt != nil
