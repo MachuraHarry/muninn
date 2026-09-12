@@ -830,8 +830,26 @@ AUFGABE_MAX_PENDING: 20
 --! proaktiv, selbstdiagnose, workspace_aufraeumen, email_check,
 --! calendar_check, goal_tick) whose "note" field is just an internal id or
 --! nothing user-facing at all. Used by tool_aufgabe_loeschen/
---! tool_eigene_aufgaben_auflisten below.
+--! tool_eigene_aufgaben_auflisten below, and by '/reminders' (muninn.pipe)
+--! via is_aufgabe_kind.
 AUFGABE_ACTIONABLE_KINDS: ["reminder", "eigene_aufgabe", "briefing"]
+
+--! Whether a scheduled.kind is one of the actionable ones above — exported
+--! so '/reminders' (muninn.pipe) can split its display into "your own
+--! tasks" vs. "internal system jobs" without duplicating this list.
+export fn is_aufgabe_kind kind
+    for k in AUFGABE_ACTIONABLE_KINDS
+        if k == kind
+            return true
+    false
+
+--! German label for an actionable scheduled.kind, for display.
+export fn aufgabe_kind_label kind
+    if kind == "eigene_aufgabe"
+        return "Eigene Aufgabe"
+    if kind == "briefing"
+        return "Briefing"
+    "Erinnerung"
 
 --! Tool: PROPOSES a REAL, autonomously-executed task for later — unlike
 --! 'erinnerung_planen' (which only sends a passive text reminder), once
@@ -886,13 +904,7 @@ fn tool_aufgabe_planen aufgabe zeitpunkt
         return "Es sind bereits " ++ (to_str AUFGABE_MAX_PENDING) ++ " eigene Aufgaben offen — erst welche abschliessen/loeschen lassen (siehe /reminders oder 'aufgabe_loeschen'), bevor eine neue geplant wird."
     tzo: get STATE "tz_offset"
     parsed: sched.parse_zeitpunkt zeitpunkt now tzo
-    rt: "einmalig"
-    if (get parsed "repeat") == "hourly"
-        rt: "stuendlich"
-    if (get parsed "repeat") == "daily"
-        rt: "taeglich"
-    if (get parsed "repeat") == "weekly"
-        rt: "woechentlich"
+    rt: sched.repeat_label (get parsed "repeat")
     text: "🗓 Vorgeschlagene eigene Aufgabe:\n\n" ++ aufgabe ++ "\n\nFaellig: " ++ (format_time ((get parsed "due") + tzo) "2006-01-02 15:04:05") ++ " (" ++ rt ++ ")\n\nEinplanen?"
     kb: []
     row: []
@@ -938,11 +950,7 @@ fn tool_aufgabe_loeschen id
     if found == nil
         return "Keine offene Aufgabe/Erinnerung mit der Nummer #" ++ (to_str nid) ++ " in diesem Chat gefunden — siehe /reminders fuer die aktuelle Liste."
     fkind: get found "kind"
-    is_actionable: false
-    for k in AUFGABE_ACTIONABLE_KINDS
-        if k == fkind
-            is_actionable: true
-    if !is_actionable
+    if !(is_aufgabe_kind fkind)
         return "#" ++ (to_str nid) ++ " ist ein interner Hintergrund-Job (" ++ fkind ++ "), kein loeschbarer Termin/Task — dafuer '/stop' bzw. 'docker_jobs_abbrechen' nutzen."
     --! Owner-gate only for eigene_aufgabe (the autonomous, tool-using
     --! kind) — reminder/briefing creation itself is NOT owner-gated
@@ -973,16 +981,12 @@ fn tool_eigene_aufgaben_auflisten _
     n: 0
     for r in rows
         rkind: get r "kind"
-        is_actionable: false
-        for k in AUFGABE_ACTIONABLE_KINDS
-            if k == rkind
-                is_actionable: true
-        if is_actionable
+        if is_aufgabe_kind rkind
             n: n + 1
-            out: out ++ "#" ++ (to_str (get r "id")) ++ " [" ++ rkind ++ "] " ++ (get r "note") ++ " — faellig " ++ (format_time ((get r "due_ts") + tzo) "2006-01-02 15:04:05")
+            out: out ++ "#" ++ (to_str (get r "id")) ++ " [" ++ (aufgabe_kind_label rkind) ++ "] " ++ (get r "note") ++ " — faellig " ++ (format_time ((get r "due_ts") + tzo) "02.01.2006 15:04")
             rrepeat: get r "repeat"
             if rrepeat != nil && rrepeat != ""
-                out: out ++ " (wiederholt: " ++ rrepeat ++ ")"
+                out: out ++ " (wiederholt: " ++ (sched.repeat_label rrepeat) ++ ")"
             out: out ++ "\n"
     if n == 0
         return "Aktuell sind keine eigenen Aufgaben/Erinnerungen/Briefings fuer diesen Chat geplant."

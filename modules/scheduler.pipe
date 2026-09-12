@@ -199,6 +199,19 @@ export fn list h chat_id
 export fn cancel h id
     init_scheduler h
     db_exec h ("UPDATE scheduled SET state = 'cancelled' WHERE id = " ++ (to_str id))
+
+--! German label for a scheduled row's raw "repeat" value — shared by
+--! tool_aufgabe_planen/resolve_aufgabe_proposal (swarm.pipe/muninn.pipe)
+--! and '/reminders' (muninn.pipe), which used to each duplicate this
+--! same if-chain.
+export fn repeat_label rep
+    if rep == "hourly"
+        return "stuendlich"
+    if rep == "daily"
+        return "taeglich"
+    if rep == "weekly"
+        return "woechentlich"
+    "einmalig"
     "ok"
 
 --! Retention window for cleanup_old below — the "auditability" tradeoff

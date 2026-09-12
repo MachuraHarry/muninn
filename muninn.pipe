@@ -368,14 +368,7 @@ fn resolve_aufgabe_proposal token dbh cid approved
         tel.tel_send_message token cid "Vorschlag konnte nicht gelesen werden — nicht eingeplant."
         return nil
     sched.schedule dbh "eigene_aufgabe" (to_str cid) aufgabe due rep
-    rt: "einmalig"
-    if rep == "hourly"
-        rt: "stuendlich"
-    if rep == "daily"
-        rt: "taeglich"
-    if rep == "weekly"
-        rt: "woechentlich"
-    tel.tel_send_message token cid ("✅ Eingeplant fuer " ++ (format_time (due + tz_offset) "2006-01-02 15:04:05") ++ " (" ++ rt ++ ").")
+    tel.tel_send_message token cid ("✅ Eingeplant fuer " ++ (format_time (due + tz_offset) "2006-01-02 15:04:05") ++ " (" ++ (sched.repeat_label rep) ++ ").")
     nil
 
 --! Checks whether a chat ID is allowed to be served (empty whitelist = allow all).
@@ -851,14 +844,49 @@ fn handle_message token cid text dbh allowed uid
         else
             tel.tel_send_message token cid t
         return nil
+    --! Redesigned after direct feedback: the old flat list mixed real,
+    --! deletable tasks with internal bookkeeping rows that show up with
+    --! an empty note (calendar_check/email_check/proaktiv/...) and
+    --! wrapped awkwardly for long eigene_aufgabe descriptions. Splits into
+    --! "your own, deletable" (grm.is_aufgabe_kind — same list
+    --! aufgabe_loeschen itself enforces, so what's shown here is always
+    --! exactly what CAN be deleted) vs. a one-line summary of internal
+    --! jobs (never individually actionable, so no point itemizing them
+    --! with due dates the user can't do anything about).
     if low == "/reminders"
         rows: sched.list dbh cid
-        if (len rows) == 0
-            tel.tel_send_message token cid "No open reminders or briefings scheduled."
+        own: []
+        internal_kinds: []
+        for r in rows
+            rkind: get r "kind"
+            if grm.is_aufgabe_kind rkind
+                push own r
+            else
+                already: false
+                for k in internal_kinds
+                    if k == rkind
+                        already: true
+                if !already
+                    push internal_kinds rkind
+        if (len own) == 0 && (len internal_kinds) == 0
+            tel.tel_send_message token cid "Aktuell sind keine Aufgaben, Erinnerungen oder Hintergrund-Jobs geplant."
         else
-            out: "Open reminders/briefings:\n"
-            for r in rows
-                out: out ++ "• #" ++ (to_str (get r "id")) ++ " [" ++ (get r "kind") ++ "] " ++ (get r "note") ++ " — on " ++ (format_time ((get r "due_ts") + tz_offset) "2006-01-02 15:04:05") ++ "\n"
+            out: ""
+            if (len own) > 0
+                out: out ++ "📌 Deine Aufgaben & Erinnerungen (" ++ (to_str (len own)) ++ "):\n"
+                for r in own
+                    note: get r "note"
+                    if (len note) > 90
+                        note: (substring note 0 90) ++ "…"
+                    out: out ++ "#" ++ (to_str (get r "id")) ++ " [" ++ (grm.aufgabe_kind_label (get r "kind")) ++ "] " ++ note ++ " — faellig " ++ (format_time ((get r "due_ts") + tz_offset) "02.01.2006 15:04")
+                    rrepeat: get r "repeat"
+                    if rrepeat != nil && rrepeat != ""
+                        out: out ++ " (" ++ (sched.repeat_label rrepeat) ++ ")"
+                    out: out ++ "\nZum Loeschen: 'aufgabe_loeschen' bzw. \"loesch Aufgabe #" ++ (to_str (get r "id")) ++ "\"\n"
+            if (len internal_kinds) > 0
+                if out != ""
+                    out: out ++ "\n"
+                out: out ++ "⚙️ Interne System-Jobs (laufen automatisch weiter, nicht einzeln loeschbar): " ++ (join internal_kinds ", ")
             tel.tel_send_message token cid (cmd.shorten out)
         return nil
     if low == "/briefing stop"
