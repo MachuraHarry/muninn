@@ -334,6 +334,50 @@ fn resolve_plan_proposal token dbh cid approved allowed
     mem.meta_set dbh ("active_plan:" ++ (to_str cid)) ""
     nil
 
+--! Resolves the single pending self-scheduled-TASK proposal (mem meta key
+--! "pending_aufgabe", see tool_aufgabe_planen in swarm.pipe) — shape
+--! mirrors resolve_mcp_proposal above, NOT resolve_plan_proposal: unlike
+--! an approved plan, an approved self-task doesn't run anything live now,
+--! it only persists a scheduler row for a future tick (sched_tick's
+--! "eigene_aufgabe" branch actually carries it out later). Shared by
+--! handle_callback's "aufgabe_yes"/"aufgabe_no" button taps AND
+--! handle_message's/make_round_check's deterministic pending-aufgabe
+--! gates, so a typed "ja"/"nein" behaves identically to tapping the
+--! button — same rationale as the other two proposal gates.
+fn resolve_aufgabe_proposal token dbh cid approved
+    raw: mem.meta_get dbh "pending_aufgabe"
+    if raw == nil || raw == ""
+        tel.tel_send_message token cid "Dieser Vorschlag ist nicht mehr gueltig."
+        return nil
+    mem.meta_set dbh "pending_aufgabe" ""
+    if !approved
+        tel.tel_send_message token cid "Verstanden, nicht eingeplant."
+        return nil
+    prop: nil
+    try
+        prop: parse_json raw
+    catch
+        prop: nil
+    if prop == nil
+        tel.tel_send_message token cid "Vorschlag konnte nicht gelesen werden — nicht eingeplant."
+        return nil
+    aufgabe: get prop "aufgabe"
+    due: get prop "due"
+    rep: get prop "repeat"
+    if aufgabe == nil || due == nil
+        tel.tel_send_message token cid "Vorschlag konnte nicht gelesen werden — nicht eingeplant."
+        return nil
+    sched.schedule dbh "eigene_aufgabe" (to_str cid) aufgabe due rep
+    rt: "einmalig"
+    if rep == "hourly"
+        rt: "stuendlich"
+    if rep == "daily"
+        rt: "taeglich"
+    if rep == "weekly"
+        rt: "woechentlich"
+    tel.tel_send_message token cid ("✅ Eingeplant fuer " ++ (format_time (due + tz_offset) "2006-01-02 15:04:05") ++ " (" ++ rt ++ ").")
+    nil
+
 --! Checks whether a chat ID is allowed to be served (empty whitelist = allow all).
 fn is_allowed cid allowed
     if allowed == nil || allowed == ""
@@ -814,7 +858,7 @@ fn handle_message token cid text dbh allowed uid
         else
             out: "Open reminders/briefings:\n"
             for r in rows
-                out: out ++ "• [" ++ (get r "kind") ++ "] " ++ (get r "note") ++ " — on " ++ (format_time ((get r "due_ts") + tz_offset) "2006-01-02 15:04:05") ++ "\n"
+                out: out ++ "• #" ++ (to_str (get r "id")) ++ " [" ++ (get r "kind") ++ "] " ++ (get r "note") ++ " — on " ++ (format_time ((get r "due_ts") + tz_offset) "2006-01-02 15:04:05") ++ "\n"
             tel.tel_send_message token cid (cmd.shorten out)
         return nil
     if low == "/briefing stop"
@@ -976,6 +1020,19 @@ fn handle_message token cid text dbh allowed uid
             resolve_plan_proposal token dbh cid false allowed
             return nil
         tel.tel_send_message token cid "Du hast noch einen offenen Plan zur Bestaetigung — antworte erst mit Ja/Nein oder tippe den Button an, dann kuemmere ich mich um deine naechste Anfrage."
+        return nil
+    --! Deterministic pending-AUFGABE-proposal gate (see tool_aufgabe_planen/
+    --! resolve_aufgabe_proposal) — identical rationale/shape as the two
+    --! gates right above it.
+    pending_aufgabe: mem.meta_get dbh "pending_aufgabe"
+    if pending_aufgabe != nil && pending_aufgabe != ""
+        if low == "ja" || low == "yes" || low == "y" || low == "✅"
+            resolve_aufgabe_proposal token dbh cid true
+            return nil
+        if low == "nein" || low == "no" || low == "n" || low == "❌"
+            resolve_aufgabe_proposal token dbh cid false
+            return nil
+        tel.tel_send_message token cid "Du hast noch eine offene Aufgaben-Anfrage zur Bestaetigung — antworte erst mit Ja/Nein oder tippe den Button an, dann kuemmere ich mich um deine naechste Anfrage."
         return nil
     if is_mcp_server_question low
         names: list_configured_mcp_aliases 0
@@ -1561,6 +1618,20 @@ fn make_round_check token cid allowed dbh uid
                             else
                                 tel.tel_send_message token cid "Du hast noch einen offenen Plan zur Bestaetigung — antworte erst mit Ja/Nein oder tippe den Button an, dann kuemmere ich mich um deine naechste Anfrage."
                             continue
+                        --! Identical rationale as the two pending checks
+                        --! right above — see tool_aufgabe_planen/
+                        --! resolve_aufgabe_proposal.
+                        pending_aufgabe: mem.meta_get dbh "pending_aufgabe"
+                        if pending_aufgabe != nil && pending_aufgabe != ""
+                            push (get state "injected_ids") this_uid
+                            mem.mark_injected dbh this_uid
+                            if low == "ja" || low == "yes" || low == "y" || low == "✅"
+                                resolve_aufgabe_proposal token dbh cid true
+                            else if low == "nein" || low == "no" || low == "n" || low == "❌"
+                                resolve_aufgabe_proposal token dbh cid false
+                            else
+                                tel.tel_send_message token cid "Du hast noch eine offene Aufgaben-Anfrage zur Bestaetigung — antworte erst mit Ja/Nein oder tippe den Button an, dann kuemmere ich mich um deine naechste Anfrage."
+                            continue
                         push (get state "injected_ids") this_uid
                         mem.mark_injected dbh this_uid
                         ack: tel.tel_send_message token cid ("👀 Got it, working it in: *" ++ (ls.truncate_status txt 200) ++ "*")
@@ -1938,6 +2009,14 @@ fn handle_callback token dbh cbq allowed uid
     if data == "plan_no"
         resolve_plan_proposal token dbh cid false allowed
         return nil
+    --! Aufgabe proposal (see tool_aufgabe_planen in swarm.pipe) — same
+    --! shape as the MCP/Plan buttons right above.
+    if data == "aufgabe_yes"
+        resolve_aufgabe_proposal token dbh cid true
+        return nil
+    if data == "aufgabe_no"
+        resolve_aufgabe_proposal token dbh cid false
+        return nil
     --! /settings menu (see settings_menu_text/settings_kb above): each
     --! button rotates its OWN setting to the next value (setting_cycle in
     --! memory.pipe) and rebuilds the menu directly in the same message
@@ -2127,10 +2206,14 @@ fn sched_tick token allowed
                 on_update_bg: make_swarm_updater token cid nil dbh
                 round_check_bg: make_round_check token cid allowed dbh nil
                 res: grm.run_gremium_stream dbh cid continuation on_update_bg round_check_bg
+                tid_bg: mem.active_thread dbh cid
                 if (get res "aborted") == true
-                    tel.tel_send_message token (to_num cid) ("🛑 " ++ (get res "abort_reason"))
+                    abort_msg: "🛑 " ++ (get res "abort_reason")
+                    tel.tel_send_message token (to_num cid) abort_msg
+                    mem.add_message dbh tid_bg cid "assistant" abort_msg
                 else
                     tel.tel_send_rich_message token (to_num cid) (get res "content") nil
+                    mem.add_message dbh tid_bg cid "assistant" (get res "content")
                 mem.close dbh
                 sched_finalize item "cancel" now_sec
             catch e13
@@ -2168,10 +2251,14 @@ fn sched_tick token allowed
                 on_update_bg2: make_swarm_updater token cid nil dbh
                 round_check_bg2: make_round_check token cid allowed dbh nil
                 res2: grm.run_gremium_stream dbh cid continuation2 on_update_bg2 round_check_bg2
+                tid_bg2: mem.active_thread dbh cid
                 if (get res2 "aborted") == true
-                    tel.tel_send_message token (to_num cid) ("🛑 " ++ (get res2 "abort_reason"))
+                    abort_msg2: "🛑 " ++ (get res2 "abort_reason")
+                    tel.tel_send_message token (to_num cid) abort_msg2
+                    mem.add_message dbh tid_bg2 cid "assistant" abort_msg2
                 else
                     tel.tel_send_rich_message token (to_num cid) (get res2 "content") nil
+                    mem.add_message dbh tid_bg2 cid "assistant" (get res2 "content")
                 mem.close dbh
                 sched_finalize item "cancel" now_sec
             catch e14
@@ -2193,7 +2280,17 @@ fn sched_tick token allowed
             --! timer" for exactly this kind of request without actually
             --! scheduling anything at all — this closes that gap for real.
             setup_sandbox all_mcp_servers
-            continuation3: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "This is a SELF-SCHEDULED task you (or the user, via 'aufgabe_planen') set up earlier for exactly this moment. Task: " ++ msg ++ ". Carry it out now for real (call whatever tools are actually needed) and report the concrete result to the user — never claim it's done without having actually called the necessary tools."
+            --! Live-diagnosed real incident: an unattended "eigene_aufgabe"
+            --! firing produced a detailed, confident-sounding report
+            --! (specific Discord message ids, a bot tag, an error code,
+            --! a claimed third-party feature request) that turned out to
+            --! be entirely unverifiable against anything actually stored —
+            --! no human was there in real time to catch/challenge it, the
+            --! way a live chat reply would be. Made explicit here rather
+            --! than trusting the shared RESULT_HONESTY_RULE/
+            --! VERIFY_CLAIM_RULE alone, since those evidently didn't
+            --! prevent this once already for exactly this kind of run.
+            continuation3: (mem.settings_prompt_prefix dbh (to_str cid)) ++ "This is a SELF-SCHEDULED task you (or the user, via 'aufgabe_planen') set up earlier for exactly this moment. Task: " ++ msg ++ ". Carry it out now for real (call whatever tools are actually needed) and report the concrete result to the user — never claim it's done without having actually called the necessary tools. IMPORTANT: this is an UNATTENDED run — no human is watching live to immediately catch a wrong claim, unlike a normal chat reply. Inventing plausible-sounding specifics (message ids, error codes, contact/usernames, exact numbers) instead of honestly reporting a tool failure or uncertainty is a known, serious failure mode specifically for this kind of run. 'I attempted X but hit an error' / 'I could not verify Y' is always preferable to a confident but unverified narrative."
             --! MUST be caught — see the identical comment in job_check above.
             --! Left pending on failure for a
             --! one-off entry, so it's naturally retried next tick instead of
@@ -2201,11 +2298,32 @@ fn sched_tick token allowed
             try
                 on_update_bg5: make_swarm_updater token cid nil dbh
                 round_check_bg5: make_round_check token cid allowed dbh nil
-                res3: grm.run_gremium_stream dbh cid continuation3 on_update_bg5 round_check_bg5
+                --! Coarse, generalizable honesty backstop — mirrors
+                --! proaktiv's proaktiv_search_state above, but "eigene_aufgabe"
+                --! has no single fixed tool to check for (the whole point is
+                --! it can need an arbitrary tool), so this can only catch the
+                --! degenerate case of a detailed report with ZERO real tool
+                --! calls behind it — exactly the pattern the live incident
+                --! showed. It cannot catch a wrong/irrelevant tool call still
+                --! wrapped in a fabricated narrative — that's not generically
+                --! detectable, not oversold as fixed here.
+                aufgabe_tool_state: {called: false}
+                fn on_update_bg5_tracked agent event detail args_json round max_rounds
+                    if event == "tool"
+                        set aufgabe_tool_state "called" true
+                    on_update_bg5 agent event detail args_json round max_rounds
+                res3: grm.run_gremium_stream dbh cid continuation3 on_update_bg5_tracked round_check_bg5
+                tid_bg5: mem.active_thread dbh cid
                 if (get res3 "aborted") == true
-                    tel.tel_send_message token (to_num cid) ("🛑 " ++ (get res3 "abort_reason"))
+                    abort_msg3: "🛑 " ++ (get res3 "abort_reason")
+                    tel.tel_send_message token (to_num cid) abort_msg3
+                    mem.add_message dbh tid_bg5 cid "assistant" abort_msg3
                 else
-                    tel.tel_send_rich_message token (to_num cid) (get res3 "content") nil
+                    content3: get res3 "content"
+                    if !(get aufgabe_tool_state "called") && content3 != nil && content3 != ""
+                        content3: "⚠️ Hinweis: in diesem Lauf wurde kein Werkzeug aufgerufen — folgender Bericht ist NICHT verifiziert:\n\n" ++ content3
+                    tel.tel_send_rich_message token (to_num cid) content3 nil
+                    mem.add_message dbh tid_bg5 cid "assistant" content3
                 mem.close dbh
                 sched_finalize item "fire" now_sec
             catch e17

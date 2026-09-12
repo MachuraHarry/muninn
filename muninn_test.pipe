@@ -945,6 +945,34 @@ test "schedule/due/mark_fired: einmalige Aufgabe wird erledigt"
     expect_eq (len (sched.due h 2000)) 0 "nach mark_fired nicht mehr fällig"
     mem.close h
 
+test "sched.list liefert nur pending Zeilen des richtigen Chats, mit id"
+    h: mem.init_db ":memory:"
+    sched.init_scheduler h
+    id1: sched.schedule h "reminder" "42" "Erinnerung A" 1000 ""
+    id2: sched.schedule h "eigene_aufgabe" "42" "Discord-DMs pruefen" 2000 "daily"
+    sched.schedule h "reminder" "99" "Anderer Chat" 3000 ""
+    rows: sched.list h "42"
+    expect_eq (len rows) 2 "nur die zwei Zeilen fuer Chat 42"
+    expect_eq (get (at rows 0) "id") id1 "erste Zeile hat ihre echte id"
+    expect_eq (get (at rows 0) "kind") "reminder" "erste Zeile: reminder"
+    expect_eq (get (at rows 1) "id") id2 "zweite Zeile hat ihre echte id"
+    expect_eq (get (at rows 1) "note") "Discord-DMs pruefen" "zweite Zeile: note korrekt"
+    expect_eq (get (at rows 1) "repeat") "daily" "zweite Zeile: repeat korrekt"
+    mem.close h
+
+test "sched.cancel entfernt eine Zeile aus sched.list und sched.due, ist idempotent"
+    h: mem.init_db ":memory:"
+    sched.init_scheduler h
+    id: sched.schedule h "eigene_aufgabe" "42" "Taeglicher Job" 1000 "daily"
+    expect_eq (len (sched.list h "42")) 1 "Zeile zunaechst vorhanden"
+    expect_eq (len (sched.due h 1000)) 1 "und faellig"
+    sched.cancel h id
+    expect_eq (len (sched.list h "42")) 0 "nach cancel nicht mehr in der Liste"
+    expect_eq (len (sched.due h 1000)) 0 "nach cancel nicht mehr faellig"
+    sched.cancel h id
+    expect_eq (len (sched.list h "42")) 0 "zweiter cancel-Aufruf auf dieselbe id wirft nicht und aendert nichts"
+    mem.close h
+
 test "scheduler claim verhindert doppelte Ausfuehrung und release gibt zurueck"
     h: mem.init_db ":memory:"
     id: sched.schedule h "reminder" "42" "Test" 1000 ""
