@@ -371,6 +371,64 @@ fn resolve_aufgabe_proposal token dbh cid approved
     tel.tel_send_message token cid ("✅ Eingeplant fuer " ++ (format_time (due + tz_offset) "2006-01-02 15:04:05") ++ " (" ++ (sched.repeat_label rep) ++ ").")
     nil
 
+--! Builds the '/reminders' view as a Rich-Message markdown string plus one
+--! delete button per actionable row — shared by the '/reminders' command
+--! and the "cancel_sched:" callback (see handle_callback below), so a tap
+--! re-renders EXACTLY the same view instead of duplicating this logic or
+--! drifting out of sync with it.
+--! Capped at 15 delete buttons (Telegram allows far more, but this
+--! matches the existing precedent elsewhere in this file — 3 for
+--! follow-up suggestions, 20 via /goals' own query cap) — any row beyond
+--! that still appears in the text, just without its own button; it stays
+--! deletable via chat ("loesch Aufgabe #<id>").
+fn render_reminders dbh cid tz_offset
+    rows: sched.list dbh cid
+    own: []
+    internal_kinds: []
+    for r in rows
+        rkind: get r "kind"
+        if grm.is_aufgabe_kind rkind
+            push own r
+        else
+            already: false
+            for k in internal_kinds
+                if k == rkind
+                    already: true
+            if !already
+                push internal_kinds rkind
+    if (len own) == 0 && (len internal_kinds) == 0
+        return {text: "Aktuell sind keine Aufgaben, Erinnerungen oder Hintergrund-Jobs geplant.", kb: nil}
+    text: ""
+    kb: []
+    if (len own) > 0
+        text: text ++ "📌 **Deine Aufgaben & Erinnerungen** (" ++ (to_str (len own)) ++ ")\n\n"
+        i: 0
+        while i < (len own)
+            r: at own i
+            note: get r "note"
+            if (len note) > 90
+                note: (substring note 0 90) ++ "…"
+            meta: grm.aufgabe_kind_label (get r "kind")
+            rrepeat: get r "repeat"
+            if rrepeat != nil && rrepeat != ""
+                meta: meta ++ " · _" ++ (sched.repeat_label rrepeat) ++ "_"
+            text: text ++ "**#" ++ (to_str (get r "id")) ++ "** · " ++ meta ++ "\n"
+            text: text ++ "Faellig: " ++ (format_time ((get r "due_ts") + tz_offset) "02.01.2006 15:04") ++ "\n"
+            text: text ++ note ++ "\n\n"
+            if i < 15
+                row: []
+                push row (tel.tel_button ("🗑 #" ++ (to_str (get r "id"))) ("cancel_sched:" ++ (to_str (get r "id"))))
+                push kb row
+            i: i + 1
+        if (len own) > 15
+            text: text ++ "_(nur die ersten 15 haben einen Loesch-Button — weitere per \"loesch Aufgabe #ID\" im Chat)_\n\n"
+    if (len internal_kinds) > 0
+        text: text ++ "⚙️ **Interne System-Jobs**\n_(laufen automatisch weiter, nicht einzeln loeschbar)_\n"
+        text: text ++ (join internal_kinds ", ")
+    if (len kb) == 0
+        kb: nil
+    {text: text, kb: kb}
+
 --! Checks whether a chat ID is allowed to be served (empty whitelist = allow all).
 fn is_allowed cid allowed
     if allowed == nil || allowed == ""
@@ -844,50 +902,14 @@ fn handle_message token cid text dbh allowed uid
         else
             tel.tel_send_message token cid t
         return nil
-    --! Redesigned after direct feedback: the old flat list mixed real,
-    --! deletable tasks with internal bookkeeping rows that show up with
-    --! an empty note (calendar_check/email_check/proaktiv/...) and
-    --! wrapped awkwardly for long eigene_aufgabe descriptions. Splits into
-    --! "your own, deletable" (grm.is_aufgabe_kind — same list
-    --! aufgabe_loeschen itself enforces, so what's shown here is always
-    --! exactly what CAN be deleted) vs. a one-line summary of internal
-    --! jobs (never individually actionable, so no point itemizing them
-    --! with due dates the user can't do anything about).
+    --! Rich-Message rendering + one delete button per row (see
+    --! render_reminders above) — direct feedback that the plain-text
+    --! version, even split into sections, still wasn't formatted/
+    --! structured enough and had no way to act on an entry without
+    --! typing a separate command.
     if low == "/reminders"
-        rows: sched.list dbh cid
-        own: []
-        internal_kinds: []
-        for r in rows
-            rkind: get r "kind"
-            if grm.is_aufgabe_kind rkind
-                push own r
-            else
-                already: false
-                for k in internal_kinds
-                    if k == rkind
-                        already: true
-                if !already
-                    push internal_kinds rkind
-        if (len own) == 0 && (len internal_kinds) == 0
-            tel.tel_send_message token cid "Aktuell sind keine Aufgaben, Erinnerungen oder Hintergrund-Jobs geplant."
-        else
-            out: ""
-            if (len own) > 0
-                out: out ++ "📌 Deine Aufgaben & Erinnerungen (" ++ (to_str (len own)) ++ "):\n"
-                for r in own
-                    note: get r "note"
-                    if (len note) > 90
-                        note: (substring note 0 90) ++ "…"
-                    out: out ++ "#" ++ (to_str (get r "id")) ++ " [" ++ (grm.aufgabe_kind_label (get r "kind")) ++ "] " ++ note ++ " — faellig " ++ (format_time ((get r "due_ts") + tz_offset) "02.01.2006 15:04")
-                    rrepeat: get r "repeat"
-                    if rrepeat != nil && rrepeat != ""
-                        out: out ++ " (" ++ (sched.repeat_label rrepeat) ++ ")"
-                    out: out ++ "\nZum Loeschen: 'aufgabe_loeschen' bzw. \"loesch Aufgabe #" ++ (to_str (get r "id")) ++ "\"\n"
-            if (len internal_kinds) > 0
-                if out != ""
-                    out: out ++ "\n"
-                out: out ++ "⚙️ Interne System-Jobs (laufen automatisch weiter, nicht einzeln loeschbar): " ++ (join internal_kinds ", ")
-            tel.tel_send_message token cid (cmd.shorten out)
+        view: render_reminders dbh cid tz_offset
+        tel.tel_send_rich_message token cid (cmd.shorten (get view "text")) (get view "kb")
         return nil
     if low == "/briefing stop"
         rows: sched.list dbh cid
@@ -2044,6 +2066,40 @@ fn handle_callback token dbh cbq allowed uid
         return nil
     if data == "aufgabe_no"
         resolve_aufgabe_proposal token dbh cid false
+        return nil
+    --! /reminders per-row delete button (see render_reminders above).
+    --! sched.cancel itself does NOT filter by chat_id, so — exactly like
+    --! tool_aufgabe_loeschen in swarm.pipe — the ownership check happens
+    --! HERE, by first finding the id in sched.list dbh cid (chat-scoped):
+    --! never call sched.cancel on an id parsed straight from callback_data
+    --! without this lookup, or a crafted/stale id could cancel another
+    --! chat's row. eigene_aufgabe additionally needs an owner check that
+    --! doesn't otherwise exist in handle_callback — "uid" here is
+    --! Telegram's update_id, NOT the tapping user, so the tapper's real
+    --! id has to come straight from the callback_query's own "from" field,
+    --! mirroring handle_update's compute_full_rights call exactly.
+    if (len data) > 13 && (substring data 0 13) == "cancel_sched:"
+        csid: to_num (substring data 13 (len data))
+        if csid != nil
+            rows_cs: sched.list dbh cid
+            found_cs: nil
+            for r in rows_cs
+                if (get r "id") == csid
+                    found_cs: r
+            if found_cs != nil
+                fkind_cs: get found_cs "kind"
+                may_delete: true
+                if fkind_cs == "eigene_aufgabe"
+                    from_cs: get cbq "from"
+                    from_id_cs: nil
+                    if from_cs != nil
+                        from_id_cs: get from_cs "id"
+                    sender_is_owner_cs: is_allowed from_id_cs allowed
+                    may_delete: compute_full_rights dbh cid sender_is_owner_cs
+                if may_delete
+                    sched.cancel dbh csid
+        view_cs: render_reminders dbh cid tz_offset
+        tel.tel_edit_rich_message_kb token cid message_id (cmd.shorten (get view_cs "text")) (get view_cs "kb")
         return nil
     --! /settings menu (see settings_menu_text/settings_kb above): each
     --! button rotates its OWN setting to the next value (setting_cycle in
